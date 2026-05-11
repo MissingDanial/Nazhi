@@ -22,7 +22,7 @@ V1 不接入云端 AI、语义搜索、语音转文字和短视频模块。
 使用 Android Studio 打开本目录：
 
 ```text
-C:\Users\Administrator.BF-202003301653\Desktop\codes\self_knowledge\nazhi-android
+.\nazhi-android
 ```
 
 首次打开后执行 Gradle Sync。当前工程已按 AGP 9.1.0 编写，AGP 9.1 官方兼容 Gradle 9.3.1、JDK 17、API 36.1。
