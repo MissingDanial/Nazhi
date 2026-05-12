@@ -17,10 +17,12 @@ import androidx.compose.ui.Modifier
 import com.nazhi.app.core.repository.NazhiRepository
 import com.nazhi.app.feature.calendar.CalendarRoute
 import com.nazhi.app.feature.inbox.InboxRoute
+import com.nazhi.app.feature.knowledge.KnowledgeRoute
 
 private enum class MainTab {
     TODAY,
-    CALENDAR
+    CALENDAR,
+    KNOWLEDGE
 }
 
 @Composable
@@ -53,6 +55,12 @@ fun NazhiHomeRoute(
                     icon = { Text(text = "历") },
                     label = { Text(text = "日历") }
                 )
+                NavigationBarItem(
+                    selected = selectedTab == MainTab.KNOWLEDGE,
+                    onClick = { selectedTab = MainTab.KNOWLEDGE },
+                    icon = { Text(text = "知") },
+                    label = { Text(text = "知识库") }
+                )
             }
         }
     ) { innerPadding ->
@@ -71,6 +79,8 @@ fun NazhiHomeRoute(
                 )
 
                 MainTab.CALENDAR -> CalendarRoute(repository = repository)
+
+                MainTab.KNOWLEDGE -> KnowledgeRoute(repository = repository)
             }
         }
     }

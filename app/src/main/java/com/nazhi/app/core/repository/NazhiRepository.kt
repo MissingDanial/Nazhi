@@ -1,11 +1,15 @@
 package com.nazhi.app.core.repository
 
+import com.nazhi.app.core.model.EmbeddingRecord
 import com.nazhi.app.core.model.IntentType
 import com.nazhi.app.core.model.DaySummary
+import com.nazhi.app.core.model.DayKnowledgeStatus
 import com.nazhi.app.core.model.KnowledgeEntry
+import com.nazhi.app.core.model.KnowledgeEntryDraft
 import com.nazhi.app.core.model.Note
 import com.nazhi.app.core.model.NoteStatus
 import com.nazhi.app.core.model.ReviewSession
+import com.nazhi.app.core.model.SemanticSearchResult
 import kotlinx.coroutines.flow.Flow
 
 interface NazhiRepository {
@@ -40,6 +44,12 @@ interface NazhiRepository {
 
     fun observeKnowledgeEntries(): Flow<List<KnowledgeEntry>>
 
+    fun observeKnowledgeEntriesForDate(date: String): Flow<List<KnowledgeEntry>>
+
+    fun observeKnowledgeDraftsForDate(date: String): Flow<List<KnowledgeEntryDraft>>
+
+    fun observeDayKnowledgeStatus(date: String): Flow<DayKnowledgeStatus>
+
     fun observeKnowledgeEntriesByIntent(intentType: IntentType): Flow<List<KnowledgeEntry>>
 
     fun searchKnowledgeEntries(query: String): Flow<List<KnowledgeEntry>>
@@ -47,6 +57,24 @@ interface NazhiRepository {
     suspend fun getKnowledgeEntry(id: String): KnowledgeEntry?
 
     suspend fun saveKnowledgeEntry(entry: KnowledgeEntry)
+
+    suspend fun organizeNotesForDate(date: String): Int
+
+    suspend fun submitKnowledgeDraft(draftId: String): KnowledgeEntry?
+
+    suspend fun submitAllKnowledgeDraftsForDate(date: String): Int
+
+    suspend fun indexKnowledgeEntry(entryId: String): Boolean
+
+    suspend fun indexPendingKnowledgeEntries(): Int
+
+    fun observeEmbeddingCount(): Flow<Int>
+
+    suspend fun saveEmbeddingRecord(record: EmbeddingRecord)
+
+    suspend fun generateMissingMockEmbeddings(): Int
+
+    suspend fun searchSimilarKnowledgeEntries(query: String, topK: Int = 5): List<SemanticSearchResult>
 
     fun observeReviewSessions(): Flow<List<ReviewSession>>
 

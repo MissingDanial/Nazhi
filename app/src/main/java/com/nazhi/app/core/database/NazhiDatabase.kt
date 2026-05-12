@@ -7,9 +7,13 @@ import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.nazhi.app.core.database.dao.EmbeddingDao
+import com.nazhi.app.core.database.dao.KnowledgeEntryDraftDao
 import com.nazhi.app.core.database.dao.KnowledgeEntryDao
 import com.nazhi.app.core.database.dao.NoteDao
 import com.nazhi.app.core.database.dao.ReviewSessionDao
+import com.nazhi.app.core.database.entity.EmbeddingRecordEntity
+import com.nazhi.app.core.database.entity.KnowledgeEntryDraftEntity
 import com.nazhi.app.core.database.entity.KnowledgeEntryEntity
 import com.nazhi.app.core.database.entity.NoteEntity
 import com.nazhi.app.core.database.entity.ReviewSessionEntity
@@ -18,16 +22,20 @@ import com.nazhi.app.core.database.entity.ReviewSessionEntity
     entities = [
         NoteEntity::class,
         KnowledgeEntryEntity::class,
-        ReviewSessionEntity::class
+        KnowledgeEntryDraftEntity::class,
+        ReviewSessionEntity::class,
+        EmbeddingRecordEntity::class
     ],
-    version = 2,
+    version = 4,
     exportSchema = true
 )
 @TypeConverters(NazhiTypeConverters::class)
 abstract class NazhiDatabase : RoomDatabase() {
     abstract fun noteDao(): NoteDao
     abstract fun knowledgeEntryDao(): KnowledgeEntryDao
+    abstract fun knowledgeEntryDraftDao(): KnowledgeEntryDraftDao
     abstract fun reviewSessionDao(): ReviewSessionDao
+    abstract fun embeddingDao(): EmbeddingDao
 
     companion object {
         private const val DATABASE_NAME = "nazhi.db"
@@ -38,7 +46,7 @@ abstract class NazhiDatabase : RoomDatabase() {
                 NazhiDatabase::class.java,
                 DATABASE_NAME
             )
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .build()
         }
 
@@ -77,6 +85,81 @@ abstract class NazhiDatabase : RoomDatabase() {
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS index_knowledge_entries_confirmedDate ON knowledge_entries(confirmedDate)"
                 )
+            }
+        }
+
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS embedding_records (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        ownerType TEXT NOT NULL,
+                        ownerId TEXT NOT NULL,
+                        chunkIndex INTEGER NOT NULL,
+                        textHash TEXT NOT NULL,
+                        model TEXT NOT NULL,
+                        dimensions INTEGER NOT NULL,
+                        precision TEXT NOT NULL,
+                        vectorBlob BLOB NOT NULL,
+                        vectorNorm REAL,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS index_embedding_records_ownerType_ownerId_model_chunkIndex
+                    ON embedding_records(ownerType, ownerId, model, chunkIndex)
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_embedding_records_ownerType ON embedding_records(ownerType)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_embedding_records_ownerId ON embedding_records(ownerId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_embedding_records_textHash ON embedding_records(textHash)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_embedding_records_model ON embedding_records(model)")
+            }
+        }
+
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE knowledge_entries ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE knowledge_entries ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
+                db.execSQL("ALTER TABLE knowledge_entries ADD COLUMN sourceNoteIds TEXT NOT NULL DEFAULT '[]'")
+                db.execSQL("ALTER TABLE knowledge_entries ADD COLUMN indexStatus TEXT NOT NULL DEFAULT 'PENDING'")
+                db.execSQL(
+                    """
+                    UPDATE knowledge_entries
+                    SET sourceNoteIds = '["' || noteId || '"]'
+                    WHERE sourceNoteIds = '[]' AND noteId != ''
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_knowledge_entries_indexStatus ON knowledge_entries(indexStatus)"
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS knowledge_entry_drafts (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        date TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        summary TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        intentType TEXT NOT NULL,
+                        tags TEXT NOT NULL,
+                        sourceNoteIds TEXT NOT NULL,
+                        evidenceQuotes TEXT NOT NULL,
+                        insight TEXT,
+                        confidence REAL NOT NULL,
+                        needsReview INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_knowledge_entry_drafts_date ON knowledge_entry_drafts(date)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_knowledge_entry_drafts_status ON knowledge_entry_drafts(status)")
             }
         }
     }

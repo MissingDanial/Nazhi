@@ -10,5 +10,9 @@ data class KnowledgeEntry(
     val createdAt: Long,
     val createdDate: String,
     val confirmedAt: Long,
-    val confirmedDate: String
+    val confirmedDate: String,
+    val summary: String = "",
+    val tags: List<String> = emptyList(),
+    val sourceNoteIds: List<String> = if (noteId.isBlank()) emptyList() else listOf(noteId),
+    val indexStatus: KnowledgeIndexStatus = KnowledgeIndexStatus.PENDING
 )

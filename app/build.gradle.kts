@@ -1,8 +1,41 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("com.google.devtools.ksp")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
+}
+
+val localProperties = Properties().apply {
+    val localFile = rootProject.file("local.properties")
+    if (localFile.exists()) {
+        localFile.inputStream().use { input -> load(input) }
+    }
+    val backendEnvFile = rootProject.file("../nazhi-backend/.env")
+    if (backendEnvFile.exists()) {
+        backendEnvFile.readLines().forEach { rawLine ->
+            val line = rawLine.trim()
+            if (line.isNotEmpty() && !line.startsWith("#") && "=" in line) {
+                val key = line.substringBefore("=").trim()
+                val value = line.substringAfter("=").trim()
+                putIfAbsent(key, value)
+            }
+        }
+    }
+}
+
+fun localConfig(name: String, fallback: String): String {
+    return providers.gradleProperty(name).orNull
+        ?: providers.environmentVariable(name).orNull
+        ?: localProperties.getProperty(name)
+        ?: fallback
+}
+
+fun escaped(value: String): String {
+    return value
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
 }
 
 android {
@@ -15,10 +48,22 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+
+        buildConfigField(
+            "String",
+            "NAZHI_BACKEND_BASE_URL",
+            "\"${escaped(localConfig("NAZHI_BACKEND_BASE_URL", "http://10.0.2.2:8787"))}\""
+        )
+        buildConfigField(
+            "String",
+            "NAZHI_DEV_TOKEN",
+            "\"${escaped(localConfig("NAZHI_DEV_TOKEN", "change-me"))}\""
+        )
     }
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     compileOptions {

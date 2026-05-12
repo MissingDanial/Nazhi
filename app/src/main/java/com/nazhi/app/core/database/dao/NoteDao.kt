@@ -44,6 +44,19 @@ interface NoteDao {
     @Query(
         """
         SELECT * FROM notes
+        WHERE createdDate = :date
+          AND status != :deletedStatus
+        ORDER BY createdAt DESC
+        """
+    )
+    suspend fun getNotesForDate(
+        date: String,
+        deletedStatus: NoteStatus = NoteStatus.DELETED
+    ): List<NoteEntity>
+
+    @Query(
+        """
+        SELECT * FROM notes
         WHERE createdDate < :date
           AND status = :pendingStatus
         ORDER BY createdAt DESC

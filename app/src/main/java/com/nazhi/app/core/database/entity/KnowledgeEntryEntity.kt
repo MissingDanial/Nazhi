@@ -6,6 +6,7 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 import com.nazhi.app.core.model.IntentType
 import com.nazhi.app.core.model.KnowledgeEntry
+import com.nazhi.app.core.model.KnowledgeIndexStatus
 
 @Entity(
     tableName = "knowledge_entries",
@@ -21,7 +22,8 @@ import com.nazhi.app.core.model.KnowledgeEntry
         Index(value = ["noteId"]),
         Index(value = ["intentType"]),
         Index(value = ["createdDate"]),
-        Index(value = ["confirmedDate"])
+        Index(value = ["confirmedDate"]),
+        Index(value = ["indexStatus"])
     ]
 )
 data class KnowledgeEntryEntity(
@@ -34,7 +36,11 @@ data class KnowledgeEntryEntity(
     val createdAt: Long,
     val createdDate: String,
     val confirmedAt: Long,
-    val confirmedDate: String
+    val confirmedDate: String,
+    val summary: String = "",
+    val tags: List<String> = emptyList(),
+    val sourceNoteIds: List<String> = emptyList(),
+    val indexStatus: KnowledgeIndexStatus = KnowledgeIndexStatus.PENDING
 )
 
 fun KnowledgeEntryEntity.toModel(): KnowledgeEntry {
@@ -48,7 +54,11 @@ fun KnowledgeEntryEntity.toModel(): KnowledgeEntry {
         createdAt = createdAt,
         createdDate = createdDate,
         confirmedAt = confirmedAt,
-        confirmedDate = confirmedDate
+        confirmedDate = confirmedDate,
+        summary = summary,
+        tags = tags,
+        sourceNoteIds = sourceNoteIds.ifEmpty { listOf(noteId) },
+        indexStatus = indexStatus
     )
 }
 
@@ -63,6 +73,10 @@ fun KnowledgeEntry.toEntity(): KnowledgeEntryEntity {
         createdAt = createdAt,
         createdDate = createdDate,
         confirmedAt = confirmedAt,
-        confirmedDate = confirmedDate
+        confirmedDate = confirmedDate,
+        summary = summary,
+        tags = tags,
+        sourceNoteIds = sourceNoteIds,
+        indexStatus = indexStatus
     )
 }
