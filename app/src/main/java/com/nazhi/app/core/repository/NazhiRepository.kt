@@ -27,6 +27,8 @@ interface NazhiRepository {
 
     suspend fun getNote(id: String): Note?
 
+    suspend fun getNotesByIds(ids: List<String>): List<Note>
+
     suspend fun saveNote(note: Note)
 
     suspend fun updateNoteContent(
@@ -59,6 +61,10 @@ interface NazhiRepository {
     suspend fun saveKnowledgeEntry(entry: KnowledgeEntry)
 
     suspend fun organizeNotesForDate(date: String): Int
+
+    suspend fun updateKnowledgeDraft(draft: KnowledgeEntryDraft)
+
+    suspend fun skipKnowledgeDraft(draftId: String)
 
     suspend fun submitKnowledgeDraft(draftId: String): KnowledgeEntry?
 

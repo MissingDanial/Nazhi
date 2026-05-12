@@ -102,6 +102,9 @@ interface NoteDao {
     @Query("SELECT * FROM notes WHERE id = :id LIMIT 1")
     suspend fun getNote(id: String): NoteEntity?
 
+    @Query("SELECT * FROM notes WHERE id IN (:ids) ORDER BY createdAt DESC")
+    suspend fun getNotesByIds(ids: List<String>): List<NoteEntity>
+
     @Upsert
     suspend fun upsert(note: NoteEntity)
 

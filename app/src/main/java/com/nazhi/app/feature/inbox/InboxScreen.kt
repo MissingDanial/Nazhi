@@ -64,7 +64,8 @@ fun InboxRoute(
     initialShareText: String? = null,
     initialShareSource: String? = null,
     onShareConsumed: () -> Unit = {},
-    onOpenCalendar: () -> Unit = {}
+    onOpenCalendar: () -> Unit = {},
+    onOpenKnowledge: () -> Unit = {}
 ) {
     val dateId = remember { todayDateId() }
     val historyPendingCount by remember(repository, dateId) {
@@ -83,7 +84,8 @@ fun InboxRoute(
         initialShareSource = initialShareSource,
         onShareConsumed = onShareConsumed,
         historyPendingCount = historyPendingCount,
-        onOpenHistoricalPending = onOpenCalendar
+        onOpenHistoricalPending = onOpenCalendar,
+        onOpenKnowledge = onOpenKnowledge
     )
 }
 
@@ -101,6 +103,7 @@ fun DateNotesRoute(
     onShareConsumed: () -> Unit = {},
     historyPendingCount: Int = 0,
     onOpenHistoricalPending: () -> Unit = {},
+    onOpenKnowledge: () -> Unit = {},
     onNavigateBack: (() -> Unit)? = null
 ) {
     val notes by remember(repository, dateId) {
@@ -123,6 +126,7 @@ fun DateNotesRoute(
     var editingNote by remember { mutableStateOf<Note?>(null) }
     var deletingNote by remember { mutableStateOf<Note?>(null) }
     var deleteUpdatesReviewSession by remember { mutableStateOf(false) }
+    var isAiOrganizing by remember { mutableStateOf(false) }
     val currentReviewNote = pendingReviewNotes.getOrNull(
         reviewIndex.coerceAtMost((pendingReviewNotes.size - 1).coerceAtLeast(0))
     )
@@ -148,6 +152,7 @@ fun DateNotesRoute(
         historyPendingCount = historyPendingCount,
         pendingReviewCount = pendingReviewNotes.size,
         reviewedCount = reviewedCount,
+        isAiOrganizing = isAiOrganizing,
         isReviewMode = isReviewMode,
         currentReviewNote = currentReviewNote,
         reviewIndex = reviewIndex,
@@ -204,6 +209,26 @@ fun DateNotesRoute(
         onDelete = { note ->
             deletingNote = note
             deleteUpdatesReviewSession = false
+        },
+        onAiOrganizeToday = {
+            coroutineScope.launch {
+                isAiOrganizing = true
+                val message = runCatching {
+                    val count = repository.organizeNotesForDate(dateId)
+                    if (count == 0) {
+                        "没有可整理的内容"
+                    } else {
+                        "AI 已整理出 $count 条草稿"
+                    }
+                }.getOrElse { error ->
+                    "AI 整理失败：${error.message ?: "请检查后端服务"}"
+                }
+                isAiOrganizing = false
+                snackbarHostState.showSnackbar(message)
+                if (message.startsWith("AI 已整理出")) {
+                    onOpenKnowledge()
+                }
+            }
         },
         onStartReview = {
             if (pendingReviewNotes.isEmpty()) {
@@ -355,6 +380,7 @@ fun InboxScreen(
     historyPendingCount: Int,
     pendingReviewCount: Int,
     reviewedCount: Int,
+    isAiOrganizing: Boolean,
     isReviewMode: Boolean,
     currentReviewNote: Note?,
     reviewIndex: Int,
@@ -364,6 +390,7 @@ fun InboxScreen(
     onEdit: (Note) -> Unit,
     onCopy: (Note) -> Unit,
     onDelete: (Note) -> Unit,
+    onAiOrganizeToday: () -> Unit,
     onStartReview: () -> Unit,
     onStopReview: () -> Unit,
     onSkipReview: () -> Unit,
@@ -409,6 +436,18 @@ fun InboxScreen(
                         sourceType = inputSourceType,
                         onInputChange = onInputChange,
                         onSave = onSave
+                    )
+                }
+            }
+
+            if (showQuickInput) {
+                item {
+                    AiOrganizeTodayCard(
+                        totalCount = notes.size,
+                        pendingCount = pendingReviewCount,
+                        reviewedCount = reviewedCount,
+                        isOrganizing = isAiOrganizing,
+                        onOrganize = onAiOrganizeToday
                     )
                 }
             }

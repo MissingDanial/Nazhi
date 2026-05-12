@@ -66,6 +66,16 @@ class LocalNazhiRepository(
         return noteDao.getNote(id)?.toModel()
     }
 
+    override suspend fun getNotesByIds(ids: List<String>): List<Note> {
+        if (ids.isEmpty()) {
+            return emptyList()
+        }
+        val order = ids.withIndex().associate { it.value to it.index }
+        return noteDao.getNotesByIds(ids)
+            .map { it.toModel() }
+            .sortedBy { order[it.id] ?: Int.MAX_VALUE }
+    }
+
     override suspend fun saveNote(note: Note) {
         noteDao.upsert(note.toEntity())
     }
@@ -203,6 +213,20 @@ class LocalNazhiRepository(
         knowledgeEntryDraftDao.deleteReplaceableDraftsForDate(date)
         knowledgeEntryDraftDao.upsertAll(drafts.map { it.toEntity() })
         return drafts.size
+    }
+
+    override suspend fun updateKnowledgeDraft(draft: KnowledgeEntryDraft) {
+        knowledgeEntryDraftDao.upsert(
+            draft.copy(updatedAt = System.currentTimeMillis()).toEntity()
+        )
+    }
+
+    override suspend fun skipKnowledgeDraft(draftId: String) {
+        knowledgeEntryDraftDao.updateStatus(
+            id = draftId,
+            status = KnowledgeDraftStatus.SKIPPED,
+            updatedAt = System.currentTimeMillis()
+        )
     }
 
     override suspend fun submitKnowledgeDraft(draftId: String): KnowledgeEntry? {
