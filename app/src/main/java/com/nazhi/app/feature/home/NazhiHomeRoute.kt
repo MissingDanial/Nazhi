@@ -14,20 +14,26 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import com.nazhi.app.core.network.NazhiBackendClient
 import com.nazhi.app.core.repository.NazhiRepository
+import com.nazhi.app.core.settings.BackendSettingsStore
 import com.nazhi.app.feature.calendar.CalendarRoute
 import com.nazhi.app.feature.inbox.InboxRoute
 import com.nazhi.app.feature.knowledge.KnowledgeRoute
+import com.nazhi.app.feature.settings.SettingsRoute
 
 private enum class MainTab {
     TODAY,
     CALENDAR,
-    KNOWLEDGE
+    KNOWLEDGE,
+    SETTINGS
 }
 
 @Composable
 fun NazhiHomeRoute(
     repository: NazhiRepository,
+    backendSettingsStore: BackendSettingsStore,
+    backendClient: NazhiBackendClient,
     initialShareText: String? = null,
     initialShareSource: String? = null,
     onShareConsumed: () -> Unit = {}
@@ -61,6 +67,12 @@ fun NazhiHomeRoute(
                     icon = { Text(text = "知") },
                     label = { Text(text = "知识库") }
                 )
+                NavigationBarItem(
+                    selected = selectedTab == MainTab.SETTINGS,
+                    onClick = { selectedTab = MainTab.SETTINGS },
+                    icon = { Text(text = "设") },
+                    label = { Text(text = "设置") }
+                )
             }
         }
     ) { innerPadding ->
@@ -75,12 +87,18 @@ fun NazhiHomeRoute(
                     initialShareText = initialShareText,
                     initialShareSource = initialShareSource,
                     onShareConsumed = onShareConsumed,
-                    onOpenCalendar = { selectedTab = MainTab.CALENDAR }
+                    onOpenCalendar = { selectedTab = MainTab.CALENDAR },
+                    onOpenKnowledge = { selectedTab = MainTab.KNOWLEDGE }
                 )
 
                 MainTab.CALENDAR -> CalendarRoute(repository = repository)
 
                 MainTab.KNOWLEDGE -> KnowledgeRoute(repository = repository)
+
+                MainTab.SETTINGS -> SettingsRoute(
+                    backendSettingsStore = backendSettingsStore,
+                    backendClient = backendClient
+                )
             }
         }
     }

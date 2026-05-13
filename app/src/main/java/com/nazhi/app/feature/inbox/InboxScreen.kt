@@ -49,6 +49,7 @@ import com.nazhi.app.core.model.Note
 import com.nazhi.app.core.model.NoteStatus
 import com.nazhi.app.core.model.ReviewSession
 import com.nazhi.app.core.model.SourceType
+import com.nazhi.app.core.network.NazhiBackendException
 import com.nazhi.app.core.repository.NazhiRepository
 import com.nazhi.app.core.util.toLocalDateId
 import com.nazhi.app.core.util.todayDateId
@@ -221,7 +222,7 @@ fun DateNotesRoute(
                         "AI 已整理出 $count 条草稿"
                     }
                 }.getOrElse { error ->
-                    "AI 整理失败：${error.message ?: "请检查后端服务"}"
+                    "AI 整理失败：${error.toUserFacingMessage()}"
                 }
                 isAiOrganizing = false
                 snackbarHostState.showSnackbar(message)
@@ -506,6 +507,50 @@ fun InboxScreen(
 }
 
 @Composable
+private fun AiOrganizeTodayCard(
+    totalCount: Int,
+    pendingCount: Int,
+    reviewedCount: Int,
+    isOrganizing: Boolean,
+    onOrganize: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                text = "AI 整理今日收件箱",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "跳过逐条整理，让 AI 先合并、分类和打标签，你只需要确认草稿。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+            Text(
+                text = "今日 $totalCount 条 · 未处理 $pendingCount 条 · 已处理 $reviewedCount 条",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+            Button(
+                onClick = onOrganize,
+                enabled = totalCount > 0 && !isOrganizing,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(text = if (isOrganizing) "AI 整理中" else "AI 整理今日")
+            }
+        }
+    }
+}
+
+@Composable
 private fun DailyReviewCard(
     title: String,
     totalCount: Int,
@@ -531,12 +576,12 @@ private fun DailyReviewCard(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
-                text = title,
+                text = if (title == "今日回顾") "可选人工整理" else title,
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "待确认 $pendingCount · 已沉淀 $reviewedCount · 总计 $totalCount",
+                text = "AI 整理是主流程；这里保留逐条人工整理作为补充。待处理 $pendingCount · 已处理 $reviewedCount · 总计 $totalCount",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSecondaryContainer
             )
@@ -557,7 +602,7 @@ private fun DailyReviewCard(
                     enabled = pendingCount > 0,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(text = if (pendingCount > 0) "开始今日回顾" else "今日已完成")
+                    Text(text = if (pendingCount > 0) "逐条人工整理" else "今日已完成")
                 }
             }
         }
@@ -937,6 +982,7 @@ fun InboxPreview() {
             snackbarHostState = SnackbarHostState(),
             pendingReviewCount = 1,
             reviewedCount = 0,
+            isAiOrganizing = false,
             isReviewMode = false,
             currentReviewNote = null,
             reviewIndex = 0,
@@ -945,6 +991,7 @@ fun InboxPreview() {
             onEdit = {},
             onCopy = {},
             onDelete = {},
+            onAiOrganizeToday = {},
             onStartReview = {},
             onStopReview = {},
             onSkipReview = {},
@@ -991,6 +1038,28 @@ private fun IntentType.label(): String {
         IntentType.READ_LATER -> "稍后看"
         IntentType.QUOTABLE -> "可引用"
         IntentType.INSPIRATION -> "灵感"
+    }
+}
+
+private fun Throwable.toUserFacingMessage(): String {
+    return when (this) {
+        is NazhiBackendException -> when {
+            statusCode == 401 || code == "UNAUTHORIZED" -> "鉴权失败，请检查设置页中的 NAZHI_DEV_TOKEN。"
+            code == "MINIMAX_CHAT_FAILED" -> "模型整理失败，请稍后重试或检查服务器日志。"
+            code == "MINIMAX_NOT_CONFIGURED" -> "服务器模型配置缺失，请检查 .env。"
+            else -> publicMessage
+        }
+        else -> {
+            val raw = message.orEmpty()
+            when {
+                raw.contains("Failed to connect", ignoreCase = true) -> "无法连接后端，请检查服务器地址、端口和防火墙。"
+                raw.contains("timeout", ignoreCase = true) || raw.contains("timed out", ignoreCase = true) -> {
+                    "请求超时，请检查服务器网络或稍后重试。"
+                }
+                raw.isNotBlank() -> raw
+                else -> "请求失败，请检查后端服务。"
+            }
+        }
     }
 }
 

@@ -1,6 +1,9 @@
 package com.nazhi.app.core.repository
 
 import com.nazhi.app.core.database.dao.EmbeddingDao
+import com.nazhi.app.core.database.dao.ChatCitationDao
+import com.nazhi.app.core.database.dao.ChatMessageDao
+import com.nazhi.app.core.database.dao.ChatSessionDao
 import com.nazhi.app.core.database.dao.KnowledgeEntryDraftDao
 import com.nazhi.app.core.database.dao.KnowledgeEntryDao
 import com.nazhi.app.core.database.dao.NoteDao
@@ -8,6 +11,11 @@ import com.nazhi.app.core.database.dao.ReviewSessionDao
 import com.nazhi.app.core.database.entity.toEntity
 import com.nazhi.app.core.database.entity.toModel
 import com.nazhi.app.core.embedding.LocalEmbeddingEngine
+import com.nazhi.app.core.model.ChatCitation
+import com.nazhi.app.core.model.ChatMessage
+import com.nazhi.app.core.model.ChatMessageStatus
+import com.nazhi.app.core.model.ChatRole
+import com.nazhi.app.core.model.ChatSession
 import com.nazhi.app.core.model.DaySummary
 import com.nazhi.app.core.model.DayKnowledgeStatus
 import com.nazhi.app.core.model.EmbeddingRecord
@@ -21,7 +29,10 @@ import com.nazhi.app.core.model.NoteStatus
 import com.nazhi.app.core.model.ReviewSession
 import com.nazhi.app.core.model.SemanticSearchResult
 import com.nazhi.app.core.network.EmbeddingInput
+import com.nazhi.app.core.network.KnowledgeChatContextInput
+import com.nazhi.app.core.network.NazhiBackendException
 import com.nazhi.app.core.network.NazhiBackendClient
+import java.io.IOException
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -33,6 +44,9 @@ class LocalNazhiRepository(
     private val knowledgeEntryDraftDao: KnowledgeEntryDraftDao,
     private val reviewSessionDao: ReviewSessionDao,
     private val embeddingDao: EmbeddingDao,
+    private val chatSessionDao: ChatSessionDao,
+    private val chatMessageDao: ChatMessageDao,
+    private val chatCitationDao: ChatCitationDao,
     private val backendClient: NazhiBackendClient
 ) : NazhiRepository {
     override fun observeNotes(): Flow<List<Note>> {
@@ -268,6 +282,7 @@ class LocalNazhiRepository(
         var submittedCount = 0
         knowledgeEntryDraftDao.getDraftsForDate(date)
             .filter { it.status == KnowledgeDraftStatus.PENDING }
+            .filter { !it.needsReview }
             .forEach { draft ->
                 if (submitKnowledgeDraft(draft.id) != null) {
                     submittedCount += 1
@@ -385,6 +400,98 @@ class LocalNazhiRepository(
             .take(topK)
     }
 
+    override fun observeChatSessions(): Flow<List<ChatSession>> {
+        return chatSessionDao.observeSessions().map { sessions -> sessions.map { it.toModel() } }
+    }
+
+    override fun observeChatMessages(sessionId: String): Flow<List<ChatMessage>> {
+        return chatMessageDao.observeMessagesForSession(sessionId).map { messages ->
+            messages.map { it.toModel() }
+        }
+    }
+
+    override fun observeChatCitationsForSession(sessionId: String): Flow<List<ChatCitation>> {
+        return chatCitationDao.observeCitationsForSession(sessionId).map { citations ->
+            citations.map { it.toModel() }
+        }
+    }
+
+    override suspend fun askKnowledgeQuestion(question: String, topK: Int): ChatMessage {
+        val trimmedQuestion = question.trim()
+        if (trimmedQuestion.isEmpty()) {
+            throw IllegalArgumentException("问题不能为空")
+        }
+
+        val now = System.currentTimeMillis()
+        val session = getOrCreateChatSession(trimmedQuestion, now)
+        val userMessage = ChatMessage(
+            id = "chat-user-${UUID.randomUUID()}",
+            sessionId = session.id,
+            role = ChatRole.USER,
+            content = trimmedQuestion,
+            status = ChatMessageStatus.DONE,
+            errorMessage = null,
+            createdAt = now,
+            updatedAt = now
+        )
+        chatMessageDao.upsert(userMessage.toEntity())
+        chatSessionDao.updateTitleAndTime(
+            id = session.id,
+            title = session.title.ifBlank { trimmedQuestion.firstLineOrTitle(24) },
+            updatedAt = now
+        )
+
+        val results = searchSimilarKnowledgeEntries(trimmedQuestion, topK)
+        if (results.isEmpty()) {
+            return saveAssistantMessage(
+                sessionId = session.id,
+                content = "当前知识库中没有足够信息回答这个问题。请先完成知识入库和向量索引，或换一个更具体的问题。",
+                status = ChatMessageStatus.DONE,
+                errorMessage = null,
+                citations = emptyList(),
+                matchedResults = emptyList()
+            )
+        }
+
+        return runCatching {
+            val response = backendClient.chatWithKnowledge(
+                requestId = "knowledge-chat-${UUID.randomUUID()}",
+                question = trimmedQuestion,
+                contexts = results.map { result ->
+                    val entry = result.entry
+                    KnowledgeChatContextInput(
+                        id = entry.id,
+                        title = entry.userTitle.orEmpty(),
+                        summary = entry.summary,
+                        content = entry.content,
+                        tags = entry.tags,
+                        sourceNoteIds = entry.sourceNoteIds,
+                        score = result.score
+                    )
+                }
+            )
+            saveAssistantMessage(
+                sessionId = session.id,
+                content = response.answer.ifBlank { "当前知识库中没有足够信息回答这个问题。" },
+                status = ChatMessageStatus.DONE,
+                errorMessage = null,
+                citations = response.citations,
+                matchedResults = results
+            )
+        }.getOrElse { error ->
+            val message = error.toUserFacingMessage()
+            saveAssistantMessage(
+                sessionId = session.id,
+                content = "回答生成失败。",
+                status = ChatMessageStatus.FAILED,
+                errorMessage = message,
+                citations = emptyList(),
+                matchedResults = emptyList()
+            )
+            throw IOException(message, error)
+        }
+    }
+
     override fun observeReviewSessions(): Flow<List<ReviewSession>> {
         return reviewSessionDao.observeReviewSessions().map { sessions -> sessions.map { it.toModel() } }
     }
@@ -497,6 +604,85 @@ class LocalNazhiRepository(
             userRemark?.takeIf { it.isNotBlank() },
             content
         ).joinToString(separator = "\n")
+    }
+
+    private suspend fun getOrCreateChatSession(question: String, now: Long): ChatSession {
+        val existing = chatSessionDao.getLatestSession()?.toModel()
+        if (existing != null) {
+            return existing
+        }
+        val session = ChatSession(
+            id = "chat-session-${UUID.randomUUID()}",
+            title = question.firstLineOrTitle(24),
+            createdAt = now,
+            updatedAt = now
+        )
+        chatSessionDao.upsert(session.toEntity())
+        return session
+    }
+
+    private suspend fun saveAssistantMessage(
+        sessionId: String,
+        content: String,
+        status: ChatMessageStatus,
+        errorMessage: String?,
+        citations: List<com.nazhi.app.core.network.KnowledgeChatCitation>,
+        matchedResults: List<SemanticSearchResult>
+    ): ChatMessage {
+        val now = System.currentTimeMillis()
+        val message = ChatMessage(
+            id = "chat-assistant-${UUID.randomUUID()}",
+            sessionId = sessionId,
+            role = ChatRole.ASSISTANT,
+            content = content,
+            status = status,
+            errorMessage = errorMessage,
+            createdAt = now,
+            updatedAt = now
+        )
+        chatMessageDao.upsert(message.toEntity())
+        chatSessionDao.updateTime(sessionId, now)
+
+        val resultById = matchedResults.associateBy { it.entry.id }
+        val citationEntities = citations.mapNotNull { citation ->
+            val result = resultById[citation.contextId] ?: return@mapNotNull null
+            ChatCitation(
+                id = "chat-citation-${UUID.randomUUID()}",
+                messageId = message.id,
+                knowledgeEntryId = result.entry.id,
+                sourceNoteIds = result.entry.sourceNoteIds,
+                quote = citation.quote.ifBlank { result.entry.summary.ifBlank { result.entry.content.take(80) } },
+                reason = citation.reason,
+                score = result.score,
+                createdAt = now
+            ).toEntity()
+        }
+        if (citationEntities.isNotEmpty()) {
+            chatCitationDao.upsertAll(citationEntities)
+        }
+        return message
+    }
+
+    private fun Throwable.toUserFacingMessage(): String {
+        return when (this) {
+            is NazhiBackendException -> when {
+                statusCode == 401 || code == "UNAUTHORIZED" -> "后端鉴权失败，请检查设置页中的 NAZHI_DEV_TOKEN。"
+                code == "MINIMAX_CHAT_FAILED" -> "模型回答生成失败，请稍后重试或检查后端日志。"
+                code == "MINIMAX_NOT_CONFIGURED" -> "后端 Chat 模型未配置，请检查服务器 .env。"
+                else -> publicMessage
+            }
+            else -> {
+                val raw = message.orEmpty()
+                when {
+                    raw.contains("Failed to connect", ignoreCase = true) -> "无法连接后端，请检查服务器地址、端口和防火墙。"
+                    raw.contains("timeout", ignoreCase = true) || raw.contains("timed out", ignoreCase = true) -> {
+                        "请求超时，请检查服务器网络或稍后重试。"
+                    }
+                    raw.isNotBlank() -> raw
+                    else -> "请求失败，请检查后端服务。"
+                }
+            }
+        }
     }
 
     private fun String.firstLineOrTitle(maxLength: Int = 40): String {

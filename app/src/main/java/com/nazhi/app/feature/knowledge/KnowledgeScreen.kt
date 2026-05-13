@@ -3,6 +3,7 @@ package com.nazhi.app.feature.knowledge
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -14,6 +15,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -39,14 +42,21 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.nazhi.app.core.model.ChatCitation
+import com.nazhi.app.core.model.ChatMessage
+import com.nazhi.app.core.model.ChatMessageStatus
+import com.nazhi.app.core.model.ChatRole
 import com.nazhi.app.core.model.DayKnowledgeStatus
 import com.nazhi.app.core.model.IntentType
 import com.nazhi.app.core.model.KnowledgeDraftStatus
 import com.nazhi.app.core.model.KnowledgeEntry
 import com.nazhi.app.core.model.KnowledgeEntryDraft
+import com.nazhi.app.core.model.Note
 import com.nazhi.app.core.model.SemanticSearchResult
+import com.nazhi.app.core.network.NazhiBackendException
 import com.nazhi.app.core.repository.NazhiRepository
 import com.nazhi.app.core.util.todayDateId
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
 @Composable
@@ -64,6 +74,16 @@ fun KnowledgeRoute(repository: NazhiRepository) {
     val embeddingCount by remember(repository) {
         repository.observeEmbeddingCount()
     }.collectAsState(initial = 0)
+    val chatSessions by remember(repository) {
+        repository.observeChatSessions()
+    }.collectAsState(initial = emptyList())
+    val activeChatSessionId = chatSessions.firstOrNull()?.id
+    val chatMessages by remember(repository, activeChatSessionId) {
+        activeChatSessionId?.let { repository.observeChatMessages(it) } ?: flowOf(emptyList())
+    }.collectAsState(initial = emptyList())
+    val chatCitations by remember(repository, activeChatSessionId) {
+        activeChatSessionId?.let { repository.observeChatCitationsForSession(it) } ?: flowOf(emptyList())
+    }.collectAsState(initial = emptyList())
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -72,6 +92,11 @@ fun KnowledgeRoute(repository: NazhiRepository) {
     var hasSearched by remember { mutableStateOf(false) }
     var isOrganizing by remember { mutableStateOf(false) }
     var isSubmitting by remember { mutableStateOf(false) }
+    var chatQuestion by remember { mutableStateOf("") }
+    var isAsking by remember { mutableStateOf(false) }
+    var editingDraft by remember { mutableStateOf<KnowledgeEntryDraft?>(null) }
+    var sourceDialogTitle by remember { mutableStateOf<String?>(null) }
+    var sourceDialogNotes by remember { mutableStateOf<List<Note>>(emptyList()) }
 
     KnowledgeScreen(
         today = today,
@@ -81,9 +106,13 @@ fun KnowledgeRoute(repository: NazhiRepository) {
         embeddingCount = embeddingCount,
         query = query,
         results = results,
+        chatQuestion = chatQuestion,
+        chatMessages = chatMessages,
+        chatCitations = chatCitations,
         hasSearched = hasSearched,
         isOrganizing = isOrganizing,
         isSubmitting = isSubmitting,
+        isAsking = isAsking,
         snackbarHostState = snackbarHostState,
         onQueryChange = {
             query = it
@@ -99,7 +128,7 @@ fun KnowledgeRoute(repository: NazhiRepository) {
                     val count = repository.organizeNotesForDate(today)
                     if (count == 0) "今日没有可整理的笔记" else "已生成 $count 条 AI 草稿"
                 }.getOrElse { error ->
-                    "AI 整理失败：${error.message ?: "请检查后端服务"}"
+                    "AI 整理失败：${error.toUserFacingMessage()}"
                 }
                 isOrganizing = false
                 snackbarHostState.showSnackbar(message)
@@ -112,7 +141,30 @@ fun KnowledgeRoute(repository: NazhiRepository) {
                     val entry = repository.submitKnowledgeDraft(draft.id)
                     if (entry == null) "草稿已处理或不存在" else "已提交知识库并尝试生成向量"
                 }.getOrElse { error ->
-                    "提交失败：${error.message ?: "请检查后端服务"}"
+                    "提交失败：${error.toUserFacingMessage()}"
+                }
+                isSubmitting = false
+                snackbarHostState.showSnackbar(message)
+            }
+        },
+        onEditDraft = { draft ->
+            editingDraft = draft
+        },
+        onViewSources = { draft ->
+            coroutineScope.launch {
+                val notes = repository.getNotesByIds(draft.sourceNoteIds)
+                sourceDialogTitle = draft.title
+                sourceDialogNotes = notes
+            }
+        },
+        onSkipDraft = { draft ->
+            coroutineScope.launch {
+                isSubmitting = true
+                val message = runCatching {
+                    repository.skipKnowledgeDraft(draft.id)
+                    "已跳过该草稿"
+                }.getOrElse { error ->
+                    "跳过失败：${error.toUserFacingMessage()}"
                 }
                 isSubmitting = false
                 snackbarHostState.showSnackbar(message)
@@ -123,9 +175,16 @@ fun KnowledgeRoute(repository: NazhiRepository) {
                 isSubmitting = true
                 val message = runCatching {
                     val count = repository.submitAllKnowledgeDraftsForDate(today)
-                    if (count == 0) "没有待提交草稿" else "已提交 $count 条草稿"
+                    val hasReviewRequiredDrafts = drafts.any {
+                        it.status == KnowledgeDraftStatus.PENDING && it.needsReview
+                    }
+                    when {
+                        count > 0 -> "已提交 $count 条草稿"
+                        hasReviewRequiredDrafts -> "存在需确认草稿，请逐条确认后提交"
+                        else -> "没有待提交草稿"
+                    }
                 }.getOrElse { error ->
-                    "批量提交失败：${error.message ?: "请检查后端服务"}"
+                    "批量提交失败：${error.toUserFacingMessage()}"
                 }
                 isSubmitting = false
                 snackbarHostState.showSnackbar(message)
@@ -137,7 +196,7 @@ fun KnowledgeRoute(repository: NazhiRepository) {
                     val count = repository.indexPendingKnowledgeEntries()
                     if (count == 0) "没有可重试的向量任务" else "已完成 $count 条向量入库"
                 }.getOrElse { error ->
-                    "向量入库失败：${error.message ?: "请检查后端服务"}"
+                    "向量入库失败：${error.toUserFacingMessage()}"
                 }
                 snackbarHostState.showSnackbar(message)
             }
@@ -147,6 +206,26 @@ fun KnowledgeRoute(repository: NazhiRepository) {
                 results = repository.searchSimilarKnowledgeEntries(query, topK = 5)
                 hasSearched = true
                 snackbarHostState.showSnackbar("语义检索完成")
+            }
+        },
+        onChatQuestionChange = {
+            chatQuestion = it
+        },
+        onAskKnowledge = {
+            val question = chatQuestion.trim()
+            if (question.isNotBlank()) {
+                coroutineScope.launch {
+                    isAsking = true
+                    val message = runCatching {
+                        repository.askKnowledgeQuestion(question, topK = 5)
+                        chatQuestion = ""
+                        "回答已生成"
+                    }.getOrElse { error ->
+                        "问答失败：${error.toUserFacingMessage()}"
+                    }
+                    isAsking = false
+                    snackbarHostState.showSnackbar(message)
+                }
             }
         },
         onCopy = { entry ->
@@ -159,6 +238,31 @@ fun KnowledgeRoute(repository: NazhiRepository) {
             }
         }
     )
+
+    editingDraft?.let { draft ->
+        DraftEditDialog(
+            draft = draft,
+            onDismiss = { editingDraft = null },
+            onConfirm = { updatedDraft ->
+                coroutineScope.launch {
+                    repository.updateKnowledgeDraft(updatedDraft)
+                    editingDraft = null
+                    snackbarHostState.showSnackbar("草稿已更新")
+                }
+            }
+        )
+    }
+
+    sourceDialogTitle?.let { title ->
+        SourceNotesDialog(
+            title = title,
+            notes = sourceDialogNotes,
+            onDismiss = {
+                sourceDialogTitle = null
+                sourceDialogNotes = emptyList()
+            }
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -171,16 +275,25 @@ private fun KnowledgeScreen(
     embeddingCount: Int,
     query: String,
     results: List<SemanticSearchResult>,
+    chatQuestion: String,
+    chatMessages: List<ChatMessage>,
+    chatCitations: List<ChatCitation>,
     hasSearched: Boolean,
     isOrganizing: Boolean,
     isSubmitting: Boolean,
+    isAsking: Boolean,
     snackbarHostState: SnackbarHostState,
     onQueryChange: (String) -> Unit,
     onOrganizeToday: () -> Unit,
     onSubmitDraft: (KnowledgeEntryDraft) -> Unit,
+    onEditDraft: (KnowledgeEntryDraft) -> Unit,
+    onViewSources: (KnowledgeEntryDraft) -> Unit,
+    onSkipDraft: (KnowledgeEntryDraft) -> Unit,
     onSubmitAll: () -> Unit,
     onRetryIndex: () -> Unit,
     onSearch: () -> Unit,
+    onChatQuestionChange: (String) -> Unit,
+    onAskKnowledge: () -> Unit,
     onCopy: (KnowledgeEntry) -> Unit
 ) {
     Scaffold(
@@ -210,11 +323,26 @@ private fun KnowledgeScreen(
                 DayKnowledgeStatusCard(
                     today = today,
                     status = dayStatus,
+                    hasReviewRequiredDrafts = drafts.any {
+                        it.status == KnowledgeDraftStatus.PENDING && it.needsReview
+                    },
                     isOrganizing = isOrganizing,
                     isSubmitting = isSubmitting,
                     onOrganizeToday = onOrganizeToday,
                     onSubmitAll = onSubmitAll,
                     onRetryIndex = onRetryIndex
+                )
+            }
+
+            item {
+                KnowledgeChatCard(
+                    question = chatQuestion,
+                    messages = chatMessages,
+                    citations = chatCitations,
+                    embeddingCount = embeddingCount,
+                    isAsking = isAsking,
+                    onQuestionChange = onChatQuestionChange,
+                    onAsk = onAskKnowledge
                 )
             }
 
@@ -229,7 +357,10 @@ private fun KnowledgeScreen(
                     KnowledgeDraftCard(
                         draft = draft,
                         isSubmitting = isSubmitting,
-                        onSubmit = { onSubmitDraft(draft) }
+                        onSubmit = { onSubmitDraft(draft) },
+                        onEdit = { onEditDraft(draft) },
+                        onViewSources = { onViewSources(draft) },
+                        onSkip = { onSkipDraft(draft) }
                     )
                 }
             }
@@ -288,9 +419,114 @@ private fun KnowledgeScreen(
 }
 
 @Composable
+private fun KnowledgeChatCard(
+    question: String,
+    messages: List<ChatMessage>,
+    citations: List<ChatCitation>,
+    embeddingCount: Int,
+    isAsking: Boolean,
+    onQuestionChange: (String) -> Unit,
+    onAsk: () -> Unit
+) {
+    val citationsByMessage = citations.groupBy { it.messageId }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                text = "知识库问答",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "先在本地向量库检索相关知识，再把命中的少量上下文交给 AI 回答。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            OutlinedTextField(
+                value = question,
+                onValueChange = onQuestionChange,
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 2,
+                label = { Text(text = "向知识库提问") }
+            )
+            Button(
+                onClick = onAsk,
+                enabled = question.isNotBlank() && !isAsking && embeddingCount > 0,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = when {
+                        isAsking -> "回答中"
+                        embeddingCount == 0 -> "先完成知识入库"
+                        else -> "提问"
+                    }
+                )
+            }
+            if (messages.isEmpty()) {
+                Text(
+                    text = "暂无问答记录。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                HorizontalDivider()
+                messages.takeLast(6).forEach { message ->
+                    ChatMessageBlock(
+                        message = message,
+                        citations = citationsByMessage[message.id].orEmpty()
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChatMessageBlock(
+    message: ChatMessage,
+    citations: List<ChatCitation>
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            text = if (message.role == ChatRole.USER) "我" else "纳知",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Text(
+            text = if (message.status == ChatMessageStatus.FAILED) {
+                message.errorMessage ?: message.content
+            } else {
+                message.content
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (message.status == ChatMessageStatus.FAILED) {
+                MaterialTheme.colorScheme.error
+            } else {
+                MaterialTheme.colorScheme.onSurface
+            }
+        )
+        if (citations.isNotEmpty()) {
+            citations.forEachIndexed { index, citation ->
+                Text(
+                    text = "引用 ${index + 1}：${citation.quote.ifBlank { citation.knowledgeEntryId }}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun DayKnowledgeStatusCard(
     today: String,
     status: DayKnowledgeStatus,
+    hasReviewRequiredDrafts: Boolean,
     isOrganizing: Boolean,
     isSubmitting: Boolean,
     onOrganizeToday: () -> Unit,
@@ -330,11 +566,24 @@ private fun DayKnowledgeStatusCard(
                 }
                 Button(
                     onClick = onSubmitAll,
-                    enabled = !isSubmitting && status.pendingDraftCount > 0,
+                    enabled = !isSubmitting && status.pendingDraftCount > 0 && !hasReviewRequiredDrafts,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Text(text = if (isSubmitting) "提交中" else "提交入库")
+                    Text(
+                        text = when {
+                            isSubmitting -> "提交中"
+                            hasReviewRequiredDrafts -> "先确认草稿"
+                            else -> "提交入库"
+                        }
+                    )
                 }
+            }
+            if (hasReviewRequiredDrafts) {
+                Text(
+                    text = "存在需确认草稿，需逐条查看后再入库。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
             OutlinedButton(
                 onClick = onRetryIndex,
@@ -351,7 +600,10 @@ private fun DayKnowledgeStatusCard(
 private fun KnowledgeDraftCard(
     draft: KnowledgeEntryDraft,
     isSubmitting: Boolean,
-    onSubmit: () -> Unit
+    onSubmit: () -> Unit,
+    onEdit: () -> Unit,
+    onViewSources: () -> Unit,
+    onSkip: () -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -372,7 +624,7 @@ private fun KnowledgeDraftCard(
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                text = "来源 ${draft.sourceNoteIds.size} 条 · ${draft.intentType.label()} · 置信度 ${"%.2f".format(draft.confidence)}",
+                text = "来源 ${draft.sourceNoteIds.size} 条 · ${draft.intentType.label()} · ${draft.reviewLabel()} · 置信度 ${"%.2f".format(draft.confidence)}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -394,19 +646,221 @@ private fun KnowledgeDraftCard(
             }
             Spacer(modifier = Modifier.height(4.dp))
             HorizontalDivider()
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End
-            ) {
-                TextButton(
-                    onClick = onSubmit,
-                    enabled = !isSubmitting
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
                 ) {
-                    Text(text = "确认提交")
+                    TextButton(
+                        onClick = onViewSources,
+                        enabled = draft.sourceNoteIds.isNotEmpty()
+                    ) {
+                        Text(text = "查看来源")
+                    }
+                    TextButton(onClick = onEdit) {
+                        Text(text = "编辑草稿")
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(
+                        onClick = onSkip,
+                        enabled = !isSubmitting
+                    ) {
+                        Text(text = "跳过")
+                    }
+                    TextButton(
+                        onClick = onSubmit,
+                        enabled = !isSubmitting
+                    ) {
+                        Text(text = "确认入库")
+                    }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun DraftEditDialog(
+    draft: KnowledgeEntryDraft,
+    onDismiss: () -> Unit,
+    onConfirm: (KnowledgeEntryDraft) -> Unit
+) {
+    var title by remember(draft.id) { mutableStateOf(draft.title) }
+    var summary by remember(draft.id) { mutableStateOf(draft.summary) }
+    var content by remember(draft.id) { mutableStateOf(draft.content) }
+    var tagsText by remember(draft.id) { mutableStateOf(draft.tags.joinToString("，")) }
+    var insight by remember(draft.id) { mutableStateOf(draft.insight.orEmpty()) }
+    var intentType by remember(draft.id) { mutableStateOf(draft.intentType) }
+    val canSave = title.isNotBlank() && content.isNotBlank()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(text = "编辑 AI 草稿") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(text = "标题") }
+                )
+                OutlinedTextField(
+                    value = summary,
+                    onValueChange = { summary = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    label = { Text(text = "摘要") }
+                )
+                OutlinedTextField(
+                    value = content,
+                    onValueChange = { content = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 4,
+                    label = { Text(text = "正文") }
+                )
+                IntentTypeSelector(
+                    selected = intentType,
+                    onSelect = { intentType = it }
+                )
+                OutlinedTextField(
+                    value = tagsText,
+                    onValueChange = { tagsText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(text = "标签，用逗号分隔") }
+                )
+                OutlinedTextField(
+                    value = insight,
+                    onValueChange = { insight = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    label = { Text(text = "AI 推断，可选") }
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onConfirm(
+                        draft.copy(
+                            title = title.trim(),
+                            summary = summary.trim(),
+                            content = content.trim(),
+                            intentType = intentType,
+                            tags = tagsText.toTagList(),
+                            insight = insight.trim().takeIf { it.isNotBlank() }
+                        )
+                    )
+                },
+                enabled = canSave
+            ) {
+                Text(text = "保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = "取消")
+            }
+        }
+    )
+}
+
+@Composable
+private fun IntentTypeSelector(
+    selected: IntentType,
+    onSelect: (IntentType) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            text = "类型",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            IntentType.entries.forEach { type ->
+                if (selected == type) {
+                    Button(
+                        onClick = { onSelect(type) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(text = type.label())
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = { onSelect(type) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(text = type.label())
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SourceNotesDialog(
+    title: String,
+    notes: List<Note>,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(text = "来源笔记") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                if (notes.isEmpty()) {
+                    Text(text = "没有找到对应的原始 Note。")
+                } else {
+                    notes.forEachIndexed { index, note ->
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = "${index + 1}. ${note.title ?: "未命名记录"}",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = note.content,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 6,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "${note.sourceType.label()} · ${note.createdDate}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        if (index != notes.lastIndex) {
+                            HorizontalDivider()
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = "关闭")
+            }
+        }
+    )
 }
 
 @Composable
@@ -559,11 +1013,55 @@ private fun DayKnowledgeStatus.statusText(): String {
     }
 }
 
+private fun KnowledgeEntryDraft.reviewLabel(): String {
+    return if (needsReview) "需确认" else "可确认"
+}
+
+private fun String.toTagList(): List<String> {
+    return split(',', '，', '、', '\n')
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .distinct()
+        .take(8)
+}
+
 private fun IntentType.label(): String {
     return when (this) {
         IntentType.READ_LATER -> "稍后看"
         IntentType.QUOTABLE -> "可引用"
         IntentType.INSPIRATION -> "灵感"
+    }
+}
+
+private fun com.nazhi.app.core.model.SourceType.label(): String {
+    return when (this) {
+        com.nazhi.app.core.model.SourceType.SHARE -> "分享"
+        com.nazhi.app.core.model.SourceType.MANUAL -> "手动输入"
+        com.nazhi.app.core.model.SourceType.CLIPBOARD -> "剪贴板"
+    }
+}
+
+private fun Throwable.toUserFacingMessage(): String {
+    return when (this) {
+        is NazhiBackendException -> when {
+            statusCode == 401 || code == "UNAUTHORIZED" -> "鉴权失败，请检查设置页中的 NAZHI_DEV_TOKEN。"
+            code == "MINIMAX_CHAT_FAILED" -> "模型生成失败，请稍后重试或检查服务器日志。"
+            code == "MINIMAX_NOT_CONFIGURED" -> "服务器模型配置缺失，请检查 .env。"
+            code == "MINIMAX_EMBEDDING_FAILED" -> "Embedding 模型调用失败，请稍后重试或检查服务器日志。"
+            else -> publicMessage
+        }
+        else -> {
+            val raw = message.orEmpty()
+            when {
+                raw.contains("Failed to connect", ignoreCase = true) -> "无法连接后端，请检查服务器地址、端口和防火墙。"
+                raw.contains("timeout", ignoreCase = true) || raw.contains("timed out", ignoreCase = true) -> {
+                    "请求超时，请检查服务器网络或稍后重试。"
+                }
+                raw.contains("Cleartext", ignoreCase = true) -> "HTTP 请求被系统拦截，请检查网络安全配置。"
+                raw.isNotBlank() -> raw
+                else -> "请求失败，请检查后端服务。"
+            }
+        }
     }
 }
 

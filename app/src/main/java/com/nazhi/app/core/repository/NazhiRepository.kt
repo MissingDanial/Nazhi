@@ -1,6 +1,9 @@
 package com.nazhi.app.core.repository
 
 import com.nazhi.app.core.model.EmbeddingRecord
+import com.nazhi.app.core.model.ChatCitation
+import com.nazhi.app.core.model.ChatMessage
+import com.nazhi.app.core.model.ChatSession
 import com.nazhi.app.core.model.IntentType
 import com.nazhi.app.core.model.DaySummary
 import com.nazhi.app.core.model.DayKnowledgeStatus
@@ -81,6 +84,14 @@ interface NazhiRepository {
     suspend fun generateMissingMockEmbeddings(): Int
 
     suspend fun searchSimilarKnowledgeEntries(query: String, topK: Int = 5): List<SemanticSearchResult>
+
+    fun observeChatSessions(): Flow<List<ChatSession>>
+
+    fun observeChatMessages(sessionId: String): Flow<List<ChatMessage>>
+
+    fun observeChatCitationsForSession(sessionId: String): Flow<List<ChatCitation>>
+
+    suspend fun askKnowledgeQuestion(question: String, topK: Int = 5): ChatMessage
 
     fun observeReviewSessions(): Flow<List<ReviewSession>>
 

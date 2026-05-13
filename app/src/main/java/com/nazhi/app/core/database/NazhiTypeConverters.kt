@@ -1,6 +1,8 @@
 package com.nazhi.app.core.database
 
 import androidx.room.TypeConverter
+import com.nazhi.app.core.model.ChatMessageStatus
+import com.nazhi.app.core.model.ChatRole
 import com.nazhi.app.core.model.IntentType
 import com.nazhi.app.core.model.KnowledgeDraftStatus
 import com.nazhi.app.core.model.KnowledgeIndexStatus
@@ -12,6 +14,24 @@ import kotlinx.serialization.json.Json
 
 class NazhiTypeConverters {
     private val json = Json { ignoreUnknownKeys = true }
+
+    @TypeConverter
+    fun chatRoleToString(value: ChatRole): String = value.name
+
+    @TypeConverter
+    fun stringToChatRole(value: String): ChatRole {
+        return runCatching { ChatRole.valueOf(value) }
+            .getOrDefault(ChatRole.USER)
+    }
+
+    @TypeConverter
+    fun chatMessageStatusToString(value: ChatMessageStatus): String = value.name
+
+    @TypeConverter
+    fun stringToChatMessageStatus(value: String): ChatMessageStatus {
+        return runCatching { ChatMessageStatus.valueOf(value) }
+            .getOrDefault(ChatMessageStatus.DONE)
+    }
 
     @TypeConverter
     fun sourceTypeToString(value: SourceType): String = value.name

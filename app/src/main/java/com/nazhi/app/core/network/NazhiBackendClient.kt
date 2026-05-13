@@ -14,13 +14,19 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 class NazhiBackendClient(
-    private val baseUrl: String,
-    private val devToken: String
+    private val configProvider: suspend () -> BackendConfig
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
     }
+
+    suspend fun checkHealth(
+        config: BackendConfig? = null
+    ): BackendHealthResponse = get(
+        path = "/health",
+        config = config
+    )
 
     suspend fun createEmbeddings(
         requestId: String,
@@ -62,19 +68,36 @@ class NazhiBackendClient(
         )
     )
 
+    suspend fun chatWithKnowledge(
+        requestId: String,
+        question: String,
+        contexts: List<KnowledgeChatContextInput>,
+        language: String = "zh-CN"
+    ): KnowledgeChatResponse = post(
+        path = "/v1/knowledge-chat",
+        body = KnowledgeChatRequest(
+            requestId = requestId,
+            question = question,
+            language = language,
+            contexts = contexts
+        )
+    )
+
     private suspend inline fun <reified Request, reified Response> post(
         path: String,
-        body: Request
+        body: Request,
+        config: BackendConfig? = null
     ): Response = withContext(Dispatchers.IO) {
-        val url = URL(baseUrl.trimEnd('/') + path)
+        val backendConfig = config ?: configProvider()
+        val url = URL(backendConfig.normalizedBaseUrl + path)
         val connection = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 15_000
             readTimeout = 60_000
             doOutput = true
             setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            if (devToken.isNotBlank()) {
-                setRequestProperty("Authorization", "Bearer $devToken")
+            if (backendConfig.devToken.isNotBlank()) {
+                setRequestProperty("Authorization", "Bearer ${backendConfig.devToken.trim()}")
             }
         }
 
@@ -93,7 +116,40 @@ class NazhiBackendClient(
             val backendError = runCatching {
                 json.decodeFromString<BackendErrorResponse>(responseText).error
             }.getOrNull()
-            throw IOException(backendError?.message ?: "Backend request failed with HTTP $statusCode.")
+            throw NazhiBackendException(statusCode, backendError?.code, backendError?.message ?: "Backend request failed with HTTP $statusCode.")
+        }
+
+        json.decodeFromString(responseText)
+    }
+
+    private suspend inline fun <reified Response> get(
+        path: String,
+        config: BackendConfig? = null
+    ): Response = withContext(Dispatchers.IO) {
+        val backendConfig = config ?: configProvider()
+        val url = URL(backendConfig.normalizedBaseUrl + path)
+        val connection = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 10_000
+            readTimeout = 15_000
+            if (backendConfig.devToken.isNotBlank()) {
+                setRequestProperty("Authorization", "Bearer ${backendConfig.devToken.trim()}")
+            }
+        }
+
+        val statusCode = connection.responseCode
+        val responseText = try {
+            val stream = if (statusCode in 200..299) connection.inputStream else connection.errorStream
+            stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+        } finally {
+            connection.disconnect()
+        }
+
+        if (statusCode !in 200..299) {
+            val backendError = runCatching {
+                json.decodeFromString<BackendErrorResponse>(responseText).error
+            }.getOrNull()
+            throw NazhiBackendException(statusCode, backendError?.code, backendError?.message ?: "Backend request failed with HTTP $statusCode.")
         }
 
         json.decodeFromString(responseText)
@@ -103,6 +159,20 @@ class NazhiBackendClient(
         const val EMBEDDING_MODEL = "embo-01"
     }
 }
+
+@Serializable
+data class BackendHealthResponse(
+    val ok: Boolean,
+    val service: String,
+    val embeddingProvider: String,
+    val chatProvider: String
+)
+
+class NazhiBackendException(
+    val statusCode: Int,
+    val code: String?,
+    val publicMessage: String
+) : IOException(publicMessage)
 
 @Serializable
 data class EmbeddingInput(
@@ -162,6 +232,39 @@ data class OrganizeNotesResponse(
     val requestId: String,
     val date: String,
     val drafts: List<OrganizeDraft>
+)
+
+@Serializable
+private data class KnowledgeChatRequest(
+    val requestId: String,
+    val question: String,
+    val language: String,
+    val contexts: List<KnowledgeChatContextInput>
+)
+
+@Serializable
+data class KnowledgeChatContextInput(
+    val id: String,
+    val title: String,
+    val summary: String,
+    val content: String,
+    val tags: List<String>,
+    val sourceNoteIds: List<String>,
+    val score: Float
+)
+
+@Serializable
+data class KnowledgeChatResponse(
+    val requestId: String,
+    val answer: String,
+    val citations: List<KnowledgeChatCitation> = emptyList()
+)
+
+@Serializable
+data class KnowledgeChatCitation(
+    val contextId: String,
+    val quote: String = "",
+    val reason: String = ""
 )
 
 @Serializable

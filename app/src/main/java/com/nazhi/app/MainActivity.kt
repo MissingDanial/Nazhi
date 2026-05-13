@@ -21,12 +21,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val repository = (application as NazhiApp).appContainer.repository
+        val appContainer = (application as NazhiApp).appContainer
         applyShareIntent(intent)
         setContent {
             NazhiAppRoot {
                 NazhiHomeRoute(
-                    repository = repository,
+                    repository = appContainer.repository,
+                    backendSettingsStore = appContainer.backendSettingsStore,
+                    backendClient = appContainer.backendClient,
                     initialShareText = sharedText,
                     initialShareSource = sharedSource,
                     onShareConsumed = {

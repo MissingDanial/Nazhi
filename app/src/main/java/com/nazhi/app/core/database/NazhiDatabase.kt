@@ -7,11 +7,17 @@ import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.nazhi.app.core.database.dao.ChatCitationDao
+import com.nazhi.app.core.database.dao.ChatMessageDao
+import com.nazhi.app.core.database.dao.ChatSessionDao
 import com.nazhi.app.core.database.dao.EmbeddingDao
 import com.nazhi.app.core.database.dao.KnowledgeEntryDraftDao
 import com.nazhi.app.core.database.dao.KnowledgeEntryDao
 import com.nazhi.app.core.database.dao.NoteDao
 import com.nazhi.app.core.database.dao.ReviewSessionDao
+import com.nazhi.app.core.database.entity.ChatCitationEntity
+import com.nazhi.app.core.database.entity.ChatMessageEntity
+import com.nazhi.app.core.database.entity.ChatSessionEntity
 import com.nazhi.app.core.database.entity.EmbeddingRecordEntity
 import com.nazhi.app.core.database.entity.KnowledgeEntryDraftEntity
 import com.nazhi.app.core.database.entity.KnowledgeEntryEntity
@@ -24,9 +30,12 @@ import com.nazhi.app.core.database.entity.ReviewSessionEntity
         KnowledgeEntryEntity::class,
         KnowledgeEntryDraftEntity::class,
         ReviewSessionEntity::class,
-        EmbeddingRecordEntity::class
+        EmbeddingRecordEntity::class,
+        ChatSessionEntity::class,
+        ChatMessageEntity::class,
+        ChatCitationEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = true
 )
 @TypeConverters(NazhiTypeConverters::class)
@@ -36,6 +45,9 @@ abstract class NazhiDatabase : RoomDatabase() {
     abstract fun knowledgeEntryDraftDao(): KnowledgeEntryDraftDao
     abstract fun reviewSessionDao(): ReviewSessionDao
     abstract fun embeddingDao(): EmbeddingDao
+    abstract fun chatSessionDao(): ChatSessionDao
+    abstract fun chatMessageDao(): ChatMessageDao
+    abstract fun chatCitationDao(): ChatCitationDao
 
     companion object {
         private const val DATABASE_NAME = "nazhi.db"
@@ -46,7 +58,7 @@ abstract class NazhiDatabase : RoomDatabase() {
                 NazhiDatabase::class.java,
                 DATABASE_NAME
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .build()
         }
 
@@ -160,6 +172,57 @@ abstract class NazhiDatabase : RoomDatabase() {
                 )
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_knowledge_entry_drafts_date ON knowledge_entry_drafts(date)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_knowledge_entry_drafts_status ON knowledge_entry_drafts(status)")
+            }
+        }
+
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS chat_sessions (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS chat_messages (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        sessionId TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        errorMessage TEXT,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        FOREIGN KEY(sessionId) REFERENCES chat_sessions(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_chat_messages_sessionId ON chat_messages(sessionId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_chat_messages_createdAt ON chat_messages(createdAt)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS chat_citations (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        messageId TEXT NOT NULL,
+                        knowledgeEntryId TEXT NOT NULL,
+                        sourceNoteIds TEXT NOT NULL,
+                        quote TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        score REAL NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        FOREIGN KEY(messageId) REFERENCES chat_messages(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_chat_citations_messageId ON chat_citations(messageId)")
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_chat_citations_knowledgeEntryId ON chat_citations(knowledgeEntryId)"
+                )
             }
         }
     }
