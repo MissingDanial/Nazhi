@@ -1,6 +1,7 @@
 package com.nazhi.app.core.repository
 
 import com.nazhi.app.core.model.EmbeddingRecord
+import com.nazhi.app.core.model.AiTaskProgress
 import com.nazhi.app.core.model.ChatCitation
 import com.nazhi.app.core.model.ChatMessage
 import com.nazhi.app.core.model.ChatSession
@@ -63,7 +64,10 @@ interface NazhiRepository {
 
     suspend fun saveKnowledgeEntry(entry: KnowledgeEntry)
 
-    suspend fun organizeNotesForDate(date: String): Int
+    suspend fun organizeNotesForDate(
+        date: String,
+        onProgress: (AiTaskProgress) -> Unit = {}
+    ): Int
 
     suspend fun updateKnowledgeDraft(draft: KnowledgeEntryDraft)
 
@@ -91,7 +95,11 @@ interface NazhiRepository {
 
     fun observeChatCitationsForSession(sessionId: String): Flow<List<ChatCitation>>
 
-    suspend fun askKnowledgeQuestion(question: String, topK: Int = 5): ChatMessage
+    suspend fun askKnowledgeQuestion(
+        question: String,
+        topK: Int = 5,
+        onProgress: (AiTaskProgress) -> Unit = {}
+    ): ChatMessage
 
     fun observeReviewSessions(): Flow<List<ReviewSession>>
 

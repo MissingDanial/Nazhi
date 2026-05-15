@@ -27,6 +27,17 @@
                 <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".ProcessTextCaptureActivity"
+            android:exported="true"
+            android:label="@string/action_capture_selection"
+            android:theme="@style/Theme.Nazhi.Capture">
+            <intent-filter>
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
     </application>
 
 </manifest>

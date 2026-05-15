@@ -11,6 +11,9 @@ import com.nazhi.app.core.database.dao.ReviewSessionDao
 import com.nazhi.app.core.database.entity.toEntity
 import com.nazhi.app.core.database.entity.toModel
 import com.nazhi.app.core.embedding.LocalEmbeddingEngine
+import com.nazhi.app.core.model.AiTaskProgress
+import com.nazhi.app.core.model.AiTaskStage
+import com.nazhi.app.core.model.AiTaskStatus
 import com.nazhi.app.core.model.ChatCitation
 import com.nazhi.app.core.model.ChatMessage
 import com.nazhi.app.core.model.ChatMessageStatus
@@ -28,12 +31,15 @@ import com.nazhi.app.core.model.Note
 import com.nazhi.app.core.model.NoteStatus
 import com.nazhi.app.core.model.ReviewSession
 import com.nazhi.app.core.model.SemanticSearchResult
+import com.nazhi.app.core.model.findDuplicateEntry
 import com.nazhi.app.core.network.EmbeddingInput
+import com.nazhi.app.core.network.BackendTaskResponse
 import com.nazhi.app.core.network.KnowledgeChatContextInput
 import com.nazhi.app.core.network.NazhiBackendException
 import com.nazhi.app.core.network.NazhiBackendClient
 import java.io.IOException
 import java.util.UUID
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
@@ -184,17 +190,117 @@ class LocalNazhiRepository(
         knowledgeEntryDao.upsert(entry.toEntity())
     }
 
-    override suspend fun organizeNotesForDate(date: String): Int {
-        val notes = noteDao.getNotesForDate(date).map { it.toModel() }
+    override suspend fun organizeNotesForDate(
+        date: String,
+        onProgress: (AiTaskProgress) -> Unit
+    ): Int {
+        onProgress(
+            AiTaskProgress(
+                status = AiTaskStatus.RUNNING,
+                stage = AiTaskStage.PREPARING_NOTES,
+                progress = 10,
+                message = "正在读取待整理笔记"
+            )
+        )
+        val notes = noteDao.getNotesForDate(date)
+            .map { it.toModel() }
+            .filter { it.status == NoteStatus.INBOX }
         if (notes.isEmpty()) {
+            onProgress(
+                AiTaskProgress(
+                    status = AiTaskStatus.SUCCEEDED,
+                    stage = AiTaskStage.DONE,
+                    progress = 100,
+                    message = "没有可整理的内容"
+                )
+            )
             return 0
         }
 
-        val response = backendClient.organizeNotes(
-            requestId = "organize-$date-${UUID.randomUUID()}",
-            date = date,
-            notes = notes
+        val requestId = "organize-$date-${UUID.randomUUID()}"
+        val response = runCatching {
+            val createdTask = backendClient.createOrganizeNotesJob(
+                requestId = requestId,
+                date = date,
+                notes = notes
+            )
+            onProgress(createdTask.toAiTaskProgress())
+            waitForOrganizeTask(createdTask, onProgress)
+        }.getOrElse { error ->
+            if (error is NazhiBackendException && (error.statusCode == 404 || error.code == "NOT_FOUND")) {
+                onProgress(
+                    AiTaskProgress(
+                        status = AiTaskStatus.RUNNING,
+                        stage = AiTaskStage.CALLING_MODEL,
+                        progress = 45,
+                        message = "后端使用旧版同步整理接口"
+                    )
+                )
+                backendClient.organizeNotes(
+                    requestId = requestId,
+                    date = date,
+                    notes = notes
+                )
+            } else {
+                onProgress(
+                    AiTaskProgress(
+                        status = AiTaskStatus.FAILED,
+                        stage = AiTaskStage.FAILED,
+                        progress = 100,
+                        message = error.toUserFacingMessage()
+                    )
+                )
+                throw error
+            }
+        }
+
+        onProgress(
+            AiTaskProgress(
+                status = AiTaskStatus.RUNNING,
+                stage = AiTaskStage.SAVING_RESULT,
+                progress = 95,
+                message = "正在写入本地草稿"
+            )
         )
+        val count = replaceDraftsFromResponse(date, notes, response)
+        onProgress(
+            AiTaskProgress(
+                status = AiTaskStatus.SUCCEEDED,
+                stage = AiTaskStage.DONE,
+                progress = 100,
+                message = if (count == 0) "没有生成有效草稿" else "已生成 $count 条 AI 草稿"
+            )
+        )
+        return count
+    }
+
+    private suspend fun waitForOrganizeTask(
+        createdTask: BackendTaskResponse,
+        onProgress: (AiTaskProgress) -> Unit
+    ): com.nazhi.app.core.network.OrganizeNotesResponse {
+        var task = createdTask
+        while (task.status == "RUNNING") {
+            delay(1_200)
+            task = backendClient.getTask(task.taskId)
+            onProgress(task.toAiTaskProgress())
+        }
+
+        if (task.status == "SUCCEEDED") {
+            return task.result ?: throw IOException("AI 整理任务完成但没有返回结果。")
+        }
+
+        throw NazhiBackendException(
+            statusCode = 500,
+            code = task.error?.code ?: "TASK_FAILED",
+            publicMessage = task.error?.message ?: task.message.ifBlank { "AI 整理任务失败。" }
+        )
+    }
+
+    private suspend fun replaceDraftsFromResponse(
+        date: String,
+        notes: List<Note>,
+        response: com.nazhi.app.core.network.OrganizeNotesResponse
+    ): Int {
         val now = System.currentTimeMillis()
         val drafts = response.drafts
             .mapIndexedNotNull { index, draft ->
@@ -252,6 +358,16 @@ class LocalNazhiRepository(
         val now = System.currentTimeMillis()
         val sourceNotes = draft.sourceNoteIds.mapNotNull { noteDao.getNote(it)?.toModel() }
         val firstNote = sourceNotes.firstOrNull()
+        val duplicateEntry = draft.findDuplicateEntry(
+            knowledgeEntryDao.getEntries().map { it.toModel() }
+        )
+        if (duplicateEntry != null) {
+            draft.sourceNoteIds.forEach { noteId ->
+                noteDao.updateStatus(noteId, NoteStatus.REVIEWED, now)
+            }
+            knowledgeEntryDraftDao.updateStatus(draft.id, KnowledgeDraftStatus.SKIPPED, now)
+            throw DuplicateKnowledgeEntryException(duplicateEntry.userTitle)
+        }
         val entry = KnowledgeEntry(
             id = "knowledge-${UUID.randomUUID()}",
             noteId = firstNote?.id.orEmpty(),
@@ -284,7 +400,15 @@ class LocalNazhiRepository(
             .filter { it.status == KnowledgeDraftStatus.PENDING }
             .filter { !it.needsReview }
             .forEach { draft ->
-                if (submitKnowledgeDraft(draft.id) != null) {
+                val entry = runCatching { submitKnowledgeDraft(draft.id) }
+                    .getOrElse { error ->
+                        if (error is DuplicateKnowledgeEntryException) {
+                            null
+                        } else {
+                            throw error
+                        }
+                    }
+                if (entry != null) {
                     submittedCount += 1
                 }
             }
@@ -416,12 +540,24 @@ class LocalNazhiRepository(
         }
     }
 
-    override suspend fun askKnowledgeQuestion(question: String, topK: Int): ChatMessage {
+    override suspend fun askKnowledgeQuestion(
+        question: String,
+        topK: Int,
+        onProgress: (AiTaskProgress) -> Unit
+    ): ChatMessage {
         val trimmedQuestion = question.trim()
         if (trimmedQuestion.isEmpty()) {
             throw IllegalArgumentException("问题不能为空")
         }
 
+        onProgress(
+            AiTaskProgress(
+                status = AiTaskStatus.RUNNING,
+                stage = AiTaskStage.LOCAL_RETRIEVAL,
+                progress = 20,
+                message = "正在检索本地知识库"
+            )
+        )
         val now = System.currentTimeMillis()
         val session = getOrCreateChatSession(trimmedQuestion, now)
         val userMessage = ChatMessage(
@@ -443,6 +579,14 @@ class LocalNazhiRepository(
 
         val results = searchSimilarKnowledgeEntries(trimmedQuestion, topK)
         if (results.isEmpty()) {
+            onProgress(
+                AiTaskProgress(
+                    status = AiTaskStatus.SUCCEEDED,
+                    stage = AiTaskStage.DONE,
+                    progress = 100,
+                    message = "没有找到足够相关的本地知识"
+                )
+            )
             return saveAssistantMessage(
                 sessionId = session.id,
                 content = "当前知识库中没有足够信息回答这个问题。请先完成知识入库和向量索引，或换一个更具体的问题。",
@@ -453,7 +597,23 @@ class LocalNazhiRepository(
             )
         }
 
+        onProgress(
+            AiTaskProgress(
+                status = AiTaskStatus.RUNNING,
+                stage = AiTaskStage.CONTEXT_READY,
+                progress = 45,
+                message = "已找到 ${results.size} 条相关知识"
+            )
+        )
         return runCatching {
+            onProgress(
+                AiTaskProgress(
+                    status = AiTaskStatus.RUNNING,
+                    stage = AiTaskStage.CALLING_MODEL,
+                    progress = 70,
+                    message = "AI 正在基于本地知识生成回答"
+                )
+            )
             val response = backendClient.chatWithKnowledge(
                 requestId = "knowledge-chat-${UUID.randomUUID()}",
                 question = trimmedQuestion,
@@ -470,6 +630,14 @@ class LocalNazhiRepository(
                     )
                 }
             )
+            onProgress(
+                AiTaskProgress(
+                    status = AiTaskStatus.RUNNING,
+                    stage = AiTaskStage.SAVING_RESULT,
+                    progress = 90,
+                    message = "正在保存回答和引用"
+                )
+            )
             saveAssistantMessage(
                 sessionId = session.id,
                 content = response.answer.ifBlank { "当前知识库中没有足够信息回答这个问题。" },
@@ -477,9 +645,26 @@ class LocalNazhiRepository(
                 errorMessage = null,
                 citations = response.citations,
                 matchedResults = results
-            )
+            ).also {
+                onProgress(
+                    AiTaskProgress(
+                        status = AiTaskStatus.SUCCEEDED,
+                        stage = AiTaskStage.DONE,
+                        progress = 100,
+                        message = "回答已生成"
+                    )
+                )
+            }
         }.getOrElse { error ->
             val message = error.toUserFacingMessage()
+            onProgress(
+                AiTaskProgress(
+                    status = AiTaskStatus.FAILED,
+                    stage = AiTaskStage.FAILED,
+                    progress = 100,
+                    message = message
+                )
+            )
             saveAssistantMessage(
                 sessionId = session.id,
                 content = "回答生成失败。",
@@ -661,6 +846,31 @@ class LocalNazhiRepository(
             chatCitationDao.upsertAll(citationEntities)
         }
         return message
+    }
+
+    private fun BackendTaskResponse.toAiTaskProgress(): AiTaskProgress {
+        return AiTaskProgress(
+            status = when (status) {
+                "SUCCEEDED" -> AiTaskStatus.SUCCEEDED
+                "FAILED" -> AiTaskStatus.FAILED
+                else -> AiTaskStatus.RUNNING
+            },
+            stage = when (stage) {
+                "ACCEPTED" -> AiTaskStage.ACCEPTED
+                "PREPARING_NOTES" -> AiTaskStage.PREPARING_NOTES
+                "LOCAL_RETRIEVAL" -> AiTaskStage.LOCAL_RETRIEVAL
+                "CONTEXT_READY" -> AiTaskStage.CONTEXT_READY
+                "CALLING_MODEL" -> AiTaskStage.CALLING_MODEL
+                "PARSING_RESULT" -> AiTaskStage.PARSING_RESULT
+                "SAVING_RESULT" -> AiTaskStage.SAVING_RESULT
+                "FALLBACK_DRAFTS" -> AiTaskStage.FALLBACK_DRAFTS
+                "DONE" -> AiTaskStage.DONE
+                "FAILED" -> AiTaskStage.FAILED
+                else -> AiTaskStage.UNKNOWN
+            },
+            progress = progress.coerceIn(0, 100),
+            message = error?.message ?: message
+        )
     }
 
     private fun Throwable.toUserFacingMessage(): String {

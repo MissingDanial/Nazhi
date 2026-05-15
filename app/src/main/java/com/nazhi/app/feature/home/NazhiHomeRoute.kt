@@ -18,6 +18,7 @@ import com.nazhi.app.core.network.NazhiBackendClient
 import com.nazhi.app.core.repository.NazhiRepository
 import com.nazhi.app.core.settings.BackendSettingsStore
 import com.nazhi.app.feature.calendar.CalendarRoute
+import com.nazhi.app.feature.chat.KnowledgeChatRoute
 import com.nazhi.app.feature.inbox.InboxRoute
 import com.nazhi.app.feature.knowledge.KnowledgeRoute
 import com.nazhi.app.feature.settings.SettingsRoute
@@ -25,6 +26,7 @@ import com.nazhi.app.feature.settings.SettingsRoute
 private enum class MainTab {
     TODAY,
     CALENDAR,
+    CHAT,
     KNOWLEDGE,
     SETTINGS
 }
@@ -62,6 +64,12 @@ fun NazhiHomeRoute(
                     label = { Text(text = "日历") }
                 )
                 NavigationBarItem(
+                    selected = selectedTab == MainTab.CHAT,
+                    onClick = { selectedTab = MainTab.CHAT },
+                    icon = { Text(text = "问") },
+                    label = { Text(text = "问答") }
+                )
+                NavigationBarItem(
                     selected = selectedTab == MainTab.KNOWLEDGE,
                     onClick = { selectedTab = MainTab.KNOWLEDGE },
                     icon = { Text(text = "知") },
@@ -92,6 +100,8 @@ fun NazhiHomeRoute(
                 )
 
                 MainTab.CALENDAR -> CalendarRoute(repository = repository)
+
+                MainTab.CHAT -> KnowledgeChatRoute(repository = repository)
 
                 MainTab.KNOWLEDGE -> KnowledgeRoute(repository = repository)
 

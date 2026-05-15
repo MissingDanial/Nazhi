@@ -20,6 +20,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -43,12 +44,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.nazhi.app.core.model.AiTaskProgress
+import com.nazhi.app.core.model.DayKnowledgeStatus
 import com.nazhi.app.core.model.IntentType
 import com.nazhi.app.core.model.KnowledgeEntry
 import com.nazhi.app.core.model.Note
 import com.nazhi.app.core.model.NoteStatus
 import com.nazhi.app.core.model.ReviewSession
 import com.nazhi.app.core.model.SourceType
+import com.nazhi.app.core.model.isMeaningfulKnowledgeDuplicateKey
+import com.nazhi.app.core.model.toKnowledgeDuplicateKey
 import com.nazhi.app.core.network.NazhiBackendException
 import com.nazhi.app.core.repository.NazhiRepository
 import com.nazhi.app.core.util.toLocalDateId
@@ -110,6 +115,9 @@ fun DateNotesRoute(
     val notes by remember(repository, dateId) {
         repository.observeNotesForDate(dateId)
     }.collectAsState(initial = emptyList())
+    val dayKnowledgeStatus by remember(repository, dateId) {
+        repository.observeDayKnowledgeStatus(dateId)
+    }.collectAsState(initial = DayKnowledgeStatus(dateId, 0, 0, 0, 0, 0, 0, 0, 0))
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -128,6 +136,7 @@ fun DateNotesRoute(
     var deletingNote by remember { mutableStateOf<Note?>(null) }
     var deleteUpdatesReviewSession by remember { mutableStateOf(false) }
     var isAiOrganizing by remember { mutableStateOf(false) }
+    var aiOrganizeProgress by remember { mutableStateOf<AiTaskProgress?>(null) }
     val currentReviewNote = pendingReviewNotes.getOrNull(
         reviewIndex.coerceAtMost((pendingReviewNotes.size - 1).coerceAtLeast(0))
     )
@@ -152,8 +161,10 @@ fun DateNotesRoute(
         showQuickInput = showQuickInput,
         historyPendingCount = historyPendingCount,
         pendingReviewCount = pendingReviewNotes.size,
+        pendingDraftCount = dayKnowledgeStatus.pendingDraftCount,
         reviewedCount = reviewedCount,
         isAiOrganizing = isAiOrganizing,
+        aiOrganizeProgress = aiOrganizeProgress,
         isReviewMode = isReviewMode,
         currentReviewNote = currentReviewNote,
         reviewIndex = reviewIndex,
@@ -175,6 +186,16 @@ fun DateNotesRoute(
             }
 
             val now = System.currentTimeMillis()
+            val duplicateKey = content.toKnowledgeDuplicateKey()
+            val hasDuplicateToday = duplicateKey.isMeaningfulKnowledgeDuplicateKey() &&
+                notes.any { note -> note.content.toKnowledgeDuplicateKey() == duplicateKey }
+            if (hasDuplicateToday) {
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar("今日已存在相同内容，未重复保存")
+                }
+                return@InboxScreen
+            }
+
             val note = Note(
                 id = UUID.randomUUID().toString(),
                 content = content,
@@ -215,7 +236,9 @@ fun DateNotesRoute(
             coroutineScope.launch {
                 isAiOrganizing = true
                 val message = runCatching {
-                    val count = repository.organizeNotesForDate(dateId)
+                    val count = repository.organizeNotesForDate(dateId) { progress ->
+                        aiOrganizeProgress = progress
+                    }
                     if (count == 0) {
                         "没有可整理的内容"
                     } else {
@@ -380,8 +403,10 @@ fun InboxScreen(
     showQuickInput: Boolean,
     historyPendingCount: Int,
     pendingReviewCount: Int,
+    pendingDraftCount: Int,
     reviewedCount: Int,
     isAiOrganizing: Boolean,
+    aiOrganizeProgress: AiTaskProgress?,
     isReviewMode: Boolean,
     currentReviewNote: Note?,
     reviewIndex: Int,
@@ -446,8 +471,10 @@ fun InboxScreen(
                     AiOrganizeTodayCard(
                         totalCount = notes.size,
                         pendingCount = pendingReviewCount,
+                        pendingDraftCount = pendingDraftCount,
                         reviewedCount = reviewedCount,
                         isOrganizing = isAiOrganizing,
+                        progress = aiOrganizeProgress,
                         onOrganize = onAiOrganizeToday
                     )
                 }
@@ -510,10 +537,13 @@ fun InboxScreen(
 private fun AiOrganizeTodayCard(
     totalCount: Int,
     pendingCount: Int,
+    pendingDraftCount: Int,
     reviewedCount: Int,
     isOrganizing: Boolean,
+    progress: AiTaskProgress?,
     onOrganize: () -> Unit
 ) {
+    val canOrganize = pendingCount > 0 && pendingDraftCount == 0
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -535,18 +565,74 @@ private fun AiOrganizeTodayCard(
                 color = MaterialTheme.colorScheme.onPrimaryContainer
             )
             Text(
-                text = "今日 $totalCount 条 · 未处理 $pendingCount 条 · 已处理 $reviewedCount 条",
+                text = "今日 $totalCount 条 · 未处理 $pendingCount 条 · 待确认草稿 $pendingDraftCount 条 · 已处理 $reviewedCount 条",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onPrimaryContainer
             )
+            progress?.let { taskProgress ->
+                RequestProgressBlock(progress = taskProgress)
+            }
+            if (!canOrganize) {
+                Text(
+                    text = when {
+                        pendingDraftCount > 0 -> "已有待确认草稿，先到知识库确认后再整理。"
+                        pendingCount == 0 -> "当前没有待整理内容。"
+                        else -> "当前不可整理。"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            }
             Button(
                 onClick = onOrganize,
-                enabled = totalCount > 0 && !isOrganizing,
+                enabled = canOrganize && !isOrganizing,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text(text = if (isOrganizing) "AI 整理中" else "AI 整理今日")
+                Text(
+                    text = when {
+                        isOrganizing -> "AI 整理中"
+                        pendingDraftCount > 0 -> "先确认草稿"
+                        pendingCount == 0 -> "暂无可整理"
+                        else -> "AI 整理今日"
+                    }
+                )
             }
         }
+    }
+}
+
+@Composable
+private fun RequestProgressBlock(progress: AiTaskProgress) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            text = "${progress.stage.label()} · ${progress.progress}%",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onPrimaryContainer
+        )
+        Text(
+            text = progress.message,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onPrimaryContainer
+        )
+        if (progress.isRunning) {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+        }
+    }
+}
+
+private fun com.nazhi.app.core.model.AiTaskStage.label(): String {
+    return when (this) {
+        com.nazhi.app.core.model.AiTaskStage.ACCEPTED -> "已提交"
+        com.nazhi.app.core.model.AiTaskStage.PREPARING_NOTES -> "准备笔记"
+        com.nazhi.app.core.model.AiTaskStage.LOCAL_RETRIEVAL -> "本地检索"
+        com.nazhi.app.core.model.AiTaskStage.CONTEXT_READY -> "上下文就绪"
+        com.nazhi.app.core.model.AiTaskStage.CALLING_MODEL -> "AI 生成"
+        com.nazhi.app.core.model.AiTaskStage.PARSING_RESULT -> "校验结果"
+        com.nazhi.app.core.model.AiTaskStage.SAVING_RESULT -> "写入本地"
+        com.nazhi.app.core.model.AiTaskStage.FALLBACK_DRAFTS -> "兜底草稿"
+        com.nazhi.app.core.model.AiTaskStage.DONE -> "完成"
+        com.nazhi.app.core.model.AiTaskStage.FAILED -> "失败"
+        com.nazhi.app.core.model.AiTaskStage.UNKNOWN -> "处理中"
     }
 }
 
@@ -981,8 +1067,10 @@ fun InboxPreview() {
             historyPendingCount = 0,
             snackbarHostState = SnackbarHostState(),
             pendingReviewCount = 1,
+            pendingDraftCount = 0,
             reviewedCount = 0,
             isAiOrganizing = false,
+            aiOrganizeProgress = null,
             isReviewMode = false,
             currentReviewNote = null,
             reviewIndex = 0,
@@ -1021,6 +1109,7 @@ private fun SourceType.label(): String {
         SourceType.SHARE -> "分享"
         SourceType.MANUAL -> "手动输入"
         SourceType.CLIPBOARD -> "剪贴板"
+        SourceType.TEXT_SELECTION -> "划词"
     }
 }
 

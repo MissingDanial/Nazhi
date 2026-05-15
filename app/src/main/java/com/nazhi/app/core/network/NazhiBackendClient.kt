@@ -68,6 +68,37 @@ class NazhiBackendClient(
         )
     )
 
+    suspend fun createOrganizeNotesJob(
+        requestId: String,
+        date: String,
+        notes: List<Note>,
+        maxDrafts: Int = 10
+    ): BackendTaskResponse = post(
+        path = "/v1/organize-notes/jobs",
+        body = OrganizeNotesRequest(
+            requestId = requestId,
+            date = date,
+            language = "zh-CN",
+            notes = notes.map { note ->
+                OrganizeNoteInput(
+                    id = note.id,
+                    title = note.title,
+                    content = note.content,
+                    sourceType = note.sourceType.name,
+                    createdAt = note.createdAt
+                )
+            },
+            options = OrganizeOptions(
+                maxDrafts = maxDrafts,
+                mergeSimilar = true
+            )
+        )
+    )
+
+    suspend fun getTask(taskId: String): BackendTaskResponse = get(
+        path = "/v1/tasks/$taskId"
+    )
+
     suspend fun chatWithKnowledge(
         requestId: String,
         question: String,
@@ -232,6 +263,25 @@ data class OrganizeNotesResponse(
     val requestId: String,
     val date: String,
     val drafts: List<OrganizeDraft>
+)
+
+@Serializable
+data class BackendTaskResponse(
+    val taskId: String,
+    val requestId: String,
+    val type: String,
+    val status: String,
+    val stage: String,
+    val progress: Int = 0,
+    val message: String = "",
+    val result: OrganizeNotesResponse? = null,
+    val error: BackendTaskError? = null
+)
+
+@Serializable
+data class BackendTaskError(
+    val code: String? = null,
+    val message: String? = null
 )
 
 @Serializable
