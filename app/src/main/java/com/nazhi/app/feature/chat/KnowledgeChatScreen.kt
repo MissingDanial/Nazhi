@@ -13,6 +13,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -40,7 +41,10 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
 @Composable
-fun KnowledgeChatRoute(repository: NazhiRepository) {
+fun KnowledgeChatRoute(
+    repository: NazhiRepository,
+    onOpenKnowledgeEntry: (String) -> Unit = {}
+) {
     val embeddingCount by remember(repository) {
         repository.observeEmbeddingCount()
     }.collectAsState(initial = 0)
@@ -69,6 +73,16 @@ fun KnowledgeChatRoute(repository: NazhiRepository) {
         askProgress = askProgress,
         snackbarHostState = snackbarHostState,
         onQuestionChange = { question = it },
+        onCitationClick = { citation ->
+            coroutineScope.launch {
+                val entry = repository.getKnowledgeEntry(citation.knowledgeEntryId)
+                if (entry == null) {
+                    snackbarHostState.showSnackbar("引用对应的知识条目不存在，可能已被删除或数据已变化")
+                } else {
+                    onOpenKnowledgeEntry(entry.id)
+                }
+            }
+        },
         onAsk = {
             val trimmedQuestion = question.trim()
             if (trimmedQuestion.isNotBlank()) {
@@ -102,6 +116,7 @@ private fun KnowledgeChatScreen(
     askProgress: AiTaskProgress?,
     snackbarHostState: SnackbarHostState,
     onQuestionChange: (String) -> Unit,
+    onCitationClick: (ChatCitation) -> Unit,
     onAsk: () -> Unit
 ) {
     Scaffold(
@@ -136,6 +151,7 @@ private fun KnowledgeChatScreen(
                     isAsking = isAsking,
                     askProgress = askProgress,
                     onQuestionChange = onQuestionChange,
+                    onCitationClick = onCitationClick,
                     onAsk = onAsk
                 )
             }
@@ -152,6 +168,7 @@ private fun KnowledgeChatCard(
     isAsking: Boolean,
     askProgress: AiTaskProgress?,
     onQuestionChange: (String) -> Unit,
+    onCitationClick: (ChatCitation) -> Unit,
     onAsk: () -> Unit
 ) {
     val citationsByMessage = citations.groupBy { it.messageId }
@@ -205,7 +222,8 @@ private fun KnowledgeChatCard(
                 messages.takeLast(8).forEach { message ->
                     ChatMessageBlock(
                         message = message,
-                        citations = citationsByMessage[message.id].orEmpty()
+                        citations = citationsByMessage[message.id].orEmpty(),
+                        onCitationClick = onCitationClick
                     )
                 }
             }
@@ -216,7 +234,8 @@ private fun KnowledgeChatCard(
 @Composable
 private fun ChatMessageBlock(
     message: ChatMessage,
-    citations: List<ChatCitation>
+    citations: List<ChatCitation>,
+    onCitationClick: (ChatCitation) -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(
@@ -238,14 +257,23 @@ private fun ChatMessageBlock(
             }
         )
         if (citations.isNotEmpty()) {
+            Text(
+                text = "引用 ${citations.size} 条 · 可点击追溯来源",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary
+            )
             citations.forEachIndexed { index, citation ->
-                Text(
-                    text = "引用 ${index + 1}：${citation.quote.ifBlank { citation.knowledgeEntryId }}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
+                OutlinedButton(
+                    onClick = { onCitationClick(citation) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "引用 ${index + 1}：${citation.quote.ifBlank { citation.knowledgeEntryId }}\n查看知识条目 / 原始 Note",
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
         }
     }

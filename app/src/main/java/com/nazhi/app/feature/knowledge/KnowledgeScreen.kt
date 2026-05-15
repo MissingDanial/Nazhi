@@ -32,6 +32,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -59,7 +60,11 @@ import com.nazhi.app.core.util.todayDateId
 import kotlinx.coroutines.launch
 
 @Composable
-fun KnowledgeRoute(repository: NazhiRepository) {
+fun KnowledgeRoute(
+    repository: NazhiRepository,
+    focusedEntryId: String? = null,
+    onFocusedEntryConsumed: () -> Unit = {}
+) {
     val today = remember { todayDateId() }
     val entries by remember(repository) {
         repository.observeKnowledgeEntries()
@@ -85,9 +90,21 @@ fun KnowledgeRoute(repository: NazhiRepository) {
     var editingDraft by remember { mutableStateOf<KnowledgeEntryDraft?>(null) }
     var sourceDialogTitle by remember { mutableStateOf<String?>(null) }
     var sourceDialogNotes by remember { mutableStateOf<List<Note>>(emptyList()) }
+    var detailEntry by remember { mutableStateOf<KnowledgeEntry?>(null) }
+    var detailSourceNotes by remember { mutableStateOf<List<Note>>(emptyList()) }
     val pendingDrafts = drafts.filter { it.status == KnowledgeDraftStatus.PENDING }
     val hasDuplicateDrafts = pendingDrafts.any { draft ->
         draft.findDuplicateEntry(entries) != null
+    }
+
+    LaunchedEffect(focusedEntryId, entries) {
+        val entryId = focusedEntryId?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
+        val entry = entries.firstOrNull { it.id == entryId } ?: repository.getKnowledgeEntry(entryId)
+        if (entry != null) {
+            detailEntry = entry
+            detailSourceNotes = repository.getNotesByIds(entry.sourceNoteIds)
+            onFocusedEntryConsumed()
+        }
     }
 
     KnowledgeScreen(
@@ -213,6 +230,12 @@ fun KnowledgeRoute(repository: NazhiRepository) {
             coroutineScope.launch {
                 snackbarHostState.showSnackbar("已复制引用")
             }
+        },
+        onViewEntry = { entry ->
+            coroutineScope.launch {
+                detailEntry = entry
+                detailSourceNotes = repository.getNotesByIds(entry.sourceNoteIds)
+            }
         }
     )
 
@@ -237,6 +260,26 @@ fun KnowledgeRoute(repository: NazhiRepository) {
             onDismiss = {
                 sourceDialogTitle = null
                 sourceDialogNotes = emptyList()
+            }
+        )
+    }
+
+    detailEntry?.let { entry ->
+        KnowledgeEntryDetailDialog(
+            entry = entry,
+            sourceNotes = detailSourceNotes,
+            onCopyEntry = {
+                context.copyToClipboard(
+                    label = "纳知知识条目",
+                    text = entry.toReferenceText()
+                )
+            },
+            onCopyNote = { note ->
+                context.copyToClipboard(label = "纳知原始 Note", text = note.content)
+            },
+            onDismiss = {
+                detailEntry = null
+                detailSourceNotes = emptyList()
             }
         )
     }
@@ -267,7 +310,8 @@ private fun KnowledgeScreen(
     onSubmitAll: () -> Unit,
     onRetryIndex: () -> Unit,
     onSearch: () -> Unit,
-    onCopy: (KnowledgeEntry) -> Unit
+    onCopy: (KnowledgeEntry) -> Unit,
+    onViewEntry: (KnowledgeEntry) -> Unit
 ) {
     Scaffold(
         topBar = {
@@ -354,6 +398,7 @@ private fun KnowledgeScreen(
                     ) { result ->
                         KnowledgeResultCard(
                             result = result,
+                            onViewEntry = { onViewEntry(result.entry) },
                             onCopy = { onCopy(result.entry) }
                         )
                     }
@@ -373,6 +418,7 @@ private fun KnowledgeScreen(
                     ) { entry ->
                         KnowledgeEntryCard(
                             entry = entry,
+                            onViewEntry = { onViewEntry(entry) },
                             onCopy = { onCopy(entry) }
                         )
                     }
@@ -769,6 +815,136 @@ private fun SourceNotesDialog(
 }
 
 @Composable
+private fun KnowledgeEntryDetailDialog(
+    entry: KnowledgeEntry,
+    sourceNotes: List<Note>,
+    onCopyEntry: () -> Unit,
+    onCopyNote: (Note) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var copyFeedback by remember(entry.id) { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(text = "知识条目详情") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = entry.userTitle?.takeIf { it.isNotBlank() }
+                        ?: entry.content.lineSequence().firstOrNull().orEmpty().ifBlank { "未命名知识" },
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "${entry.intentType.label()} · ${entry.confirmedDate} · ${entry.indexStatus.label()}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "来源 ${sourceNotes.size} 条",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedButton(
+                    onClick = {
+                        onCopyEntry()
+                        copyFeedback = "已复制知识条目"
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(text = "复制知识条目")
+                }
+                copyFeedback?.let { feedback ->
+                    Text(
+                        text = feedback,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                if (entry.summary.isNotBlank()) {
+                    Text(
+                        text = entry.summary,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                Text(
+                    text = entry.content,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                if (entry.tags.isNotEmpty()) {
+                    Text(
+                        text = entry.tags.joinToString(prefix = "标签："),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                entry.userRemark?.takeIf { it.isNotBlank() }?.let { remark ->
+                    Text(
+                        text = "备注：$remark",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                HorizontalDivider()
+                Text(
+                    text = "原始 Note",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                if (sourceNotes.isEmpty()) {
+                    Text(text = "没有找到对应的原始 Note。")
+                } else {
+                    sourceNotes.forEachIndexed { index, note ->
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = "${index + 1}. ${note.title ?: "未命名记录"}",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "${note.sourceType.label()} · ${note.createdDate}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = note.content,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            note.userRemark?.takeIf { it.isNotBlank() }?.let { remark ->
+                                Text(
+                                    text = "备注：$remark",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            TextButton(
+                                onClick = {
+                                    onCopyNote(note)
+                                    copyFeedback = "已复制第 ${index + 1} 条原始 Note"
+                                }
+                            ) {
+                                Text(text = "复制这条 Note")
+                            }
+                        }
+                        if (index != sourceNotes.lastIndex) {
+                            HorizontalDivider()
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = "关闭")
+            }
+        }
+    )
+}
+
+@Composable
 private fun KnowledgeSearchCard(
     entryCount: Int,
     embeddingCount: Int,
@@ -812,11 +988,13 @@ private fun KnowledgeSearchCard(
 @Composable
 private fun KnowledgeResultCard(
     result: SemanticSearchResult,
+    onViewEntry: () -> Unit,
     onCopy: () -> Unit
 ) {
     KnowledgeEntryCard(
         entry = result.entry,
         leadingText = "相似度 ${"%.3f".format(result.score)}",
+        onViewEntry = onViewEntry,
         onCopy = onCopy
     )
 }
@@ -825,6 +1003,7 @@ private fun KnowledgeResultCard(
 private fun KnowledgeEntryCard(
     entry: KnowledgeEntry,
     leadingText: String? = null,
+    onViewEntry: () -> Unit,
     onCopy: () -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -877,6 +1056,9 @@ private fun KnowledgeEntryCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End
             ) {
+                TextButton(onClick = onViewEntry) {
+                    Text(text = "查看详情")
+                }
                 TextButton(onClick = onCopy) {
                     Text(text = "复制引用")
                 }

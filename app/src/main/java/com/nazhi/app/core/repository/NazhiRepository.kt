@@ -1,6 +1,8 @@
 package com.nazhi.app.core.repository
 
 import com.nazhi.app.core.model.EmbeddingRecord
+import com.nazhi.app.core.export.LocalDataImportPreview
+import com.nazhi.app.core.export.LocalDataImportResult
 import com.nazhi.app.core.model.AiTaskProgress
 import com.nazhi.app.core.model.ChatCitation
 import com.nazhi.app.core.model.ChatMessage
@@ -94,6 +96,12 @@ interface NazhiRepository {
     fun observeChatMessages(sessionId: String): Flow<List<ChatMessage>>
 
     fun observeChatCitationsForSession(sessionId: String): Flow<List<ChatCitation>>
+
+    suspend fun buildLocalDataExportJson(): String
+
+    suspend fun previewLocalDataImportJson(json: String): LocalDataImportPreview
+
+    suspend fun importLocalDataJson(json: String): LocalDataImportResult
 
     suspend fun askKnowledgeQuestion(
         question: String,

@@ -15,6 +15,9 @@ interface KnowledgeEntryDraftDao {
     @Query("SELECT * FROM knowledge_entry_drafts WHERE date = :date ORDER BY updatedAt DESC")
     suspend fun getDraftsForDate(date: String): List<KnowledgeEntryDraftEntity>
 
+    @Query("SELECT * FROM knowledge_entry_drafts ORDER BY updatedAt DESC")
+    suspend fun getDrafts(): List<KnowledgeEntryDraftEntity>
+
     @Query("SELECT * FROM knowledge_entry_drafts WHERE id = :id LIMIT 1")
     suspend fun getDraft(id: String): KnowledgeEntryDraftEntity?
 

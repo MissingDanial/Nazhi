@@ -11,6 +11,29 @@ import com.nazhi.app.core.database.dao.ReviewSessionDao
 import com.nazhi.app.core.database.entity.toEntity
 import com.nazhi.app.core.database.entity.toModel
 import com.nazhi.app.core.embedding.LocalEmbeddingEngine
+import com.nazhi.app.core.export.ExportChatCitation
+import com.nazhi.app.core.export.ExportChatMessage
+import com.nazhi.app.core.export.ExportChatSession
+import com.nazhi.app.core.export.ExportKnowledgeDraft
+import com.nazhi.app.core.export.ExportKnowledgeEntry
+import com.nazhi.app.core.export.ExportNote
+import com.nazhi.app.core.export.ExportSafety
+import com.nazhi.app.core.export.ImportEntityResult
+import com.nazhi.app.core.export.LocalDataImportPreview
+import com.nazhi.app.core.export.LocalDataImportResult
+import com.nazhi.app.core.export.NazhiExportPayload
+import com.nazhi.app.core.export.toExportChatCitation
+import com.nazhi.app.core.export.toExportChatMessage
+import com.nazhi.app.core.export.toExportChatSession
+import com.nazhi.app.core.export.toExportKnowledgeDraft
+import com.nazhi.app.core.export.toExportKnowledgeEntry
+import com.nazhi.app.core.export.toExportNote
+import com.nazhi.app.core.export.toImportedChatCitation
+import com.nazhi.app.core.export.toImportedChatMessage
+import com.nazhi.app.core.export.toImportedChatSession
+import com.nazhi.app.core.export.toImportedKnowledgeDraft
+import com.nazhi.app.core.export.toImportedKnowledgeEntry
+import com.nazhi.app.core.export.toImportedNote
 import com.nazhi.app.core.model.AiTaskProgress
 import com.nazhi.app.core.model.AiTaskStage
 import com.nazhi.app.core.model.AiTaskStatus
@@ -43,6 +66,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 class LocalNazhiRepository(
     private val noteDao: NoteDao,
@@ -55,6 +81,12 @@ class LocalNazhiRepository(
     private val chatCitationDao: ChatCitationDao,
     private val backendClient: NazhiBackendClient
 ) : NazhiRepository {
+    private val exportJson = Json {
+        prettyPrint = true
+        encodeDefaults = true
+        ignoreUnknownKeys = true
+    }
+
     override fun observeNotes(): Flow<List<Note>> {
         return noteDao.observeNotes().map { notes -> notes.map { it.toModel() } }
     }
@@ -227,13 +259,16 @@ class LocalNazhiRepository(
             onProgress(createdTask.toAiTaskProgress())
             waitForOrganizeTask(createdTask, onProgress)
         }.getOrElse { error ->
-            if (error is NazhiBackendException && (error.statusCode == 404 || error.code == "NOT_FOUND")) {
+            if (
+                error is NazhiBackendException &&
+                (error.statusCode == 404 || error.code == "NOT_FOUND" || error.code == "DIRECT_API_MODE")
+            ) {
                 onProgress(
                     AiTaskProgress(
                         status = AiTaskStatus.RUNNING,
                         stage = AiTaskStage.CALLING_MODEL,
                         progress = 45,
-                        message = "后端使用旧版同步整理接口"
+                        message = if (error.code == "DIRECT_API_MODE") "正在直接调用用户 API" else "后端使用旧版同步整理接口"
                     )
                 )
                 backendClient.organizeNotes(
@@ -540,6 +575,192 @@ class LocalNazhiRepository(
         }
     }
 
+    override suspend fun buildLocalDataExportJson(): String {
+        val payload = NazhiExportPayload(
+            schemaVersion = 1,
+            appName = "Nazhi",
+            exportedAt = System.currentTimeMillis(),
+            safety = ExportSafety(),
+            notes = noteDao.getNotes().map { it.toModel().toExportNote() },
+            knowledgeEntries = knowledgeEntryDao.getEntries().map { it.toModel().toExportKnowledgeEntry() },
+            knowledgeDrafts = knowledgeEntryDraftDao.getDrafts().map { it.toModel().toExportKnowledgeDraft() },
+            chatSessions = chatSessionDao.getSessions().map { it.toModel().toExportChatSession() },
+            chatMessages = chatMessageDao.getMessages().map { it.toModel().toExportChatMessage() },
+            chatCitations = chatCitationDao.getCitations().map { it.toModel().toExportChatCitation() }
+        )
+        return exportJson.encodeToString(payload)
+    }
+
+    override suspend fun previewLocalDataImportJson(json: String): LocalDataImportPreview {
+        val payload = parseLocalDataImportPayload(json)
+        return LocalDataImportPreview(
+            schemaVersion = payload.schemaVersion,
+            exportedAt = payload.exportedAt,
+            noteCount = payload.notes.size,
+            knowledgeEntryCount = payload.knowledgeEntries.size,
+            knowledgeDraftCount = payload.knowledgeDrafts.size,
+            chatSessionCount = payload.chatSessions.size,
+            chatMessageCount = payload.chatMessages.size,
+            chatCitationCount = payload.chatCitations.size,
+            warnings = buildImportWarnings(payload)
+        )
+    }
+
+    override suspend fun importLocalDataJson(json: String): LocalDataImportResult {
+        val payload = parseLocalDataImportPayload(json)
+        return LocalDataImportResult(
+            notes = importNotes(payload.notes),
+            knowledgeEntries = importKnowledgeEntries(payload.knowledgeEntries),
+            knowledgeDrafts = importKnowledgeDrafts(payload.knowledgeDrafts),
+            chatSessions = importChatSessions(payload.chatSessions),
+            chatMessages = importChatMessages(payload.chatMessages),
+            chatCitations = importChatCitations(payload.chatCitations)
+        )
+    }
+
+    private fun parseLocalDataImportPayload(json: String): NazhiExportPayload {
+        val payload = runCatching {
+            exportJson.decodeFromString<NazhiExportPayload>(json)
+        }.getOrElse {
+            throw IllegalArgumentException("导入文件不是有效的纳知 JSON。")
+        }
+        require(payload.appName.equals("Nazhi", ignoreCase = true)) {
+            "导入文件不是纳知导出文件。"
+        }
+        require(payload.schemaVersion == 1) {
+            "暂不支持 schemaVersion=${payload.schemaVersion} 的导出文件。"
+        }
+        return payload
+    }
+
+    private fun buildImportWarnings(payload: NazhiExportPayload): List<String> {
+        return buildList {
+            if (
+                !payload.safety.excludesApiKeys ||
+                !payload.safety.excludesTokens ||
+                !payload.safety.excludesBackendSettings
+            ) {
+                add("导入流程不会恢复 API Key、服务 Token 或后端配置。")
+            }
+            if (!payload.safety.excludesEmbeddingVectors || payload.knowledgeEntries.isNotEmpty()) {
+                add("导入不会恢复本地向量，知识条目会重新标记为待索引。")
+            }
+            add("同 ID 数据会跳过，不覆盖当前手机已有内容。")
+        }
+    }
+
+    private suspend fun importNotes(notes: List<ExportNote>): ImportEntityResult {
+        var insertedCount = 0
+        var skippedCount = 0
+        var failedCount = 0
+        notes.forEach { item ->
+            val note = item.toImportedNote()
+            when {
+                note.id.isBlank() || note.content.isBlank() || note.createdDate.isBlank() -> failedCount += 1
+                noteDao.getNote(note.id) != null -> skippedCount += 1
+                else -> {
+                    noteDao.upsert(note.toEntity())
+                    insertedCount += 1
+                }
+            }
+        }
+        return ImportEntityResult(insertedCount, skippedCount, failedCount)
+    }
+
+    private suspend fun importKnowledgeEntries(entries: List<ExportKnowledgeEntry>): ImportEntityResult {
+        var insertedCount = 0
+        var skippedCount = 0
+        var failedCount = 0
+        entries.forEach { item ->
+            val entry = item.toImportedKnowledgeEntry()
+            when {
+                entry.id.isBlank() || entry.content.isBlank() || entry.noteId.isBlank() -> failedCount += 1
+                knowledgeEntryDao.getEntry(entry.id) != null -> skippedCount += 1
+                noteDao.getNote(entry.noteId) == null -> failedCount += 1
+                else -> {
+                    knowledgeEntryDao.upsert(entry.toEntity())
+                    insertedCount += 1
+                }
+            }
+        }
+        return ImportEntityResult(insertedCount, skippedCount, failedCount)
+    }
+
+    private suspend fun importKnowledgeDrafts(drafts: List<ExportKnowledgeDraft>): ImportEntityResult {
+        var insertedCount = 0
+        var skippedCount = 0
+        var failedCount = 0
+        drafts.forEach { item ->
+            val draft = item.toImportedKnowledgeDraft()
+            when {
+                draft.id.isBlank() || draft.date.isBlank() || draft.content.isBlank() -> failedCount += 1
+                knowledgeEntryDraftDao.getDraft(draft.id) != null -> skippedCount += 1
+                else -> {
+                    knowledgeEntryDraftDao.upsert(draft.toEntity())
+                    insertedCount += 1
+                }
+            }
+        }
+        return ImportEntityResult(insertedCount, skippedCount, failedCount)
+    }
+
+    private suspend fun importChatSessions(sessions: List<ExportChatSession>): ImportEntityResult {
+        var insertedCount = 0
+        var skippedCount = 0
+        var failedCount = 0
+        sessions.forEach { item ->
+            val session = item.toImportedChatSession()
+            when {
+                session.id.isBlank() -> failedCount += 1
+                chatSessionDao.getSession(session.id) != null -> skippedCount += 1
+                else -> {
+                    chatSessionDao.upsert(session.toEntity())
+                    insertedCount += 1
+                }
+            }
+        }
+        return ImportEntityResult(insertedCount, skippedCount, failedCount)
+    }
+
+    private suspend fun importChatMessages(messages: List<ExportChatMessage>): ImportEntityResult {
+        var insertedCount = 0
+        var skippedCount = 0
+        var failedCount = 0
+        messages.forEach { item ->
+            val message = item.toImportedChatMessage()
+            when {
+                message.id.isBlank() || message.sessionId.isBlank() || message.content.isBlank() -> failedCount += 1
+                chatMessageDao.getMessage(message.id) != null -> skippedCount += 1
+                chatSessionDao.getSession(message.sessionId) == null -> failedCount += 1
+                else -> {
+                    chatMessageDao.upsert(message.toEntity())
+                    insertedCount += 1
+                }
+            }
+        }
+        return ImportEntityResult(insertedCount, skippedCount, failedCount)
+    }
+
+    private suspend fun importChatCitations(citations: List<ExportChatCitation>): ImportEntityResult {
+        var insertedCount = 0
+        var skippedCount = 0
+        var failedCount = 0
+        citations.forEach { item ->
+            val citation = item.toImportedChatCitation()
+            when {
+                citation.id.isBlank() || citation.messageId.isBlank() || citation.knowledgeEntryId.isBlank() -> failedCount += 1
+                chatCitationDao.getCitation(citation.id) != null -> skippedCount += 1
+                chatMessageDao.getMessage(citation.messageId) == null -> failedCount += 1
+                knowledgeEntryDao.getEntry(citation.knowledgeEntryId) == null -> failedCount += 1
+                else -> {
+                    chatCitationDao.upsert(citation.toEntity())
+                    insertedCount += 1
+                }
+            }
+        }
+        return ImportEntityResult(insertedCount, skippedCount, failedCount)
+    }
+
     override suspend fun askKnowledgeQuestion(
         question: String,
         topK: Int,
@@ -555,7 +776,7 @@ class LocalNazhiRepository(
                 status = AiTaskStatus.RUNNING,
                 stage = AiTaskStage.LOCAL_RETRIEVAL,
                 progress = 20,
-                message = "正在检索本地知识库"
+                message = "正在生成问题向量"
             )
         )
         val now = System.currentTimeMillis()
@@ -577,7 +798,28 @@ class LocalNazhiRepository(
             updatedAt = now
         )
 
-        val results = searchSimilarKnowledgeEntries(trimmedQuestion, topK)
+        val results = runCatching {
+            searchSimilarKnowledgeEntriesForQuestion(trimmedQuestion, topK, onProgress)
+        }.getOrElse { error ->
+            val message = error.toUserFacingMessage()
+            onProgress(
+                AiTaskProgress(
+                    status = AiTaskStatus.FAILED,
+                    stage = AiTaskStage.FAILED,
+                    progress = 100,
+                    message = message
+                )
+            )
+            saveAssistantMessage(
+                sessionId = session.id,
+                content = "知识库问答失败。",
+                status = ChatMessageStatus.FAILED,
+                errorMessage = message,
+                citations = emptyList(),
+                matchedResults = emptyList()
+            )
+            throw IOException(message, error)
+        }
         if (results.isEmpty()) {
             onProgress(
                 AiTaskProgress(
@@ -602,7 +844,7 @@ class LocalNazhiRepository(
                 status = AiTaskStatus.RUNNING,
                 stage = AiTaskStage.CONTEXT_READY,
                 progress = 45,
-                message = "已找到 ${results.size} 条相关知识"
+                message = "已命中 ${results.size} 条知识，准备提交给 AI"
             )
         )
         return runCatching {
@@ -651,7 +893,7 @@ class LocalNazhiRepository(
                         status = AiTaskStatus.SUCCEEDED,
                         stage = AiTaskStage.DONE,
                         progress = 100,
-                        message = "回答已生成"
+                        message = "回答已生成，引用 ${response.citations.size} 条"
                     )
                 )
             }
@@ -675,6 +917,38 @@ class LocalNazhiRepository(
             )
             throw IOException(message, error)
         }
+    }
+
+    private suspend fun searchSimilarKnowledgeEntriesForQuestion(
+        query: String,
+        topK: Int,
+        onProgress: (AiTaskProgress) -> Unit
+    ): List<SemanticSearchResult> {
+        val response = backendClient.createEmbeddings(
+            requestId = "query-${UUID.randomUUID()}",
+            input = listOf(
+                EmbeddingInput(
+                    id = "query",
+                    text = query,
+                    metadata = mapOf("type" to "query")
+                )
+            )
+        )
+        val item = response.items.firstOrNull() ?: throw IOException("查询向量生成失败：后端返回为空。")
+        onProgress(
+            AiTaskProgress(
+                status = AiTaskStatus.RUNNING,
+                stage = AiTaskStage.LOCAL_RETRIEVAL,
+                progress = 35,
+                message = "正在本地检索相似知识"
+            )
+        )
+        val queryVector = LocalEmbeddingEngine.normalize(item.embedding.toFloatArray())
+        return searchSimilarKnowledgeEntriesByVector(
+            queryVector = queryVector,
+            model = response.model,
+            topK = topK
+        )
     }
 
     override fun observeReviewSessions(): Flow<List<ReviewSession>> {
@@ -876,6 +1150,19 @@ class LocalNazhiRepository(
     private fun Throwable.toUserFacingMessage(): String {
         return when (this) {
             is NazhiBackendException -> when {
+                code == "DIRECT_API_KEY_MISSING" -> "请先在设置页填写 API Key。"
+                code == "DIRECT_API_BASE_URL_MISSING" -> "请先在设置页填写 API Base URL。"
+                code == "DIRECT_API_UNAUTHORIZED" -> publicMessage
+                code == "DIRECT_API_ENDPOINT_NOT_FOUND" -> publicMessage
+                code == "DIRECT_API_RATE_LIMITED" -> publicMessage
+                code == "DIRECT_API_QUOTA_EXHAUSTED" -> publicMessage
+                code == "DIRECT_API_TIMEOUT" -> publicMessage
+                code == "DIRECT_API_BAD_REQUEST" -> publicMessage
+                code == "DIRECT_API_PROVIDER_UNAVAILABLE" -> publicMessage
+                code == "DIRECT_API_CHAT_RESPONSE_EMPTY" -> publicMessage
+                code == "DIRECT_API_INVALID_JSON" -> "模型返回格式异常，请检查当前模型是否支持稳定输出 JSON。"
+                code == "DIRECT_API_EMBEDDING_FAILED" -> "Embedding API 调用失败，请检查模型名、Key 和服务额度。"
+                code == "DIRECT_API_EMBEDDING_SHAPE_UNSUPPORTED" -> publicMessage
                 statusCode == 401 || code == "UNAUTHORIZED" -> "后端鉴权失败，请检查设置页中的 NAZHI_DEV_TOKEN。"
                 code == "MINIMAX_CHAT_FAILED" -> "模型回答生成失败，请稍后重试或检查后端日志。"
                 code == "MINIMAX_NOT_CONFIGURED" -> "后端 Chat 模型未配置，请检查服务器 .env。"
@@ -884,7 +1171,15 @@ class LocalNazhiRepository(
             else -> {
                 val raw = message.orEmpty()
                 when {
-                    raw.contains("Failed to connect", ignoreCase = true) -> "无法连接后端，请检查服务器地址、端口和防火墙。"
+                    raw.contains("Failed to connect", ignoreCase = true) ||
+                        raw.contains("Unable to resolve host", ignoreCase = true) ||
+                        raw.contains("No address associated", ignoreCase = true) ||
+                        raw.contains("Network is unreachable", ignoreCase = true) ||
+                        raw.contains("ENETUNREACH", ignoreCase = true) ||
+                        raw.contains("No route to host", ignoreCase = true) ||
+                        raw.contains("Connection refused", ignoreCase = true) -> {
+                        "无网络连接或无法连接后端，请检查手机网络和服务器地址。"
+                    }
                     raw.contains("timeout", ignoreCase = true) || raw.contains("timed out", ignoreCase = true) -> {
                         "请求超时，请检查服务器网络或稍后重试。"
                     }

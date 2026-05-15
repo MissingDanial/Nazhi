@@ -176,6 +176,18 @@ fun DateNotesRoute(
                 inputSourceApp = null
             }
         },
+        onPasteClipboard = {
+            val clipboardText = context.readClipboardText()
+            if (clipboardText.isNullOrBlank()) {
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar("剪贴板没有可保存的文本")
+                }
+            } else {
+                input = clipboardText
+                inputSourceType = SourceType.CLIPBOARD
+                inputSourceApp = "系统剪贴板"
+            }
+        },
         onSave = {
             val content = input.trim()
             if (content.isEmpty()) {
@@ -412,6 +424,7 @@ fun InboxScreen(
     reviewIndex: Int,
     snackbarHostState: SnackbarHostState,
     onInputChange: (String) -> Unit,
+    onPasteClipboard: () -> Unit,
     onSave: () -> Unit,
     onEdit: (Note) -> Unit,
     onCopy: (Note) -> Unit,
@@ -461,6 +474,7 @@ fun InboxScreen(
                         input = input,
                         sourceType = inputSourceType,
                         onInputChange = onInputChange,
+                        onPasteClipboard = onPasteClipboard,
                         onSave = onSave
                     )
                 }
@@ -815,6 +829,7 @@ private fun QuickInputCard(
     input: String,
     sourceType: SourceType,
     onInputChange: (String) -> Unit,
+    onPasteClipboard: () -> Unit,
     onSave: () -> Unit
 ) {
     Card(
@@ -839,6 +854,13 @@ private fun QuickInputCard(
                     color = MaterialTheme.colorScheme.primary
                 )
             }
+            if (sourceType == SourceType.CLIPBOARD) {
+                Text(
+                    text = "已读取剪贴板，请确认后保存",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
             OutlinedTextField(
                 value = input,
                 onValueChange = onInputChange,
@@ -846,6 +868,12 @@ private fun QuickInputCard(
                 minLines = 4,
                 label = { Text("保存文章摘录、链接或灵感") }
             )
+            OutlinedButton(
+                onClick = onPasteClipboard,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(text = "粘贴剪贴板")
+            }
             Button(
                 onClick = onSave,
                 modifier = Modifier.fillMaxWidth()
@@ -1075,6 +1103,7 @@ fun InboxPreview() {
             currentReviewNote = null,
             reviewIndex = 0,
             onInputChange = {},
+            onPasteClipboard = {},
             onSave = {},
             onEdit = {},
             onCopy = {},
@@ -1198,4 +1227,15 @@ private fun ReviewSession?.toDeletedReviewSession(
 private fun Context.copyToClipboard(label: String, text: String) {
     val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
+}
+
+private fun Context.readClipboardText(): String? {
+    val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    return clipboard.primaryClip
+        ?.takeIf { it.itemCount > 0 }
+        ?.getItemAt(0)
+        ?.coerceToText(this)
+        ?.toString()
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
 }

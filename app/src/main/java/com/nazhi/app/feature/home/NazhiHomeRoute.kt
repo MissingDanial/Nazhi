@@ -41,6 +41,7 @@ fun NazhiHomeRoute(
     onShareConsumed: () -> Unit = {}
 ) {
     var selectedTab by remember { mutableStateOf(MainTab.TODAY) }
+    var focusedKnowledgeEntryId by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(initialShareText) {
         if (!initialShareText.isNullOrBlank()) {
@@ -101,11 +102,22 @@ fun NazhiHomeRoute(
 
                 MainTab.CALENDAR -> CalendarRoute(repository = repository)
 
-                MainTab.CHAT -> KnowledgeChatRoute(repository = repository)
+                MainTab.CHAT -> KnowledgeChatRoute(
+                    repository = repository,
+                    onOpenKnowledgeEntry = { entryId ->
+                        focusedKnowledgeEntryId = entryId
+                        selectedTab = MainTab.KNOWLEDGE
+                    }
+                )
 
-                MainTab.KNOWLEDGE -> KnowledgeRoute(repository = repository)
+                MainTab.KNOWLEDGE -> KnowledgeRoute(
+                    repository = repository,
+                    focusedEntryId = focusedKnowledgeEntryId,
+                    onFocusedEntryConsumed = { focusedKnowledgeEntryId = null }
+                )
 
                 MainTab.SETTINGS -> SettingsRoute(
+                    repository = repository,
                     backendSettingsStore = backendSettingsStore,
                     backendClient = backendClient
                 )

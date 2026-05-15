@@ -13,6 +13,9 @@ interface NoteDao {
     @Query("SELECT * FROM notes WHERE status != :deletedStatus ORDER BY createdAt DESC")
     fun observeNotes(deletedStatus: NoteStatus = NoteStatus.DELETED): Flow<List<NoteEntity>>
 
+    @Query("SELECT * FROM notes WHERE status != :deletedStatus ORDER BY createdAt DESC")
+    suspend fun getNotes(deletedStatus: NoteStatus = NoteStatus.DELETED): List<NoteEntity>
+
     @Query(
         """
         SELECT * FROM notes

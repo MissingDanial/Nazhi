@@ -11,7 +11,12 @@ interface ChatMessageDao {
     @Query("SELECT * FROM chat_messages WHERE sessionId = :sessionId ORDER BY createdAt ASC")
     fun observeMessagesForSession(sessionId: String): Flow<List<ChatMessageEntity>>
 
+    @Query("SELECT * FROM chat_messages ORDER BY createdAt ASC")
+    suspend fun getMessages(): List<ChatMessageEntity>
+
+    @Query("SELECT * FROM chat_messages WHERE id = :id LIMIT 1")
+    suspend fun getMessage(id: String): ChatMessageEntity?
+
     @Upsert
     suspend fun upsert(message: ChatMessageEntity)
 }
-

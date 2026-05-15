@@ -18,7 +18,15 @@ interface ChatCitationDao {
     )
     fun observeCitationsForSession(sessionId: String): Flow<List<ChatCitationEntity>>
 
+    @Query("SELECT * FROM chat_citations ORDER BY createdAt ASC")
+    suspend fun getCitations(): List<ChatCitationEntity>
+
+    @Query("SELECT * FROM chat_citations WHERE id = :id LIMIT 1")
+    suspend fun getCitation(id: String): ChatCitationEntity?
+
+    @Upsert
+    suspend fun upsert(citation: ChatCitationEntity)
+
     @Upsert
     suspend fun upsertAll(citations: List<ChatCitationEntity>)
 }
-
