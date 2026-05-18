@@ -20,7 +20,13 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-
+        </activity>
+        <activity
+            android:name=".ShareCaptureActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:label="@string/action_capture_share"
+            android:theme="@style/Theme.Nazhi.Capture">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -29,6 +35,7 @@
         </activity>
         <activity
             android:name=".ProcessTextCaptureActivity"
+            android:excludeFromRecents="true"
             android:exported="true"
             android:label="@string/action_capture_selection"
             android:theme="@style/Theme.Nazhi.Capture">

@@ -1,4 +1,5 @@
 <resources>
     <string name="app_name">纳知</string>
+    <string name="action_capture_share">快速收纳到纳知</string>
     <string name="action_capture_selection">收纳到纳知</string>
 </resources>

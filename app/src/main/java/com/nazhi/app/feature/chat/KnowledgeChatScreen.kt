@@ -36,6 +36,7 @@ import com.nazhi.app.core.model.ChatCitation
 import com.nazhi.app.core.model.ChatMessage
 import com.nazhi.app.core.model.ChatMessageStatus
 import com.nazhi.app.core.model.ChatRole
+import com.nazhi.app.core.model.KnowledgeIndexStatus
 import com.nazhi.app.core.repository.NazhiRepository
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
@@ -48,6 +49,9 @@ fun KnowledgeChatRoute(
     val embeddingCount by remember(repository) {
         repository.observeEmbeddingCount()
     }.collectAsState(initial = 0)
+    val knowledgeEntries by remember(repository) {
+        repository.observeKnowledgeEntries()
+    }.collectAsState(initial = emptyList())
     val chatSessions by remember(repository) {
         repository.observeChatSessions()
     }.collectAsState(initial = emptyList())
@@ -69,6 +73,12 @@ fun KnowledgeChatRoute(
         messages = messages,
         citations = citations,
         embeddingCount = embeddingCount,
+        entryCount = knowledgeEntries.size,
+        indexedEntryCount = knowledgeEntries.count { it.indexStatus == KnowledgeIndexStatus.INDEXED },
+        pendingIndexCount = knowledgeEntries.count {
+            it.indexStatus == KnowledgeIndexStatus.PENDING || it.indexStatus == KnowledgeIndexStatus.INDEXING
+        },
+        failedIndexCount = knowledgeEntries.count { it.indexStatus == KnowledgeIndexStatus.FAILED },
         isAsking = isAsking,
         askProgress = askProgress,
         snackbarHostState = snackbarHostState,
@@ -112,6 +122,10 @@ private fun KnowledgeChatScreen(
     messages: List<ChatMessage>,
     citations: List<ChatCitation>,
     embeddingCount: Int,
+    entryCount: Int,
+    indexedEntryCount: Int,
+    pendingIndexCount: Int,
+    failedIndexCount: Int,
     isAsking: Boolean,
     askProgress: AiTaskProgress?,
     snackbarHostState: SnackbarHostState,
@@ -148,6 +162,10 @@ private fun KnowledgeChatScreen(
                     messages = messages,
                     citations = citations,
                     embeddingCount = embeddingCount,
+                    entryCount = entryCount,
+                    indexedEntryCount = indexedEntryCount,
+                    pendingIndexCount = pendingIndexCount,
+                    failedIndexCount = failedIndexCount,
                     isAsking = isAsking,
                     askProgress = askProgress,
                     onQuestionChange = onQuestionChange,
@@ -165,6 +183,10 @@ private fun KnowledgeChatCard(
     messages: List<ChatMessage>,
     citations: List<ChatCitation>,
     embeddingCount: Int,
+    entryCount: Int,
+    indexedEntryCount: Int,
+    pendingIndexCount: Int,
+    failedIndexCount: Int,
     isAsking: Boolean,
     askProgress: AiTaskProgress?,
     onQuestionChange: (String) -> Unit,
@@ -172,6 +194,7 @@ private fun KnowledgeChatCard(
     onAsk: () -> Unit
 ) {
     val citationsByMessage = citations.groupBy { it.messageId }
+    val canAsk = question.isNotBlank() && !isAsking && indexedEntryCount > 0
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -188,6 +211,13 @@ private fun KnowledgeChatCard(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            KnowledgeChatIndexStatusBlock(
+                entryCount = entryCount,
+                indexedEntryCount = indexedEntryCount,
+                pendingIndexCount = pendingIndexCount,
+                failedIndexCount = failedIndexCount,
+                embeddingCount = embeddingCount
+            )
             OutlinedTextField(
                 value = question,
                 onValueChange = onQuestionChange,
@@ -197,13 +227,14 @@ private fun KnowledgeChatCard(
             )
             Button(
                 onClick = onAsk,
-                enabled = question.isNotBlank() && !isAsking && embeddingCount > 0,
+                enabled = canAsk,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
                     text = when {
                         isAsking -> "回答中"
-                        embeddingCount == 0 -> "先完成知识入库"
+                        entryCount == 0 -> "先完成知识入库"
+                        indexedEntryCount == 0 -> "先重建索引"
                         else -> "提问"
                     }
                 )
@@ -227,6 +258,47 @@ private fun KnowledgeChatCard(
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun KnowledgeChatIndexStatusBlock(
+    entryCount: Int,
+    indexedEntryCount: Int,
+    pendingIndexCount: Int,
+    failedIndexCount: Int,
+    embeddingCount: Int
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            text = "知识条目 $entryCount 条 · 可问答 $indexedEntryCount 条 · 本地向量 $embeddingCount 条",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        val statusText = when {
+            entryCount == 0 -> "当前还没有知识条目。请先保存文本，并完成 AI 整理或手动入库。"
+            indexedEntryCount == 0 && pendingIndexCount > 0 -> {
+                "知识库尚未完成索引。请先在知识库页重建索引后再提问。"
+            }
+            indexedEntryCount == 0 && failedIndexCount > 0 -> {
+                "知识索引失败。请检查网络或 API 配置后，在知识库页重试向量入库。"
+            }
+            pendingIndexCount > 0 || failedIndexCount > 0 -> {
+                "部分知识尚未索引，本次问答只会使用已完成索引的知识。"
+            }
+            else -> null
+        }
+        statusText?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (indexedEntryCount == 0 && entryCount > 0) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
+            )
         }
     }
 }

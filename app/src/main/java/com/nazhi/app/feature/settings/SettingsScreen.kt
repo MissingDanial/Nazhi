@@ -70,7 +70,9 @@ fun SettingsRoute(
     var pendingExportText by remember { mutableStateOf<String?>(null) }
     var pendingImportText by remember { mutableStateOf<String?>(null) }
     var importPreview by remember { mutableStateOf<LocalDataImportPreview?>(null) }
+    var importResult by remember { mutableStateOf<LocalDataImportResult?>(null) }
     var isImporting by remember { mutableStateOf(false) }
+    var isReindexingAfterImport by remember { mutableStateOf(false) }
     val exportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
     ) { uri ->
@@ -379,15 +381,18 @@ fun SettingsRoute(
                     onClick = {
                         coroutineScope.launch {
                             isImporting = true
-                            val message = runCatching {
-                                repository.importLocalDataJson(importText).toImportMessage()
+                            val result = runCatching {
+                                repository.importLocalDataJson(importText)
                             }.getOrElse { error ->
-                                "导入失败：${error.message ?: "无法写入本地数据库"}"
+                                isImporting = false
+                                snackbarHostState.showSnackbar("导入失败：${error.message ?: "无法写入本地数据库"}")
+                                return@launch
                             }
                             isImporting = false
                             pendingImportText = null
                             importPreview = null
-                            snackbarHostState.showSnackbar(message)
+                            importResult = result
+                            snackbarHostState.showSnackbar(result.toImportMessage())
                         }
                     }
                 ) {
@@ -403,6 +408,66 @@ fun SettingsRoute(
                     }
                 ) {
                     Text(text = "取消")
+                }
+            }
+        )
+    }
+
+    importResult?.let { result ->
+        AlertDialog(
+            onDismissRequest = {
+                if (!isReindexingAfterImport) {
+                    importResult = null
+                }
+            },
+            title = { Text(text = "导入完成") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(text = result.toResultText())
+                    if (result.shouldOfferIndexRebuild()) {
+                        Text(
+                            text = "导入的知识条目未包含本地向量，需要重建索引后才能用于语义检索和知识库问答。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                if (result.shouldOfferIndexRebuild()) {
+                    TextButton(
+                        enabled = !isReindexingAfterImport,
+                        onClick = {
+                            coroutineScope.launch {
+                                isReindexingAfterImport = true
+                                val message = runCatching {
+                                    val count = repository.indexPendingKnowledgeEntries()
+                                    if (count == 0) "没有完成新的索引，请检查网络、API 配置或知识库状态" else "已重建 $count 条知识索引"
+                                }.getOrElse { error ->
+                                    "重建索引失败：${error.toUserMessage()}"
+                                }
+                                isReindexingAfterImport = false
+                                importResult = null
+                                snackbarHostState.showSnackbar(message)
+                            }
+                        }
+                    ) {
+                        Text(text = if (isReindexingAfterImport) "重建中" else "重建索引")
+                    }
+                } else {
+                    TextButton(onClick = { importResult = null }) {
+                        Text(text = "知道了")
+                    }
+                }
+            },
+            dismissButton = {
+                if (result.shouldOfferIndexRebuild()) {
+                    TextButton(
+                        enabled = !isReindexingAfterImport,
+                        onClick = { importResult = null }
+                    ) {
+                        Text(text = "稍后处理")
+                    }
                 }
             }
         )
@@ -1174,6 +1239,19 @@ private fun LocalDataImportPreview.toPreviewText(): String {
 
 private fun LocalDataImportResult.toImportMessage(): String {
     return "导入完成：新增 $insertedCount，跳过 $skippedCount，失败 $failedCount"
+}
+
+private fun LocalDataImportResult.toResultText(): String {
+    return """
+        新增：$insertedCount
+        跳过：$skippedCount
+        失败：$failedCount
+        新增知识条目：${knowledgeEntries.insertedCount}
+    """.trimIndent()
+}
+
+private fun LocalDataImportResult.shouldOfferIndexRebuild(): Boolean {
+    return knowledgeEntries.insertedCount > 0
 }
 
 private fun Context.readTextFromUri(uri: Uri): String {

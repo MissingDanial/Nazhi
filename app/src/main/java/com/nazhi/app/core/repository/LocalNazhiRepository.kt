@@ -770,6 +770,13 @@ class LocalNazhiRepository(
         if (trimmedQuestion.isEmpty()) {
             throw IllegalArgumentException("问题不能为空")
         }
+        val entries = knowledgeEntryDao.getEntries()
+        if (entries.isEmpty()) {
+            throw IllegalStateException("当前还没有知识条目，请先完成知识入库后再提问。")
+        }
+        if (entries.none { it.indexStatus == KnowledgeIndexStatus.INDEXED }) {
+            throw IllegalStateException("知识库尚未完成索引，请先在知识库页重建索引后再提问。")
+        }
 
         onProgress(
             AiTaskProgress(

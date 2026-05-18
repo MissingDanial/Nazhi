@@ -50,6 +50,7 @@ import com.nazhi.app.core.model.IntentType
 import com.nazhi.app.core.model.KnowledgeDraftStatus
 import com.nazhi.app.core.model.KnowledgeEntry
 import com.nazhi.app.core.model.KnowledgeEntryDraft
+import com.nazhi.app.core.model.KnowledgeIndexStatus
 import com.nazhi.app.core.model.Note
 import com.nazhi.app.core.model.SemanticSearchResult
 import com.nazhi.app.core.model.findDuplicateEntry
@@ -93,6 +94,11 @@ fun KnowledgeRoute(
     var detailEntry by remember { mutableStateOf<KnowledgeEntry?>(null) }
     var detailSourceNotes by remember { mutableStateOf<List<Note>>(emptyList()) }
     val pendingDrafts = drafts.filter { it.status == KnowledgeDraftStatus.PENDING }
+    val indexedEntryCount = entries.count { it.indexStatus == KnowledgeIndexStatus.INDEXED }
+    val pendingIndexCount = entries.count {
+        it.indexStatus == KnowledgeIndexStatus.PENDING || it.indexStatus == KnowledgeIndexStatus.INDEXING
+    }
+    val failedIndexCount = entries.count { it.indexStatus == KnowledgeIndexStatus.FAILED }
     val hasDuplicateDrafts = pendingDrafts.any { draft ->
         draft.findDuplicateEntry(entries) != null
     }
@@ -113,6 +119,9 @@ fun KnowledgeRoute(
         drafts = drafts,
         dayStatus = dayStatus,
         embeddingCount = embeddingCount,
+        indexedEntryCount = indexedEntryCount,
+        pendingIndexCount = pendingIndexCount,
+        failedIndexCount = failedIndexCount,
         query = query,
         results = results,
         hasSearched = hasSearched,
@@ -293,6 +302,9 @@ private fun KnowledgeScreen(
     drafts: List<KnowledgeEntryDraft>,
     dayStatus: DayKnowledgeStatus,
     embeddingCount: Int,
+    indexedEntryCount: Int,
+    pendingIndexCount: Int,
+    failedIndexCount: Int,
     query: String,
     results: List<SemanticSearchResult>,
     hasSearched: Boolean,
@@ -347,6 +359,8 @@ private fun KnowledgeScreen(
                     isOrganizing = isOrganizing,
                     organizeProgress = organizeProgress,
                     isSubmitting = isSubmitting,
+                    pendingIndexCount = pendingIndexCount,
+                    failedIndexCount = failedIndexCount,
                     onOrganizeToday = onOrganizeToday,
                     onSubmitAll = onSubmitAll,
                     onRetryIndex = onRetryIndex
@@ -377,6 +391,9 @@ private fun KnowledgeScreen(
                 KnowledgeSearchCard(
                     entryCount = entries.size,
                     embeddingCount = embeddingCount,
+                    indexedEntryCount = indexedEntryCount,
+                    pendingIndexCount = pendingIndexCount,
+                    failedIndexCount = failedIndexCount,
                     query = query,
                     onQueryChange = onQueryChange,
                     onSearch = onSearch
@@ -437,6 +454,8 @@ private fun DayKnowledgeStatusCard(
     isOrganizing: Boolean,
     organizeProgress: AiTaskProgress?,
     isSubmitting: Boolean,
+    pendingIndexCount: Int,
+    failedIndexCount: Int,
     onOrganizeToday: () -> Unit,
     onSubmitAll: () -> Unit,
     onRetryIndex: () -> Unit
@@ -528,10 +547,16 @@ private fun DayKnowledgeStatusCard(
             }
             OutlinedButton(
                 onClick = onRetryIndex,
-                enabled = status.failedIndexCount > 0 || status.knowledgeEntryCount > status.indexedEntryCount,
+                enabled = failedIndexCount > 0 || pendingIndexCount > 0,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text(text = "重试向量入库")
+                Text(
+                    text = when {
+                        failedIndexCount > 0 -> "重试失败索引"
+                        pendingIndexCount > 0 -> "重建待索引知识"
+                        else -> "索引已完成"
+                    }
+                )
             }
         }
     }
@@ -948,6 +973,9 @@ private fun KnowledgeEntryDetailDialog(
 private fun KnowledgeSearchCard(
     entryCount: Int,
     embeddingCount: Int,
+    indexedEntryCount: Int,
+    pendingIndexCount: Int,
+    failedIndexCount: Int,
     query: String,
     onQueryChange: (String) -> Unit,
     onSearch: () -> Unit
@@ -963,9 +991,15 @@ private fun KnowledgeSearchCard(
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "知识条目 $entryCount 条 · 本地向量 $embeddingCount 条",
+                text = "知识条目 $entryCount 条 · 已索引 $indexedEntryCount 条 · 本地向量 $embeddingCount 条",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            KnowledgeIndexStatusHint(
+                entryCount = entryCount,
+                indexedEntryCount = indexedEntryCount,
+                pendingIndexCount = pendingIndexCount,
+                failedIndexCount = failedIndexCount
             )
             OutlinedTextField(
                 value = query,
@@ -976,12 +1010,51 @@ private fun KnowledgeSearchCard(
             )
             Button(
                 onClick = onSearch,
-                enabled = query.isNotBlank() && embeddingCount > 0,
+                enabled = query.isNotBlank() && indexedEntryCount > 0,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text(text = "语义检索")
+                Text(
+                    text = when {
+                        entryCount == 0 -> "先完成知识入库"
+                        indexedEntryCount == 0 -> "先重建索引"
+                        else -> "语义检索"
+                    }
+                )
             }
         }
+    }
+}
+
+@Composable
+private fun KnowledgeIndexStatusHint(
+    entryCount: Int,
+    indexedEntryCount: Int,
+    pendingIndexCount: Int,
+    failedIndexCount: Int
+) {
+    val text = when {
+        entryCount == 0 -> "当前还没有知识条目。"
+        indexedEntryCount == 0 && pendingIndexCount > 0 -> {
+            "知识库已有内容但尚未完成索引，请点击上方“重试向量入库”后再检索或问答。"
+        }
+        indexedEntryCount == 0 && failedIndexCount > 0 -> {
+            "知识索引失败，请检查网络或 API 配置后重试向量入库。"
+        }
+        pendingIndexCount > 0 || failedIndexCount > 0 -> {
+            "部分知识尚未索引，当前检索和问答只会使用已索引内容。"
+        }
+        else -> null
+    }
+    text?.let {
+        Text(
+            text = it,
+            style = MaterialTheme.typography.bodySmall,
+            color = if (indexedEntryCount == 0 && entryCount > 0) {
+                MaterialTheme.colorScheme.error
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            }
+        )
     }
 }
 
