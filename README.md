@@ -1,51 +1,172 @@
-# Nazhi Android
+# 纳知 Nazhi Android
 
-纳知 V1 Android 客户端。
+纳知 —— 基于 AI 的个人知识管理 Android 客户端。通过悬浮球一键收纳碎片知识，结合 RAG 语义检索与大模型对话，让知识不再遗忘。
 
-## 当前范围
+## 核心功能
 
-- 今日：本地文本保存、分享快速收纳、剪贴板收纳、编辑、复制、删除和 AI 整理入口。
-- 日历：按日期查看历史记录，标记有记录和待回顾日期。
-- 问答：基于本地知识库 TopK 检索后调用 AI 生成回答，并展示可点击引用。
-- 知识库：AI 草稿确认、KnowledgeEntry 入库、本地 embedding BLOB、语义检索、索引状态和知识详情。
-- 设置：纳知服务 / 自带 API Key 模式、本地导出、本地导入、导入后重建索引、悬浮球权限与开关。
-- 捕获入口：系统分享、Direct Share、`ACTION_PROCESS_TEXT` 兼容入口、悬浮球粘贴保存。
+### 1. 知识捕获
 
-V1 仍保持本地优先：Note、KnowledgeEntry、向量和问答记录保存在 Android 本地；模型调用可走纳知后端代理或用户本机保存的 API 服务配置。
+多入口快速捕获文字内容，随时随地记录灵感与信息：
 
-## 工程环境
+- **悬浮球捕获**：全局悬浮球覆盖层，复制文字后点击悬浮球一键保存，无需切换应用
+- **系统分享**：从任意应用通过系统分享菜单直接发送到纳知
+- **Direct Share**：系统分享面板直接显示纳知快捷入口
+- **文本选择捕获**：选中文字后通过 `ACTION_PROCESS_TEXT` 菜单直接收纳
+- **剪贴板捕获**：`ClipboardCaptureActivity` 自动读取剪贴板内容并保存
 
-- Kotlin
-- Jetpack Compose
-- Room
-- DataStore
-- Coroutines
-- 手写 `AppContainer`，V1 暂不引入 Hilt
+### 2. 今日收件箱
+
+按日期管理每日捕获的碎片知识：
+
+- 查看当日所有笔记列表
+- 新建、编辑、复制、删除笔记
+- AI 一键整理：调用大模型将当日碎片笔记自动整理为结构化知识草稿
+- 整理完成后自动跳转知识库查看草稿
+
+### 3. 日历视图
+
+以日历形式回顾历史记录：
+
+- 按日期查看历史笔记
+- 标记有记录的日期
+- 标记有待回顾内容的日期
+- 点击日期查看当日详情
+
+### 4. 知识库
+
+AI 驱动的知识管理核心：
+
+- **AI 草稿确认**：AI 整理后的草稿需用户确认后才正式入库
+- **草稿操作**：支持编辑、跳过、提交单条或批量提交
+- **KnowledgeEntry 入库**：确认后的知识条目持久化存储
+- **本地 Embedding**：基于本地引擎生成向量嵌入，存储为 BLOB
+- **语义检索**：基于向量相似度的语义搜索
+- **索引状态追踪**：显示每条知识的索引构建状态
+- **知识详情查看**：查看知识条目完整内容与元数据
+- **重复检测**：入库前检测重复知识，避免冗余
+
+### 5. RAG 智能问答
+
+基于检索增强生成（RAG）的知识问答：
+
+- 输入问题后，先从本地知识库进行 TopK 语义检索
+- 将检索到的相关知识作为上下文发送给大模型
+- 大模型基于知识库内容生成回答
+- 展示可点击的引用来源，追溯原始笔记
+- 支持多轮对话，保留聊天历史
+
+### 6. 设置与配置
+
+灵活的后端与模型配置：
+
+- **后端模式**：纳知云服务模式 或 自带 API Key 模式
+- **API Key 管理**：加密存储用户的 API Key（`EncryptedSettingsStore`）
+- **后端地址配置**：自定义后端服务 URL
+- **连接测试**：测试后端服务连通性
+- **数据导出**：将本地知识数据导出为 JSON 文件
+- **数据导入**：从 JSON 文件导入知识数据，导入后自动重建向量索引
+- **悬浮球开关**：控制悬浮球服务的启停
+
+## 技术架构
+
+### 技术栈
+
+- 语言：Kotlin
+- UI 框架：Jetpack Compose
+- 数据库：Room（含 TypeConverters）
+- 偏好存储：DataStore + EncryptedSharedPreferences
+- 异步：Kotlin Coroutines
+- 依赖注入：手写 `AppContainer`（V1 暂不引入 Hilt）
+
+### 构建环境
+
 - AGP 9.1.0
 - Gradle 9.3.1
 - JDK 17
 - API 36.1
 
-## 打开方式
+### 数据模型
 
-使用 Android Studio 打开本目录：
+| 模型 | 说明 |
+|------|------|
+| `Note` | 原始笔记，按日期分组 |
+| `KnowledgeEntry` | 确认入库的知识条目 |
+| `KnowledgeEntryDraft` | AI 整理后的待确认草稿 |
+| `EmbeddingRecord` | 知识条目的向量嵌入记录 |
+| `ChatSession` / `ChatMessage` | 对话会话与消息 |
+| `ChatCitation` | 回答中的引用来源 |
 
-```text
-.\nazhi-android
+### 模块结构
+
+```
+app/src/main/java/com/nazhi/app/
+├── core/
+│   ├── capture/          # 捕获服务（悬浮球、剪贴板）
+│   ├── database/         # Room 数据库、DAO、Entity
+│   ├── embedding/        # 本地向量嵌入引擎
+│   ├── export/           # 数据导入导出
+│   ├── model/            # 数据模型
+│   ├── network/          # 后端 API 客户端
+│   ├── repository/       # 数据仓库层
+│   └── settings/         # 设置存储
+├── feature/
+│   ├── chat/             # RAG 问答对话
+│   ├── home/             # 主页导航
+│   ├── inbox/            # 今日收件箱
+│   ├── knowledge/        # 知识库管理
+│   └── settings/         # 设置页面
+├── MainActivity.kt
+├── NazhiApp.kt           # 应用入口与导航
+├── ClipboardCaptureActivity.kt
+├── FloatingCaptureService.kt
+├── ProcessTextCaptureActivity.kt
+└── ShareCaptureActivity.kt
+```
+
+## 快速开始
+
+### 环境要求
+
+- Android Studio（推荐最新稳定版）
+- JDK 17
+- Android SDK API 36
+
+### 打开项目
+
+使用 Android Studio 打开项目目录：
+
+```
+nazhi-android
 ```
 
 首次打开后执行 Gradle Sync。
 
-## 常用验证
+### 构建验证
 
-```powershell
-.\gradlew.bat :app:compileDebugKotlin
-.\gradlew.bat :app:assembleDebug
+```bash
+# 编译检查
+./gradlew :app:compileDebugKotlin
+
+# 构建 Debug APK
+./gradlew :app:assembleDebug
 ```
 
-生成的 debug APK 位于：
+生成的 Debug APK 位于：
 
-```text
-app\build\outputs\apk\debug\app-debug.apk
 ```
+app/build/outputs/apk/debug/app-debug.apk
+```
+
+## 设计理念
+
+纳知遵循 **本地优先（Local-First）** 原则：
+
+- 所有笔记、知识条目、向量数据和对话记录均存储在 Android 本地
+- 模型调用可走纳知后端代理，也可使用用户自配的 API 服务
+- 用户数据完全掌控在自己手中
+- 支持离线使用知识捕获和浏览功能
+
+## 许可证
+
+Private
 
