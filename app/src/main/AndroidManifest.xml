@@ -20,6 +20,9 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
         </activity>
         <activity
             android:name=".ShareCaptureActivity"
@@ -34,6 +37,14 @@
             </intent-filter>
         </activity>
         <activity
+            android:name=".ClipboardCaptureActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:finishOnTaskLaunch="true"
+            android:noHistory="true"
+            android:taskAffinity="com.nazhi.app.capture"
+            android:theme="@style/Theme.Nazhi.Capture" />
+        <activity
             android:name=".ProcessTextCaptureActivity"
             android:excludeFromRecents="true"
             android:exported="true"
@@ -45,6 +56,9 @@
                 <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
+        <service
+            android:name=".FloatingCaptureService"
+            android:exported="false" />
     </application>
 
 </manifest>

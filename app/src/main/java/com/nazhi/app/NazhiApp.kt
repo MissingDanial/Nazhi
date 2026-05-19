@@ -1,6 +1,7 @@
 package com.nazhi.app
 
 import android.app.Application
+import com.nazhi.app.core.capture.NazhiShareShortcuts
 import com.nazhi.app.core.data.AppContainer
 
 class NazhiApp : Application() {
@@ -10,5 +11,6 @@ class NazhiApp : Application() {
     override fun onCreate() {
         super.onCreate()
         appContainer = AppContainer(this)
+        NazhiShareShortcuts.publish(this)
     }
 }

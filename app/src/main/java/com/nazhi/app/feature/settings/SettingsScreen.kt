@@ -1,7 +1,9 @@
 package com.nazhi.app.feature.settings
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
+import android.provider.Settings as AndroidSettings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -51,6 +53,7 @@ import com.nazhi.app.core.export.LocalDataImportPreview
 import com.nazhi.app.core.export.LocalDataImportResult
 import com.nazhi.app.core.repository.NazhiRepository
 import com.nazhi.app.core.settings.BackendSettingsStore
+import com.nazhi.app.FloatingCaptureService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -67,6 +70,14 @@ fun SettingsRoute(
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
+    var hasOverlayPermission by remember { mutableStateOf(context.hasOverlayPermission()) }
+    var isFloatingCaptureRunning by remember { mutableStateOf(FloatingCaptureService.isRunning) }
+    val overlayPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        hasOverlayPermission = context.hasOverlayPermission()
+        isFloatingCaptureRunning = FloatingCaptureService.isRunning
+    }
     var pendingExportText by remember { mutableStateOf<String?>(null) }
     var pendingImportText by remember { mutableStateOf<String?>(null) }
     var importPreview by remember { mutableStateOf<LocalDataImportPreview?>(null) }
@@ -168,6 +179,8 @@ fun SettingsRoute(
         isTesting = isTesting,
         isImporting = isImporting,
         connectionResult = connectionResult,
+        hasOverlayPermission = hasOverlayPermission,
+        isFloatingCaptureRunning = isFloatingCaptureRunning,
         snackbarHostState = snackbarHostState,
         onBaseUrlChange = {
             baseUrl = it
@@ -241,6 +254,31 @@ fun SettingsRoute(
         },
         onImportLocalData = {
             importLauncher.launch(arrayOf("application/json", "text/*", "application/octet-stream"))
+        },
+        onRequestOverlayPermission = {
+            overlayPermissionLauncher.launch(context.overlayPermissionIntent())
+        },
+        onStartFloatingCapture = {
+            coroutineScope.launch {
+                hasOverlayPermission = context.hasOverlayPermission()
+                if (!hasOverlayPermission) {
+                    snackbarHostState.showSnackbar("请先开启悬浮窗权限")
+                    return@launch
+                }
+                context.startService(
+                    Intent(context, FloatingCaptureService::class.java)
+                        .setAction(FloatingCaptureService.ACTION_START_HIDDEN)
+                )
+                isFloatingCaptureRunning = true
+                snackbarHostState.showSnackbar("悬浮球已开启，离开纳知后显示")
+            }
+        },
+        onStopFloatingCapture = {
+            coroutineScope.launch {
+                context.stopService(Intent(context, FloatingCaptureService::class.java))
+                isFloatingCaptureRunning = false
+                snackbarHostState.showSnackbar("悬浮球已关闭")
+            }
         },
         onSave = {
             val config = BackendConfig(
@@ -493,6 +531,8 @@ private fun SettingsScreen(
     isTesting: Boolean,
     isImporting: Boolean,
     connectionResult: ConnectionResult?,
+    hasOverlayPermission: Boolean,
+    isFloatingCaptureRunning: Boolean,
     snackbarHostState: SnackbarHostState,
     onBaseUrlChange: (String) -> Unit,
     onDevTokenChange: (String) -> Unit,
@@ -508,6 +548,9 @@ private fun SettingsScreen(
     onClearDirectApiConfig: () -> Unit,
     onExportLocalData: () -> Unit,
     onImportLocalData: () -> Unit,
+    onRequestOverlayPermission: () -> Unit,
+    onStartFloatingCapture: () -> Unit,
+    onStopFloatingCapture: () -> Unit,
     onSave: () -> Unit,
     onTestConnection: () -> Unit
 ) {
@@ -585,6 +628,15 @@ private fun SettingsScreen(
             }
             item {
                 BackendSecurityNoteCard()
+            }
+            item {
+                FloatingCaptureCard(
+                    hasOverlayPermission = hasOverlayPermission,
+                    isRunning = isFloatingCaptureRunning,
+                    onRequestPermission = onRequestOverlayPermission,
+                    onStart = onStartFloatingCapture,
+                    onStop = onStopFloatingCapture
+                )
             }
             item {
                 LocalDataExportCard(
@@ -1042,6 +1094,69 @@ private fun BackendSecurityNoteCard() {
 }
 
 @Composable
+private fun FloatingCaptureCard(
+    hasOverlayPermission: Boolean,
+    isRunning: Boolean,
+    onRequestPermission: () -> Unit,
+    onStart: () -> Unit,
+    onStop: () -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = "悬浮球快捷收纳",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "权限：${if (hasOverlayPermission) "已开启" else "未开启"}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (hasOverlayPermission) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.error
+                }
+            )
+            Text(
+                text = "状态：${if (isRunning) "运行中" else "未启动"}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = "点击悬浮球时读取剪贴板；不会后台监听剪贴板。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (!hasOverlayPermission) {
+                Button(
+                    onClick = onRequestPermission,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(text = "开启悬浮窗权限")
+                }
+            } else if (isRunning) {
+                OutlinedButton(
+                    onClick = onStop,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(text = "关闭悬浮球")
+                }
+            } else {
+                Button(
+                    onClick = onStart,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(text = "启动悬浮球")
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun LocalDataExportCard(
     isImporting: Boolean,
     onExportLocalData: () -> Unit,
@@ -1264,4 +1379,15 @@ private fun Context.writeTextToUri(uri: Uri, text: String) {
     contentResolver.openOutputStream(uri)?.use { output ->
         output.write(text.toByteArray(Charsets.UTF_8))
     } ?: error("无法打开导出文件")
+}
+
+private fun Context.hasOverlayPermission(): Boolean {
+    return AndroidSettings.canDrawOverlays(this)
+}
+
+private fun Context.overlayPermissionIntent(): Intent {
+    return Intent(
+        AndroidSettings.ACTION_MANAGE_OVERLAY_PERMISSION,
+        Uri.parse("package:$packageName")
+    )
 }
