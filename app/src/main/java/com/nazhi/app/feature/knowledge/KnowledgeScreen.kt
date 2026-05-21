@@ -92,8 +92,12 @@ fun KnowledgeRoute(
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf<List<SemanticSearchResult>>(emptyList()) }
     var hasSearched by remember { mutableStateOf(false) }
+    var entrySearchQuery by remember { mutableStateOf("") }
+    var entryIndexFilter by remember { mutableStateOf(KnowledgeEntryIndexFilter.ALL) }
     var isSubmitting by remember { mutableStateOf(false) }
+    var isUpdatingEntry by remember { mutableStateOf(false) }
     var editingDraft by remember { mutableStateOf<KnowledgeEntryDraft?>(null) }
+    var editingEntry by remember { mutableStateOf<KnowledgeEntry?>(null) }
     var sourceDialogTitle by remember { mutableStateOf<String?>(null) }
     var sourceDialogNotes by remember { mutableStateOf<List<Note>>(emptyList()) }
     var detailEntry by remember { mutableStateOf<KnowledgeEntry?>(null) }
@@ -141,10 +145,13 @@ fun KnowledgeRoute(
         query = query,
         results = results,
         hasSearched = hasSearched,
+        entrySearchQuery = entrySearchQuery,
+        entryIndexFilter = entryIndexFilter,
         isOrganizing = knowledgeIngestionState.isRunning &&
             knowledgeIngestionState.taskKind == KnowledgeTaskKind.ORGANIZE,
         organizeProgress = knowledgeIngestionState.progress,
         isSubmitting = isSubmitting || knowledgeIngestionState.isRunning,
+        isUpdatingEntry = isUpdatingEntry,
         knowledgeIngestionState = knowledgeIngestionState,
         hasDuplicateDrafts = hasDuplicateDrafts,
         snackbarHostState = snackbarHostState,
@@ -155,6 +162,8 @@ fun KnowledgeRoute(
                 results = emptyList()
             }
         },
+        onEntrySearchQueryChange = { entrySearchQuery = it },
+        onEntryFilterChange = { entryIndexFilter = it },
         onOrganizeToday = {
             knowledgeIngestionCoordinator.organizeToday(today)
         },
@@ -218,6 +227,25 @@ fun KnowledgeRoute(
                 detailEntry = entry
                 detailSourceNotes = repository.getNotesByIds(entry.sourceNoteIds)
             }
+        },
+        onEditEntry = { entry ->
+            editingEntry = entry
+        },
+        onReindexEntry = { entry ->
+            coroutineScope.launch {
+                isUpdatingEntry = true
+                val message = runCatching {
+                    if (repository.indexKnowledgeEntry(entry.id)) {
+                        "问答索引已更新"
+                    } else {
+                        "索引更新失败，请检查网络或 API 配置后重试"
+                    }
+                }.getOrElse { error ->
+                    "索引更新失败：${error.toUserFacingMessage()}"
+                }
+                isUpdatingEntry = false
+                snackbarHostState.showSnackbar(message)
+            }
         }
     )
 
@@ -230,6 +258,42 @@ fun KnowledgeRoute(
                     repository.updateKnowledgeDraft(updatedDraft)
                     editingDraft = null
                     snackbarHostState.showSnackbar("草稿已更新")
+                }
+            }
+        )
+    }
+
+    editingEntry?.let { entry ->
+        KnowledgeEntryEditDialog(
+            entry = entry,
+            isSaving = isUpdatingEntry,
+            onDismiss = {
+                if (!isUpdatingEntry) {
+                    editingEntry = null
+                }
+            },
+            onConfirm = { updatedEntry ->
+                coroutineScope.launch {
+                    isUpdatingEntry = true
+                    val result = runCatching {
+                        repository.updateKnowledgeEntry(updatedEntry, reindex = true)
+                    }
+                    isUpdatingEntry = false
+                    result.fold(
+                        onSuccess = { indexed ->
+                            editingEntry = null
+                            snackbarHostState.showSnackbar(
+                                if (indexed) {
+                                    "已保存并更新问答索引"
+                                } else {
+                                    "已保存，索引更新失败，可稍后重试"
+                                }
+                            )
+                        },
+                        onFailure = { error ->
+                            snackbarHostState.showSnackbar("保存失败：${error.toUserFacingMessage()}")
+                        }
+                    )
                 }
             }
         )
@@ -281,13 +345,18 @@ private fun KnowledgeScreen(
     query: String,
     results: List<SemanticSearchResult>,
     hasSearched: Boolean,
+    entrySearchQuery: String,
+    entryIndexFilter: KnowledgeEntryIndexFilter,
     isOrganizing: Boolean,
     organizeProgress: AiTaskProgress?,
     isSubmitting: Boolean,
+    isUpdatingEntry: Boolean,
     knowledgeIngestionState: KnowledgeIngestionState,
     hasDuplicateDrafts: Boolean,
     snackbarHostState: SnackbarHostState,
     onQueryChange: (String) -> Unit,
+    onEntrySearchQueryChange: (String) -> Unit,
+    onEntryFilterChange: (KnowledgeEntryIndexFilter) -> Unit,
     onOrganizeToday: () -> Unit,
     onSubmitDraft: (KnowledgeEntryDraft) -> Unit,
     onEditDraft: (KnowledgeEntryDraft) -> Unit,
@@ -297,8 +366,16 @@ private fun KnowledgeScreen(
     onRetryIndex: () -> Unit,
     onSearch: () -> Unit,
     onCopy: (KnowledgeEntry) -> Unit,
-    onViewEntry: (KnowledgeEntry) -> Unit
+    onViewEntry: (KnowledgeEntry) -> Unit,
+    onEditEntry: (KnowledgeEntry) -> Unit,
+    onReindexEntry: (KnowledgeEntry) -> Unit
 ) {
+    val visibleEntries = remember(entries, entrySearchQuery, entryIndexFilter) {
+        entries.filter { entry ->
+            entry.matchesKeyword(entrySearchQuery) && entry.matchesIndexFilter(entryIndexFilter)
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -399,19 +476,36 @@ private fun KnowledgeScreen(
                 item {
                     SectionTitle(text = "已入库内容")
                 }
+                item {
+                    KnowledgeEntryManagementCard(
+                        query = entrySearchQuery,
+                        selectedFilter = entryIndexFilter,
+                        totalCount = entries.size,
+                        visibleCount = visibleEntries.size,
+                        onQueryChange = onEntrySearchQueryChange,
+                        onFilterChange = onEntryFilterChange
+                    )
+                }
                 if (entries.isEmpty()) {
                     item {
                         EmptyKnowledgeCard(text = "完成 AI 整理并提交后，知识条目会显示在这里。")
                     }
+                } else if (visibleEntries.isEmpty()) {
+                    item {
+                        EmptyKnowledgeCard(text = "没有匹配的知识条目。")
+                    }
                 } else {
                     items(
-                        items = entries,
+                        items = visibleEntries,
                         key = { entry -> entry.id }
                     ) { entry ->
                         KnowledgeEntryCard(
                             entry = entry,
                             onViewEntry = { onViewEntry(entry) },
-                            onCopy = { onCopy(entry) }
+                            onCopy = { onCopy(entry) },
+                            onEdit = { onEditEntry(entry) },
+                            onReindex = { onReindexEntry(entry) },
+                            actionsEnabled = !isUpdatingEntry
                         )
                     }
                 }
@@ -743,6 +837,108 @@ private fun DraftEditDialog(
 }
 
 @Composable
+private fun KnowledgeEntryEditDialog(
+    entry: KnowledgeEntry,
+    isSaving: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (KnowledgeEntry) -> Unit
+) {
+    var title by remember(entry.id) { mutableStateOf(entry.userTitle.orEmpty()) }
+    var summary by remember(entry.id) { mutableStateOf(entry.summary) }
+    var content by remember(entry.id) { mutableStateOf(entry.content) }
+    var tagsText by remember(entry.id) { mutableStateOf(entry.tags.joinToString("，")) }
+    var remark by remember(entry.id) { mutableStateOf(entry.userRemark.orEmpty()) }
+    var intentType by remember(entry.id) { mutableStateOf(entry.intentType) }
+    val canSave = content.isNotBlank() && !isSaving
+
+    AlertDialog(
+        onDismissRequest = {
+            if (!isSaving) {
+                onDismiss()
+            }
+        },
+        title = { Text(text = "编辑知识条目") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(text = "标题") }
+                )
+                OutlinedTextField(
+                    value = summary,
+                    onValueChange = { summary = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    label = { Text(text = "摘要") }
+                )
+                OutlinedTextField(
+                    value = content,
+                    onValueChange = { content = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 5,
+                    label = { Text(text = "正文") }
+                )
+                IntentTypeSelector(
+                    selected = intentType,
+                    onSelect = { intentType = it }
+                )
+                OutlinedTextField(
+                    value = tagsText,
+                    onValueChange = { tagsText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(text = "标签，用逗号分隔") }
+                )
+                OutlinedTextField(
+                    value = remark,
+                    onValueChange = { remark = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    label = { Text(text = "备注，可选") }
+                )
+                Text(
+                    text = if (isSaving) "正在保存并更新问答索引" else "保存后会更新该条目的问答索引。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onConfirm(
+                        entry.copy(
+                            userTitle = title.trim().takeIf { it.isNotBlank() },
+                            summary = summary.trim(),
+                            content = content.trim(),
+                            intentType = intentType,
+                            tags = tagsText.toTagList(),
+                            userRemark = remark.trim().takeIf { it.isNotBlank() },
+                            indexStatus = KnowledgeIndexStatus.PENDING
+                        )
+                    )
+                },
+                enabled = canSave
+            ) {
+                Text(text = if (isSaving) "保存中" else "保存")
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                enabled = !isSaving
+            ) {
+                Text(text = "取消")
+            }
+        }
+    )
+}
+
+@Composable
 private fun IntentTypeSelector(
     selected: IntentType,
     onSelect: (IntentType) -> Unit
@@ -891,6 +1087,74 @@ private fun KnowledgeSearchCard(
 }
 
 @Composable
+private fun KnowledgeEntryManagementCard(
+    query: String,
+    selectedFilter: KnowledgeEntryIndexFilter,
+    totalCount: Int,
+    visibleCount: Int,
+    onQueryChange: (String) -> Unit,
+    onFilterChange: (KnowledgeEntryIndexFilter) -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                text = "条目管理",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            OutlinedTextField(
+                value = query,
+                onValueChange = onQueryChange,
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text(text = "搜索标题、摘要、正文或标签") },
+                singleLine = true
+            )
+            KnowledgeEntryIndexFilterSelector(
+                selected = selectedFilter,
+                onSelect = onFilterChange
+            )
+            Text(
+                text = "显示 $visibleCount / $totalCount 条",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun KnowledgeEntryIndexFilterSelector(
+    selected: KnowledgeEntryIndexFilter,
+    onSelect: (KnowledgeEntryIndexFilter) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        KnowledgeEntryIndexFilter.entries.forEach { filter ->
+            if (selected == filter) {
+                Button(
+                    onClick = { onSelect(filter) },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(text = filter.label)
+                }
+            } else {
+                OutlinedButton(
+                    onClick = { onSelect(filter) },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(text = filter.label)
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun KnowledgeIndexStatusHint(
     entryCount: Int,
     indexedEntryCount: Int,
@@ -942,7 +1206,10 @@ private fun KnowledgeEntryCard(
     entry: KnowledgeEntry,
     leadingText: String? = null,
     onViewEntry: () -> Unit,
-    onCopy: () -> Unit
+    onCopy: () -> Unit,
+    onEdit: (() -> Unit)? = null,
+    onReindex: (() -> Unit)? = null,
+    actionsEnabled: Boolean = true
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -994,8 +1261,29 @@ private fun KnowledgeEntryCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End
             ) {
+                onEdit?.let {
+                    TextButton(
+                        onClick = it,
+                        enabled = actionsEnabled
+                    ) {
+                        Text(text = "编辑")
+                    }
+                }
                 TextButton(onClick = onViewEntry) {
                     Text(text = "查看详情")
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                onReindex?.let {
+                    TextButton(
+                        onClick = it,
+                        enabled = actionsEnabled && entry.indexStatus != KnowledgeIndexStatus.INDEXING
+                    ) {
+                        Text(text = entry.indexActionText())
+                    }
                 }
                 TextButton(onClick = onCopy) {
                     Text(text = "复制引用")
@@ -1075,6 +1363,49 @@ private fun DayKnowledgeStatus.statusText(): String {
 
 private fun KnowledgeEntryDraft.reviewLabel(): String {
     return if (needsReview) "需确认" else "可确认"
+}
+
+private enum class KnowledgeEntryIndexFilter(val label: String) {
+    ALL("全部"),
+    INDEXED("已索引"),
+    PENDING("待更新"),
+    FAILED("失败")
+}
+
+private fun KnowledgeEntry.matchesIndexFilter(filter: KnowledgeEntryIndexFilter): Boolean {
+    return when (filter) {
+        KnowledgeEntryIndexFilter.ALL -> true
+        KnowledgeEntryIndexFilter.INDEXED -> indexStatus == KnowledgeIndexStatus.INDEXED
+        KnowledgeEntryIndexFilter.PENDING -> {
+            indexStatus == KnowledgeIndexStatus.PENDING || indexStatus == KnowledgeIndexStatus.INDEXING
+        }
+        KnowledgeEntryIndexFilter.FAILED -> indexStatus == KnowledgeIndexStatus.FAILED
+    }
+}
+
+private fun KnowledgeEntry.matchesKeyword(query: String): Boolean {
+    val keyword = query.trim()
+    if (keyword.isBlank()) return true
+
+    return listOf(
+        userTitle.orEmpty(),
+        summary,
+        content,
+        userRemark.orEmpty(),
+        intentType.label(),
+        createdDate,
+        confirmedDate,
+        indexStatus.label()
+    ).any { text -> text.contains(keyword, ignoreCase = true) } ||
+        tags.any { tag -> tag.contains(keyword, ignoreCase = true) }
+}
+
+private fun KnowledgeEntry.indexActionText(): String {
+    return when (indexStatus) {
+        KnowledgeIndexStatus.FAILED -> "重试索引"
+        KnowledgeIndexStatus.INDEXING -> "索引中"
+        else -> "更新索引"
+    }
 }
 
 private fun String.toTagList(): List<String> {

@@ -66,6 +66,8 @@ interface NazhiRepository {
 
     suspend fun saveKnowledgeEntry(entry: KnowledgeEntry)
 
+    suspend fun updateKnowledgeEntry(entry: KnowledgeEntry, reindex: Boolean = true): Boolean
+
     suspend fun organizeNotesForDate(
         date: String,
         onProgress: (AiTaskProgress) -> Unit = {}

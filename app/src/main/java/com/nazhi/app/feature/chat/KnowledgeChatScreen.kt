@@ -126,10 +126,6 @@ fun KnowledgeChatRoute(
         embeddingCount = embeddingCount,
         entryCount = knowledgeEntries.size,
         indexedEntryCount = knowledgeEntries.count { it.indexStatus == KnowledgeIndexStatus.INDEXED },
-        pendingIndexCount = knowledgeEntries.count {
-            it.indexStatus == KnowledgeIndexStatus.PENDING || it.indexStatus == KnowledgeIndexStatus.INDEXING
-        },
-        failedIndexCount = knowledgeEntries.count { it.indexStatus == KnowledgeIndexStatus.FAILED },
         isAsking = chatTaskState.isRunning,
         askProgress = chatTaskState.progress,
         askStatusMessage = chatTaskState.message.takeIf { chatTaskState.isRunning },
@@ -139,18 +135,18 @@ fun KnowledgeChatRoute(
         onCreateSession = {
             coroutineScope.launch {
                 if (activeChatSessionId == null && question.isBlank()) {
-                    snackbarHostState.showSnackbar("当前已经是空白对话")
+                    snackbarHostState.showSnackbar("当前无对话")
                 } else {
                     activeChatSessionId = null
                     question = ""
-                    snackbarHostState.showSnackbar("已切换到空白对话")
+                    snackbarHostState.showSnackbar("已新建对话")
                 }
             }
         },
         onClearSessionMemory = { session ->
             coroutineScope.launch {
                 repository.clearChatSessionMemory(session.id)
-                snackbarHostState.showSnackbar("已清除该会话记忆")
+                snackbarHostState.showSnackbar("已清除记忆")
             }
         },
         onDeleteSession = { session ->
@@ -192,6 +188,15 @@ fun KnowledgeChatRoute(
         },
         onRegenerate = { message ->
             knowledgeChatCoordinator.regenerate(message.id)
+        },
+        onCopyAnswer = { answer ->
+            coroutineScope.launch {
+                context.copyToClipboard(label = "纳知回答", text = answer)
+                snackbarHostState.showSnackbar("已复制回答")
+            }
+        },
+        onUseFollowUpSuggestion = { suggestion ->
+            question = suggestion
         }
     )
 
@@ -238,8 +243,6 @@ private fun KnowledgeChatScreen(
     embeddingCount: Int,
     entryCount: Int,
     indexedEntryCount: Int,
-    pendingIndexCount: Int,
-    failedIndexCount: Int,
     isAsking: Boolean,
     askProgress: AiTaskProgress?,
     askStatusMessage: String?,
@@ -253,7 +256,9 @@ private fun KnowledgeChatScreen(
     onCitationClick: (ChatCitation) -> Unit,
     onAsk: () -> Unit,
     onRetry: (ChatMessage) -> Unit,
-    onRegenerate: (ChatMessage) -> Unit
+    onRegenerate: (ChatMessage) -> Unit,
+    onCopyAnswer: (String) -> Unit,
+    onUseFollowUpSuggestion: (String) -> Unit
 ) {
     Scaffold(
         topBar = {
@@ -290,8 +295,6 @@ private fun KnowledgeChatScreen(
                     embeddingCount = embeddingCount,
                     entryCount = entryCount,
                     indexedEntryCount = indexedEntryCount,
-                    pendingIndexCount = pendingIndexCount,
-                    failedIndexCount = failedIndexCount,
                     isAsking = isAsking,
                     askProgress = askProgress,
                     askStatusMessage = askStatusMessage,
@@ -304,7 +307,9 @@ private fun KnowledgeChatScreen(
                     onCitationClick = onCitationClick,
                     onAsk = onAsk,
                     onRetry = onRetry,
-                    onRegenerate = onRegenerate
+                    onRegenerate = onRegenerate,
+                    onCopyAnswer = onCopyAnswer,
+                    onUseFollowUpSuggestion = onUseFollowUpSuggestion
                 )
             }
         }
@@ -323,8 +328,6 @@ private fun KnowledgeChatCard(
     embeddingCount: Int,
     entryCount: Int,
     indexedEntryCount: Int,
-    pendingIndexCount: Int,
-    failedIndexCount: Int,
     isAsking: Boolean,
     askProgress: AiTaskProgress?,
     askStatusMessage: String?,
@@ -337,7 +340,9 @@ private fun KnowledgeChatCard(
     onCitationClick: (ChatCitation) -> Unit,
     onAsk: () -> Unit,
     onRetry: (ChatMessage) -> Unit,
-    onRegenerate: (ChatMessage) -> Unit
+    onRegenerate: (ChatMessage) -> Unit,
+    onCopyAnswer: (String) -> Unit,
+    onUseFollowUpSuggestion: (String) -> Unit
 ) {
     val canAsk = question.isNotBlank() && !isAsking && indexedEntryCount > 0
     val chatTurns = remember(messages, citations, knowledgeEntries) {
@@ -369,22 +374,19 @@ private fun KnowledgeChatCard(
                 onClearSessionMemory = onClearSessionMemory
             )
             KnowledgeChatIndexStatusBlock(
-                entryCount = entryCount,
-                indexedEntryCount = indexedEntryCount,
-                pendingIndexCount = pendingIndexCount,
-                failedIndexCount = failedIndexCount,
                 embeddingCount = embeddingCount
             )
             HorizontalDivider()
             ChatConversationWindowBlock(
                 chatTurns = chatTurns,
-                activeChatSessionId = activeChatSessionId,
                 isAsking = isAsking,
                 askProgress = askProgress,
                 askStatusMessage = askStatusMessage,
                 onCitationClick = onCitationClick,
                 onRetry = onRetry,
-                onRegenerate = onRegenerate
+                onRegenerate = onRegenerate,
+                onCopyAnswer = onCopyAnswer,
+                onUseFollowUpSuggestion = onUseFollowUpSuggestion
             )
             ChatQuestionInputBlock(
                 question = question,
@@ -458,56 +460,34 @@ private fun KnowledgeChatCard(
 @Composable
 private fun ChatConversationWindowBlock(
     chatTurns: List<ChatTurnUiState>,
-    activeChatSessionId: String?,
     isAsking: Boolean,
     askProgress: AiTaskProgress?,
     askStatusMessage: String?,
     onCitationClick: (ChatCitation) -> Unit,
     onRetry: (ChatMessage) -> Unit,
-    onRegenerate: (ChatMessage) -> Unit
+    onRegenerate: (ChatMessage) -> Unit,
+    onCopyAnswer: (String) -> Unit,
+    onUseFollowUpSuggestion: (String) -> Unit
 ) {
+    if (
+        chatTurns.isEmpty() &&
+        askProgress == null &&
+        !(isAsking && !askStatusMessage.isNullOrBlank())
+    ) {
+        return
+    }
+
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Text(
-                text = "当前对话窗口",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.weight(1f)
-            )
-            Text(
-                text = if (activeChatSessionId == null) "空白" else "进行中",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        if (chatTurns.isEmpty()) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = MaterialTheme.shapes.medium
-            ) {
-                Text(
-                    text = if (activeChatSessionId == null) {
-                        "空白对话"
-                    } else {
-                        "当前会话暂无问答内容"
-                    },
-                    modifier = Modifier.padding(16.dp),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        } else {
+        if (chatTurns.isNotEmpty()) {
             chatTurns.takeLast(8).forEach { turn ->
                 ChatTurnConversationBlock(
                     turn = turn,
                     isBusy = isAsking,
                     onCitationClick = onCitationClick,
                     onRetry = onRetry,
-                    onRegenerate = onRegenerate
+                    onRegenerate = onRegenerate,
+                    onCopyAnswer = onCopyAnswer,
+                    onUseFollowUpSuggestion = onUseFollowUpSuggestion
                 )
             }
         }
@@ -531,7 +511,9 @@ private fun ChatTurnConversationBlock(
     isBusy: Boolean,
     onCitationClick: (ChatCitation) -> Unit,
     onRetry: (ChatMessage) -> Unit,
-    onRegenerate: (ChatMessage) -> Unit
+    onRegenerate: (ChatMessage) -> Unit,
+    onCopyAnswer: (String) -> Unit,
+    onUseFollowUpSuggestion: (String) -> Unit
 ) {
     val latestAnswer = turn.latestAnswer
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -578,6 +560,15 @@ private fun ChatTurnConversationBlock(
                     modifier = Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    val answerText = latestAnswer?.fullAnswerText()
+                    val answerStatus = latestAnswer?.status
+                    val followUpSuggestions = remember(answerText, answerStatus, turn.latestCitations.size) {
+                        answerText?.extractFollowUpSuggestions(
+                            fallbackTopic = turn.question.content,
+                            allowFallback = answerStatus == ChatMessageStatus.DONE &&
+                                turn.latestCitations.isNotEmpty()
+                        ).orEmpty()
+                    }
                     Text(
                         text = "纳知",
                         style = MaterialTheme.typography.labelSmall,
@@ -588,7 +579,7 @@ private fun ChatTurnConversationBlock(
                         }
                     )
                     RichAnswerBlock(
-                        answer = latestAnswer?.fullAnswerText() ?: "正在等待回答生成。",
+                        answer = answerText?.withoutFollowUpSuggestions() ?: "正在等待回答生成。",
                         color = if (latestAnswer?.status == ChatMessageStatus.FAILED) {
                             MaterialTheme.colorScheme.onErrorContainer
                         } else {
@@ -615,6 +606,12 @@ private fun ChatTurnConversationBlock(
                                 }
                             } else {
                                 TextButton(
+                                    onClick = { onCopyAnswer(answer.fullAnswerText()) },
+                                    enabled = !isBusy
+                                ) {
+                                    Text(text = "复制")
+                                }
+                                TextButton(
                                     onClick = { onRegenerate(answer) },
                                     enabled = !isBusy
                                 ) {
@@ -622,6 +619,10 @@ private fun ChatTurnConversationBlock(
                                 }
                             }
                         }
+                        FollowUpSuggestionsBlock(
+                            suggestions = followUpSuggestions,
+                            onUseSuggestion = onUseFollowUpSuggestion
+                        )
                     }
                     if (
                         latestAnswer?.status == ChatMessageStatus.DONE &&
@@ -634,18 +635,10 @@ private fun ChatTurnConversationBlock(
                         )
                     }
                     if (turn.latestCitations.isNotEmpty()) {
-                        Text(
-                            text = "引用 ${turn.latestCitations.size} 条",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary
+                        CitationCollectionBlock(
+                            citations = turn.latestCitations,
+                            onCitationClick = onCitationClick
                         )
-                        turn.latestCitations.forEachIndexed { index, citationState ->
-                            CitationEvidenceCard(
-                                index = index,
-                                citationState = citationState,
-                                onClick = { onCitationClick(citationState.citation) }
-                            )
-                        }
                     }
                 }
             }
@@ -763,32 +756,22 @@ private fun CurrentConversationBlock(
     onCreateSession: () -> Unit,
     onClearSessionMemory: (ChatSession) -> Unit
 ) {
-    val memoryDigest = activeSession?.memoryDigest.orEmpty().compactText(72)
-    val hasMemory = activeSession?.memoryDigest?.isNotBlank() == true
+    val sessionWithMemory = activeSession?.takeIf { it.memoryDigest.orEmpty().isNotBlank() }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
             text = "当前对话",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.primary
         )
-        Text(
-            text = activeSession?.let { session ->
-                "${session.title.ifBlank { "未命名对话" }} · ${session.messageCount} 条"
-            } ?: "空白对话 · 提问后自动保存到历史记录",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Text(
-            text = if (hasMemory) {
-                "会话记忆：$memoryDigest"
-            } else {
-                "会话记忆：尚未生成"
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
-        )
+        activeSession?.let { session ->
+            Text(
+                text = "${session.title.ifBlank { "未命名对话" }} · ${session.messageCount} 条",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -800,12 +783,14 @@ private fun CurrentConversationBlock(
             ) {
                 Text(text = "新对话")
             }
-            OutlinedButton(
-                onClick = { activeSession?.let(onClearSessionMemory) },
-                enabled = !isBusy && activeSession != null && hasMemory,
-                modifier = Modifier.weight(1f)
-            ) {
-                Text(text = "清除记忆")
+            sessionWithMemory?.let { session ->
+                OutlinedButton(
+                    onClick = { onClearSessionMemory(session) },
+                    enabled = !isBusy,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(text = "清除记忆")
+                }
             }
         }
     }
@@ -908,43 +893,13 @@ private fun ChatHistoryBlock(
 
 @Composable
 private fun KnowledgeChatIndexStatusBlock(
-    entryCount: Int,
-    indexedEntryCount: Int,
-    pendingIndexCount: Int,
-    failedIndexCount: Int,
     embeddingCount: Int
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(
-            text = "知识条目 $entryCount 条 · 可问答 $indexedEntryCount 条 · 本地向量 $embeddingCount 条",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        val statusText = when {
-            entryCount == 0 -> "当前还没有知识条目。请先保存文本，并完成 AI 整理或手动入库。"
-            indexedEntryCount == 0 && pendingIndexCount > 0 -> {
-                "知识库尚未完成索引。请先在知识库页重建索引后再提问。"
-            }
-            indexedEntryCount == 0 && failedIndexCount > 0 -> {
-                "知识索引失败。请检查网络或 API 配置后，在知识库页重试向量入库。"
-            }
-            pendingIndexCount > 0 || failedIndexCount > 0 -> {
-                "部分知识尚未索引，本次问答只会使用已完成索引的知识。"
-            }
-            else -> null
-        }
-        statusText?.let {
-            Text(
-                text = it,
-                style = MaterialTheme.typography.bodySmall,
-                color = if (indexedEntryCount == 0 && entryCount > 0) {
-                    MaterialTheme.colorScheme.error
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                }
-            )
-        }
-    }
+    Text(
+        text = "本地向量 $embeddingCount 条",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
 }
 
 @Composable
@@ -955,7 +910,9 @@ private fun ChatTurnBlock(
     onToggle: () -> Unit,
     onCitationClick: (ChatCitation) -> Unit,
     onRetry: (ChatMessage) -> Unit,
-    onRegenerate: (ChatMessage) -> Unit
+    onRegenerate: (ChatMessage) -> Unit,
+    onCopyAnswer: (String) -> Unit,
+    onUseFollowUpSuggestion: (String) -> Unit
 ) {
     val latestAnswer = turn.latestAnswer
     val statusColor = when (latestAnswer?.status) {
@@ -1027,8 +984,16 @@ private fun ChatTurnBlock(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 } else {
+                    val answerText = latestAnswer.fullAnswerText()
+                    val followUpSuggestions = remember(answerText, latestAnswer.status, turn.latestCitations.size) {
+                        answerText.extractFollowUpSuggestions(
+                            fallbackTopic = turn.question.content,
+                            allowFallback = latestAnswer.status == ChatMessageStatus.DONE &&
+                                turn.latestCitations.isNotEmpty()
+                        )
+                    }
                     RichAnswerBlock(
-                        answer = latestAnswer.fullAnswerText(),
+                        answer = answerText.withoutFollowUpSuggestions(),
                         color = if (latestAnswer.status == ChatMessageStatus.FAILED) {
                             MaterialTheme.colorScheme.error
                         } else {
@@ -1050,6 +1015,12 @@ private fun ChatTurnBlock(
                             }
                         } else {
                             TextButton(
+                                onClick = { onCopyAnswer(answerText) },
+                                enabled = !isBusy
+                            ) {
+                                Text(text = "复制")
+                            }
+                            TextButton(
                                 onClick = { onRegenerate(latestAnswer) },
                                 enabled = !isBusy
                             ) {
@@ -1057,6 +1028,10 @@ private fun ChatTurnBlock(
                             }
                         }
                     }
+                    FollowUpSuggestionsBlock(
+                        suggestions = followUpSuggestions,
+                        onUseSuggestion = onUseFollowUpSuggestion
+                    )
                 }
                 if (
                     latestAnswer?.status == ChatMessageStatus.DONE &&
@@ -1069,19 +1044,52 @@ private fun ChatTurnBlock(
                     )
                 }
                 if (turn.latestCitations.isNotEmpty()) {
-                    Text(
-                        text = "引用 ${turn.latestCitations.size} 条 · 可点击追溯来源",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary
+                    CitationCollectionBlock(
+                        citations = turn.latestCitations,
+                        onCitationClick = onCitationClick
                     )
-                    turn.latestCitations.forEachIndexed { index, citationState ->
-                        CitationEvidenceCard(
-                            index = index,
-                            citationState = citationState,
-                            onClick = { onCitationClick(citationState.citation) }
-                        )
-                    }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CitationCollectionBlock(
+    citations: List<ChatCitationUiState>,
+    onCitationClick: (ChatCitation) -> Unit
+) {
+    if (citations.isEmpty()) {
+        return
+    }
+
+    val citationKey = remember(citations) {
+        citations.joinToString(separator = "|") { it.citation.id }
+    }
+    var expanded by remember(citationKey) { mutableStateOf(false) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(
+            onClick = { expanded = !expanded },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                text = if (expanded) {
+                    "收起引用 ${citations.size} 条"
+                } else {
+                    "引用 ${citations.size} 条 · 点击查看"
+                },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        if (expanded) {
+            citations.forEachIndexed { index, citationState ->
+                CitationEvidenceCard(
+                    index = index,
+                    citationState = citationState,
+                    onClick = { onCitationClick(citationState.citation) }
+                )
             }
         }
     }
@@ -1217,6 +1225,35 @@ private fun RichAnswerBlock(
     }
 }
 
+@Composable
+private fun FollowUpSuggestionsBlock(
+    suggestions: List<String>,
+    onUseSuggestion: (String) -> Unit
+) {
+    if (suggestions.isEmpty()) {
+        return
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            text = "可以继续追问",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary
+        )
+        suggestions.forEach { suggestion ->
+            OutlinedButton(
+                onClick = { onUseSuggestion(suggestion) },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = suggestion,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
 private sealed class RichAnswerSegment {
     data class Heading(val text: String, val level: Int) : RichAnswerSegment()
     data class Paragraph(val text: String) : RichAnswerSegment()
@@ -1225,6 +1262,103 @@ private sealed class RichAnswerSegment {
 }
 
 private val numberedAnswerLineRegex = Regex("""^\d+[.)、]\s*(.+)$""")
+
+private fun String.extractFollowUpSuggestions(
+    fallbackTopic: String,
+    allowFallback: Boolean
+): List<String> {
+    val suggestions = mutableListOf<String>()
+    var collecting = false
+    lineSequence().forEach { rawLine ->
+        val line = rawLine.trim()
+        val heading = line.answerHeadingTextOrNull()
+        if (heading != null) {
+            collecting = heading.isFollowUpSuggestionHeading()
+            return@forEach
+        }
+        if (!collecting || line.isBlank()) {
+            return@forEach
+        }
+        line.answerListItemTextOrNull()?.let { item ->
+            if (item.length in 4..80) {
+                suggestions += item
+            }
+        }
+    }
+    val parsedSuggestions = suggestions.distinct().take(3)
+    if (parsedSuggestions.isNotEmpty() || !allowFallback || isKnowledgeInsufficientAnswer()) {
+        return parsedSuggestions
+    }
+    return buildFallbackFollowUpSuggestions(fallbackTopic)
+}
+
+private fun String.withoutFollowUpSuggestions(): String {
+    val keptLines = mutableListOf<String>()
+    var dropping = false
+    lineSequence().forEach { rawLine ->
+        val line = rawLine.trim()
+        val heading = line.answerHeadingTextOrNull()
+        if (heading != null) {
+            dropping = heading.isFollowUpSuggestionHeading()
+            if (dropping) {
+                return@forEach
+            }
+        }
+        if (!dropping) {
+            keptLines += rawLine
+        }
+    }
+    return keptLines.joinToString(separator = "\n").trim().ifBlank { trim() }
+}
+
+private fun String.answerHeadingTextOrNull(): String? {
+    val line = trim()
+    val markdownHeading = when {
+        line.startsWith("###") -> line.removePrefix("###")
+        line.startsWith("##") -> line.removePrefix("##")
+        line.startsWith("#") -> line.removePrefix("#")
+        else -> null
+    }?.cleanAnswerInline()?.trim()?.trimEnd(':', '：')
+
+    if (!markdownHeading.isNullOrBlank()) {
+        return markdownHeading
+    }
+
+    val plainHeading = line.cleanAnswerInline().trim().trimEnd(':', '：')
+    return plainHeading.takeIf { it.isFollowUpSuggestionHeading() }
+}
+
+private fun String.isFollowUpSuggestionHeading(): Boolean {
+    val normalized = cleanAnswerInline().replace(" ", "")
+    return normalized.contains("继续追问") ||
+        normalized.contains("追问建议") ||
+        normalized.contains("下一步问题")
+}
+
+private fun String.answerListItemTextOrNull(): String? {
+    val line = trim()
+    val text = when {
+        line.startsWith("- ") || line.startsWith("• ") -> line.drop(2)
+        else -> numberedAnswerLineRegex.find(line)?.groupValues?.getOrNull(1)
+    }
+    return text?.cleanAnswerInline()?.trim()?.trimEnd('。')?.takeIf { it.isNotBlank() }
+}
+
+private fun String.isKnowledgeInsufficientAnswer(): Boolean {
+    return contains("当前知识库中没有足够信息") ||
+        contains("没有足够信息") ||
+        contains("不足以回答") ||
+        contains("无法回答")
+}
+
+private fun buildFallbackFollowUpSuggestions(topic: String): List<String> {
+    val compactTopic = topic.compactText(28).ifBlank { "这个问题" }
+    return listOf(
+        "$compactTopic 可以怎么展开？",
+        "$compactTopic 有哪些风险或限制？",
+        "$compactTopic 下一步应该怎么做？"
+    )
+}
 
 private fun parseRichAnswerSegments(answer: String): List<RichAnswerSegment> {
     val segments = mutableListOf<RichAnswerSegment>()

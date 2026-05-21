@@ -241,6 +241,21 @@ class LocalNazhiRepository(
         knowledgeEntryDao.upsert(entry.toEntity())
     }
 
+    override suspend fun updateKnowledgeEntry(entry: KnowledgeEntry, reindex: Boolean): Boolean {
+        knowledgeEntryDao.upsert(
+            entry.copy(indexStatus = KnowledgeIndexStatus.PENDING).toEntity()
+        )
+        embeddingDao.deleteRecordsForOwner(
+            ownerType = EmbeddingRecord.OWNER_KNOWLEDGE_ENTRY,
+            ownerId = entry.id
+        )
+        return if (reindex) {
+            indexKnowledgeEntry(entry.id)
+        } else {
+            true
+        }
+    }
+
     override suspend fun organizeNotesForDate(
         date: String,
         onProgress: (AiTaskProgress) -> Unit
@@ -563,7 +578,7 @@ class LocalNazhiRepository(
         )
             .mapNotNull { record ->
                 val entry = knowledgeEntryDao.getEntry(record.ownerId)?.toModel()
-                if (entry == null) {
+                if (entry == null || entry.indexStatus != KnowledgeIndexStatus.INDEXED) {
                     null
                 } else {
                     val vector = LocalEmbeddingEngine.fromBlob(record.vectorBlob)
@@ -1403,7 +1418,7 @@ class LocalNazhiRepository(
         )
             .mapNotNull { record ->
                 val entry = knowledgeEntryDao.getEntry(record.ownerId)?.toModel()
-                if (entry == null) {
+                if (entry == null || entry.indexStatus != KnowledgeIndexStatus.INDEXED) {
                     null
                 } else {
                     val vector = LocalEmbeddingEngine.fromBlob(record.vectorBlob)

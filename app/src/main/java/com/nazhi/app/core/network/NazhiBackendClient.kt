@@ -796,10 +796,13 @@ class NazhiBackendClient(
             12. answer 字段内部使用轻量 Markdown，便于 Android 展示：
                - 可以使用 "# 标题"、"## 小标题"、"- 要点"、"1. 步骤" 和普通段落。
                - 优先给出一个简短标题，再用“核心结论 / 展开说明 / 可以继续追问”等小标题组织内容。
+               - 如果 contexts 足以回答，必须在 answer 末尾输出 "## 可以继续追问"，下面给出 2-3 条 "- " 开头的追问建议。
+               - 追问建议必须是用户可以直接继续提问的问题，不能是说明句。
+               - 如果 contexts 不足以回答，不要输出“可以继续追问”段落。
                - 不要输出表格、代码块、HTML、图片链接或复杂嵌套列表。
                - 单段尽量不超过 3 行，避免长篇纯文本。
             输出格式：
-            {"answer":"# 简短标题\n## 核心结论\n- 要点一\n- 要点二\n## 展开说明\n1. 步骤或说明一\n2. 步骤或说明二","citations":[{"contextId":"knowledge-id","quote":"引用短句","reason":"引用理由"}],"updatedMemoryDigest":"完整替换后的本会话摘要，最多200字"}
+            {"answer":"# 简短标题\n## 核心结论\n- 要点一\n- 要点二\n## 展开说明\n1. 步骤或说明一\n2. 步骤或说明二\n## 可以继续追问\n- 这个方案还有哪些风险？\n- 下一步应该怎么落地？","citations":[{"contextId":"knowledge-id","quote":"引用短句","reason":"引用理由"}],"updatedMemoryDigest":"完整替换后的本会话摘要，最多200字"}
             用户问题：$question
             补全后的独立问题：
             ${normalizedResolvedQuestion.ifBlank { "无" }}

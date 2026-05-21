@@ -35,6 +35,8 @@ interface KnowledgeEntryDao {
         WHERE content LIKE '%' || :query || '%'
            OR IFNULL(userTitle, '') LIKE '%' || :query || '%'
            OR IFNULL(userRemark, '') LIKE '%' || :query || '%'
+           OR IFNULL(summary, '') LIKE '%' || :query || '%'
+           OR IFNULL(tags, '') LIKE '%' || :query || '%'
         ORDER BY confirmedAt DESC
         """
     )

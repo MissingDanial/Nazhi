@@ -41,6 +41,9 @@ interface EmbeddingDao {
         chunkIndex: Int = 0
     ): EmbeddingRecordEntity?
 
+    @Query("DELETE FROM embedding_records WHERE ownerType = :ownerType AND ownerId = :ownerId")
+    suspend fun deleteRecordsForOwner(ownerType: String, ownerId: String)
+
     @Upsert
     suspend fun upsert(record: EmbeddingRecordEntity)
 }
