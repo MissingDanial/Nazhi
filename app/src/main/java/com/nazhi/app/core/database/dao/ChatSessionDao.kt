@@ -26,6 +26,33 @@ interface ChatSessionDao {
     @Query("UPDATE chat_sessions SET updatedAt = :updatedAt WHERE id = :id")
     suspend fun updateTime(id: String, updatedAt: Long)
 
+    @Query(
+        """
+        UPDATE chat_sessions
+        SET title = :title,
+            messageCount = :messageCount,
+            lastMessagePreview = :lastMessagePreview,
+            updatedAt = :updatedAt
+        WHERE id = :id
+        """
+    )
+    suspend fun updateOverview(
+        id: String,
+        title: String,
+        messageCount: Int,
+        lastMessagePreview: String,
+        updatedAt: Long
+    )
+
+    @Query("UPDATE chat_sessions SET memoryDigest = :memoryDigest, updatedAt = :updatedAt WHERE id = :id")
+    suspend fun updateMemoryDigest(id: String, memoryDigest: String?, updatedAt: Long)
+
+    @Query("DELETE FROM chat_sessions WHERE id = :id")
+    suspend fun deleteSession(id: String)
+
+    @Query("DELETE FROM chat_sessions")
+    suspend fun deleteAll()
+
     @Upsert
     suspend fun upsert(session: ChatSessionEntity)
 }

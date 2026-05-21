@@ -60,6 +60,7 @@ import com.nazhi.app.core.network.BackendTaskResponse
 import com.nazhi.app.core.network.KnowledgeChatContextInput
 import com.nazhi.app.core.network.NazhiBackendException
 import com.nazhi.app.core.network.NazhiBackendClient
+import com.nazhi.app.core.network.QuestionRewriteResponse
 import java.io.IOException
 import java.util.UUID
 import kotlinx.coroutines.delay
@@ -86,6 +87,24 @@ class LocalNazhiRepository(
         encodeDefaults = true
         ignoreUnknownKeys = true
     }
+
+    private companion object {
+        const val DEFAULT_CHAT_SESSION_TITLE = "新对话"
+        const val MAX_CHAT_RETRIEVAL_QUERY_LENGTH = 240
+        const val MAX_CHAT_MEMORY_PREFIX_LENGTH = 80
+        const val MAX_PREVIOUS_QUESTION_LENGTH = 100
+        const val MAX_PREVIOUS_CITATIONS = 3
+        const val MAX_MEMORY_DIGEST_LENGTH = 200
+        const val MIN_REWRITE_CONFIDENCE = 0.55f
+    }
+
+    private data class ChatRetrievalContext(
+        val retrievalQuery: String,
+        val resolvedQuestion: String,
+        val sessionMemory: String,
+        val previousCitationIds: List<String>,
+        val previousCitationResults: List<SemanticSearchResult>
+    )
 
     override fun observeNotes(): Flow<List<Note>> {
         return noteDao.observeNotes().map { notes -> notes.map { it.toModel() } }
@@ -577,7 +596,7 @@ class LocalNazhiRepository(
 
     override suspend fun buildLocalDataExportJson(): String {
         val payload = NazhiExportPayload(
-            schemaVersion = 1,
+            schemaVersion = 2,
             appName = "Nazhi",
             exportedAt = System.currentTimeMillis(),
             safety = ExportSafety(),
@@ -627,7 +646,7 @@ class LocalNazhiRepository(
         require(payload.appName.equals("Nazhi", ignoreCase = true)) {
             "导入文件不是纳知导出文件。"
         }
-        require(payload.schemaVersion == 1) {
+        require(payload.schemaVersion in 1..2) {
             "暂不支持 schemaVersion=${payload.schemaVersion} 的导出文件。"
         }
         return payload
@@ -764,30 +783,16 @@ class LocalNazhiRepository(
     override suspend fun askKnowledgeQuestion(
         question: String,
         topK: Int,
+        sessionId: String?,
         onProgress: (AiTaskProgress) -> Unit
     ): ChatMessage {
         val trimmedQuestion = question.trim()
         if (trimmedQuestion.isEmpty()) {
             throw IllegalArgumentException("问题不能为空")
         }
-        val entries = knowledgeEntryDao.getEntries()
-        if (entries.isEmpty()) {
-            throw IllegalStateException("当前还没有知识条目，请先完成知识入库后再提问。")
-        }
-        if (entries.none { it.indexStatus == KnowledgeIndexStatus.INDEXED }) {
-            throw IllegalStateException("知识库尚未完成索引，请先在知识库页重建索引后再提问。")
-        }
-
-        onProgress(
-            AiTaskProgress(
-                status = AiTaskStatus.RUNNING,
-                stage = AiTaskStage.LOCAL_RETRIEVAL,
-                progress = 20,
-                message = "正在生成问题向量"
-            )
-        )
+        ensureKnowledgeChatReady()
         val now = System.currentTimeMillis()
-        val session = getOrCreateChatSession(trimmedQuestion, now)
+        val session = getOrCreateChatSession(sessionId, trimmedQuestion)
         val userMessage = ChatMessage(
             id = "chat-user-${UUID.randomUUID()}",
             sessionId = session.id,
@@ -795,18 +800,105 @@ class LocalNazhiRepository(
             content = trimmedQuestion,
             status = ChatMessageStatus.DONE,
             errorMessage = null,
+            progressStage = AiTaskStage.DONE.name,
             createdAt = now,
             updatedAt = now
         )
         chatMessageDao.upsert(userMessage.toEntity())
-        chatSessionDao.updateTitleAndTime(
-            id = session.id,
-            title = session.title.ifBlank { trimmedQuestion.firstLineOrTitle(24) },
+        updateChatSessionOverview(session.id, titleSeed = trimmedQuestion, updatedAt = now)
+        return answerKnowledgeQuestion(
+            questionMessage = userMessage,
+            topK = topK,
+            attempt = 1,
+            onProgress = onProgress
+        )
+    }
+
+    override suspend fun retryChatMessage(
+        messageId: String,
+        topK: Int,
+        onProgress: (AiTaskProgress) -> Unit
+    ): ChatMessage {
+        ensureKnowledgeChatReady()
+        val questionMessage = resolveQuestionMessageForRetry(messageId)
+        val attempt = nextAssistantAttempt(questionMessage.id)
+        return answerKnowledgeQuestion(
+            questionMessage = questionMessage,
+            topK = topK,
+            attempt = attempt,
+            onProgress = onProgress
+        )
+    }
+
+    override suspend fun regenerateChatAnswer(
+        messageId: String,
+        topK: Int,
+        onProgress: (AiTaskProgress) -> Unit
+    ): ChatMessage {
+        ensureKnowledgeChatReady()
+        val questionMessage = resolveQuestionMessageForRetry(messageId)
+        val attempt = nextAssistantAttempt(questionMessage.id)
+        return answerKnowledgeQuestion(
+            questionMessage = questionMessage,
+            topK = topK,
+            attempt = attempt,
+            onProgress = onProgress
+        )
+    }
+
+    override suspend fun createChatSession(title: String?): ChatSession {
+        val now = System.currentTimeMillis()
+        val session = ChatSession(
+            id = "chat-session-${UUID.randomUUID()}",
+            title = title?.takeIf { it.isNotBlank() }?.firstLineOrTitle(24) ?: DEFAULT_CHAT_SESSION_TITLE,
+            createdAt = now,
             updatedAt = now
         )
+        chatSessionDao.upsert(session.toEntity())
+        return session
+    }
 
+    override suspend fun deleteChatSession(sessionId: String) {
+        chatSessionDao.deleteSession(sessionId)
+    }
+
+    override suspend fun clearChatSessionMemory(sessionId: String) {
+        chatSessionDao.updateMemoryDigest(
+            id = sessionId,
+            memoryDigest = null,
+            updatedAt = System.currentTimeMillis()
+        )
+    }
+
+    override suspend fun clearChatSessions() {
+        chatSessionDao.deleteAll()
+    }
+
+    private suspend fun answerKnowledgeQuestion(
+        questionMessage: ChatMessage,
+        topK: Int,
+        attempt: Int,
+        onProgress: (AiTaskProgress) -> Unit
+    ): ChatMessage {
+        val trimmedQuestion = questionMessage.content.trim()
+        onProgress(
+            AiTaskProgress(
+                status = AiTaskStatus.RUNNING,
+                stage = AiTaskStage.LOCAL_RETRIEVAL,
+                progress = 20,
+                message = "正在理解问题并生成检索向量"
+            )
+        )
+        val retrievalContext = buildChatRetrievalContext(
+            questionMessage = questionMessage,
+            topK = topK
+        )
         val results = runCatching {
-            searchSimilarKnowledgeEntriesForQuestion(trimmedQuestion, topK, onProgress)
+            searchSimilarKnowledgeEntriesForQuestion(
+                query = retrievalContext.retrievalQuery,
+                topK = topK,
+                onProgress = onProgress
+            )
         }.getOrElse { error ->
             val message = error.toUserFacingMessage()
             onProgress(
@@ -818,16 +910,25 @@ class LocalNazhiRepository(
                 )
             )
             saveAssistantMessage(
-                sessionId = session.id,
+                sessionId = questionMessage.sessionId,
+                parentMessageId = questionMessage.id,
                 content = "知识库问答失败。",
                 status = ChatMessageStatus.FAILED,
                 errorMessage = message,
+                attempt = attempt,
+                progressStage = AiTaskStage.FAILED.name,
+                errorCode = error.toErrorCode(),
                 citations = emptyList(),
                 matchedResults = emptyList()
             )
             throw IOException(message, error)
         }
-        if (results.isEmpty()) {
+        val mergedResults = mergeChatRetrievalResults(
+            searchResults = results,
+            previousResults = retrievalContext.previousCitationResults,
+            topK = topK
+        )
+        if (mergedResults.isEmpty()) {
             onProgress(
                 AiTaskProgress(
                     status = AiTaskStatus.SUCCEEDED,
@@ -837,10 +938,14 @@ class LocalNazhiRepository(
                 )
             )
             return saveAssistantMessage(
-                sessionId = session.id,
+                sessionId = questionMessage.sessionId,
+                parentMessageId = questionMessage.id,
                 content = "当前知识库中没有足够信息回答这个问题。请先完成知识入库和向量索引，或换一个更具体的问题。",
                 status = ChatMessageStatus.DONE,
                 errorMessage = null,
+                attempt = attempt,
+                progressStage = AiTaskStage.DONE.name,
+                errorCode = null,
                 citations = emptyList(),
                 matchedResults = emptyList()
             )
@@ -851,7 +956,7 @@ class LocalNazhiRepository(
                 status = AiTaskStatus.RUNNING,
                 stage = AiTaskStage.CONTEXT_READY,
                 progress = 45,
-                message = "已命中 ${results.size} 条知识，准备提交给 AI"
+                message = "已命中 ${mergedResults.size} 条知识，准备提交给 AI"
             )
         )
         return runCatching {
@@ -866,7 +971,7 @@ class LocalNazhiRepository(
             val response = backendClient.chatWithKnowledge(
                 requestId = "knowledge-chat-${UUID.randomUUID()}",
                 question = trimmedQuestion,
-                contexts = results.map { result ->
+                contexts = mergedResults.map { result ->
                     val entry = result.entry
                     KnowledgeChatContextInput(
                         id = entry.id,
@@ -877,7 +982,10 @@ class LocalNazhiRepository(
                         sourceNoteIds = entry.sourceNoteIds,
                         score = result.score
                     )
-                }
+                },
+                resolvedQuestion = retrievalContext.resolvedQuestion,
+                sessionMemory = retrievalContext.sessionMemory,
+                previousCitationIds = retrievalContext.previousCitationIds
             )
             onProgress(
                 AiTaskProgress(
@@ -888,13 +996,23 @@ class LocalNazhiRepository(
                 )
             )
             saveAssistantMessage(
-                sessionId = session.id,
+                sessionId = questionMessage.sessionId,
+                parentMessageId = questionMessage.id,
                 content = response.answer.ifBlank { "当前知识库中没有足够信息回答这个问题。" },
                 status = ChatMessageStatus.DONE,
                 errorMessage = null,
+                attempt = attempt,
+                progressStage = AiTaskStage.DONE.name,
+                errorCode = null,
                 citations = response.citations,
-                matchedResults = results
+                matchedResults = mergedResults
             ).also {
+                updateChatSessionMemoryIfUseful(
+                    sessionId = questionMessage.sessionId,
+                    answer = response.answer,
+                    citations = response.citations,
+                    updatedMemoryDigest = response.updatedMemoryDigest
+                )
                 onProgress(
                     AiTaskProgress(
                         status = AiTaskStatus.SUCCEEDED,
@@ -915,10 +1033,14 @@ class LocalNazhiRepository(
                 )
             )
             saveAssistantMessage(
-                sessionId = session.id,
+                sessionId = questionMessage.sessionId,
+                parentMessageId = questionMessage.id,
                 content = "回答生成失败。",
                 status = ChatMessageStatus.FAILED,
                 errorMessage = message,
+                attempt = attempt,
+                progressStage = AiTaskStage.FAILED.name,
+                errorCode = error.toErrorCode(),
                 citations = emptyList(),
                 matchedResults = emptyList()
             )
@@ -951,11 +1073,244 @@ class LocalNazhiRepository(
             )
         )
         val queryVector = LocalEmbeddingEngine.normalize(item.embedding.toFloatArray())
-        return searchSimilarKnowledgeEntriesByVector(
+        val remoteResults = searchSimilarKnowledgeEntriesByVector(
             queryVector = queryVector,
             model = response.model,
-            topK = topK
+            topK = topK,
+            requirePositiveScore = false
         )
+        if (remoteResults.isNotEmpty()) {
+            return remoteResults
+        }
+        return searchSimilarKnowledgeEntriesByVector(
+            queryVector = LocalEmbeddingEngine.embedMock(query),
+            model = LocalEmbeddingEngine.MOCK_MODEL,
+            topK = topK,
+            requirePositiveScore = false
+        )
+    }
+
+    private suspend fun buildChatRetrievalContext(
+        questionMessage: ChatMessage,
+        topK: Int
+    ): ChatRetrievalContext {
+        val session = chatSessionDao.getSession(questionMessage.sessionId)?.toModel()
+        val messages = chatMessageDao.getMessagesForSession(questionMessage.sessionId).map { it.toModel() }
+        val previousQuestion = messages
+            .filter { message ->
+                message.role == ChatRole.USER &&
+                    message.id != questionMessage.id &&
+                    message.createdAt <= questionMessage.createdAt
+            }
+            .lastOrNull()
+            ?.content
+        val previousAssistant = messages
+            .filter { message ->
+                message.role == ChatRole.ASSISTANT &&
+                    message.status == ChatMessageStatus.DONE &&
+                    message.createdAt < questionMessage.createdAt
+            }
+            .lastOrNull()
+        val sessionMemory = session?.memoryDigest.orEmpty().compactSingleLine()
+        val localFollowUp = shouldUseSessionMemory(
+            question = questionMessage.content,
+            sessionMemory = sessionMemory,
+            previousQuestion = previousQuestion
+        )
+        val previousCitationResults = previousAssistant
+            ?.let { assistant ->
+                loadPreviousCitationResultsForMessage(
+                    messageId = assistant.id,
+                    maxCount = minOf(MAX_PREVIOUS_CITATIONS, topK)
+                )
+            }
+            .orEmpty()
+        val rewrite = rewriteQuestionForRetrieval(
+            currentQuestion = questionMessage.content,
+            sessionMemory = sessionMemory,
+            previousQuestion = previousQuestion.orEmpty(),
+            previousAssistantAnswer = previousAssistant?.content.orEmpty(),
+            previousCitationResults = previousCitationResults
+        )
+        val shouldTrustRewrite = rewrite != null && rewrite.confidence >= MIN_REWRITE_CONFIDENCE
+        val isFollowUp = if (shouldTrustRewrite) {
+            rewrite?.isFollowUp == true
+        } else {
+            localFollowUp
+        }
+        val shouldUsePreviousCitations = isFollowUp &&
+            (if (shouldTrustRewrite) rewrite?.shouldUsePreviousCitations == true else true)
+        val fallbackFollowUpQuery = buildFollowUpRetrievalQuery(
+            sessionMemory = sessionMemory,
+            previousQuestion = previousQuestion.orEmpty(),
+            currentQuestion = questionMessage.content
+        )
+        val resolvedQuestion = if (isFollowUp) {
+            rewrite?.standaloneQuestion
+                ?.compactSingleLine()
+                ?.takeIf { it.isNotBlank() && shouldTrustRewrite }
+                ?: fallbackFollowUpQuery
+        } else {
+            ""
+        }
+        val retrievalQuery = if (isFollowUp) {
+            rewrite?.retrievalQuery
+                ?.compactSingleLine()
+                ?.takeIf { it.isNotBlank() && shouldTrustRewrite }
+                ?: resolvedQuestion
+        } else {
+            questionMessage.content.trim()
+        }
+        val selectedPreviousResults = if (shouldUsePreviousCitations) previousCitationResults else emptyList()
+        return ChatRetrievalContext(
+            retrievalQuery = retrievalQuery,
+            resolvedQuestion = resolvedQuestion,
+            sessionMemory = if (isFollowUp) sessionMemory else "",
+            previousCitationIds = selectedPreviousResults.map { it.entry.id },
+            previousCitationResults = selectedPreviousResults
+        )
+    }
+
+    private suspend fun rewriteQuestionForRetrieval(
+        currentQuestion: String,
+        sessionMemory: String,
+        previousQuestion: String,
+        previousAssistantAnswer: String,
+        previousCitationResults: List<SemanticSearchResult>
+    ): QuestionRewriteResponse? {
+        if (
+            sessionMemory.isBlank() &&
+            previousQuestion.isBlank() &&
+            previousAssistantAnswer.isBlank() &&
+            previousCitationResults.isEmpty()
+        ) {
+            return null
+        }
+        return runCatching {
+            backendClient.rewriteQuestion(
+                requestId = "rewrite-question-${UUID.randomUUID()}",
+                currentQuestion = currentQuestion,
+                sessionMemory = sessionMemory,
+                lastUserQuestion = previousQuestion,
+                lastAssistantAnswerPreview = previousAssistantAnswer.compactSingleLine().take(320),
+                previousCitationTitles = previousCitationResults.map { result ->
+                    result.entry.userTitle
+                        ?.takeIf { it.isNotBlank() }
+                        ?: result.entry.summary.takeIf { it.isNotBlank() }
+                        ?: result.entry.content.compactSingleLine().take(80)
+                }
+            )
+        }.getOrNull()
+    }
+
+    private suspend fun loadPreviousCitationResultsForMessage(
+        messageId: String,
+        maxCount: Int
+    ): List<SemanticSearchResult> {
+        if (maxCount <= 0) {
+            return emptyList()
+        }
+        return chatCitationDao.getCitationsForMessage(messageId)
+            .map { it.toModel() }
+            .distinctBy { it.knowledgeEntryId }
+            .take(maxCount)
+            .mapNotNull { citation ->
+                val entry = knowledgeEntryDao.getEntry(citation.knowledgeEntryId)?.toModel()
+                    ?: return@mapNotNull null
+                SemanticSearchResult(
+                    entry = entry,
+                    score = citation.score.takeIf { it > 0f } ?: 0.0001f
+                )
+            }
+    }
+
+    private fun shouldUseSessionMemory(
+        question: String,
+        sessionMemory: String,
+        previousQuestion: String?
+    ): Boolean {
+        val normalized = question.compactSingleLine()
+        if (normalized.length > 40) {
+            return false
+        }
+        if (sessionMemory.isBlank() && previousQuestion.isNullOrBlank()) {
+            return false
+        }
+        val hasFollowUpMarker = listOf(
+            "这个",
+            "刚才",
+            "上面",
+            "前面",
+            "继续",
+            "展开",
+            "展开一下",
+            "详细",
+            "具体",
+            "怎么做",
+            "怎么",
+            "如何",
+            "例子",
+            "应用",
+            "建议",
+            "优化",
+            "方案",
+            "步骤",
+            "哪些",
+            "为什么",
+            "总结",
+            "归纳",
+            "分析",
+            "这个观点",
+            "这部分",
+            "这一点",
+            "它"
+        ).any { normalized.contains(it) }
+        val asksNewDefinition = listOf("是什么", "介绍一下", "解释一下").any { normalized.contains(it) }
+        val hasExplicitReference = listOf("这个", "刚才", "上面", "前面", "这部分", "这一点", "它").any {
+            normalized.contains(it)
+        }
+        if (!hasFollowUpMarker) {
+            return !asksNewDefinition && sessionMemory.isNotBlank() && normalized.length <= 18
+        }
+        return !asksNewDefinition || hasExplicitReference
+    }
+
+    private fun buildFollowUpRetrievalQuery(
+        sessionMemory: String,
+        previousQuestion: String,
+        currentQuestion: String
+    ): String {
+        return listOfNotNull(
+            sessionMemory.takeIf { it.isNotBlank() }?.let {
+                "会话：${it.compactSingleLine().take(MAX_CHAT_MEMORY_PREFIX_LENGTH)}"
+            },
+            previousQuestion.takeIf { it.isNotBlank() }?.let {
+                "上问：${it.compactSingleLine().takeLast(MAX_PREVIOUS_QUESTION_LENGTH)}"
+            },
+            "追问：${currentQuestion.compactSingleLine()}"
+        )
+            .joinToString(separator = "\n")
+            .take(MAX_CHAT_RETRIEVAL_QUERY_LENGTH)
+    }
+
+    private fun mergeChatRetrievalResults(
+        searchResults: List<SemanticSearchResult>,
+        previousResults: List<SemanticSearchResult>,
+        topK: Int
+    ): List<SemanticSearchResult> {
+        val selected = previousResults
+            .distinctBy { it.entry.id }
+            .take(minOf(MAX_PREVIOUS_CITATIONS, topK))
+            .toMutableList()
+        val selectedIds = selected.map { it.entry.id }.toMutableSet()
+        searchResults
+            .filterNot { it.entry.id in selectedIds }
+            .take(topK - selected.size)
+            .forEach { result ->
+                selected += result
+                selectedIds += result.entry.id
+            }
+        return selected.take(topK)
     }
 
     override fun observeReviewSessions(): Flow<List<ReviewSession>> {
@@ -1039,7 +1394,8 @@ class LocalNazhiRepository(
     private suspend fun searchSimilarKnowledgeEntriesByVector(
         queryVector: FloatArray,
         model: String,
-        topK: Int
+        topK: Int,
+        requirePositiveScore: Boolean = true
     ): List<SemanticSearchResult> {
         return embeddingDao.getRecordsByOwnerType(
             ownerType = EmbeddingRecord.OWNER_KNOWLEDGE_ENTRY,
@@ -1057,7 +1413,7 @@ class LocalNazhiRepository(
                     )
                 }
             }
-            .filter { it.score > 0f }
+            .filter { !requirePositiveScore || it.score > 0f }
             .sortedByDescending { it.score }
             .take(topK)
     }
@@ -1072,26 +1428,76 @@ class LocalNazhiRepository(
         ).joinToString(separator = "\n")
     }
 
-    private suspend fun getOrCreateChatSession(question: String, now: Long): ChatSession {
-        val existing = chatSessionDao.getLatestSession()?.toModel()
-        if (existing != null) {
-            return existing
+    private suspend fun ensureKnowledgeChatReady() {
+        val entries = knowledgeEntryDao.getEntries()
+        if (entries.isEmpty()) {
+            throw IllegalStateException("当前还没有知识条目，请先完成知识入库后再提问。")
         }
-        val session = ChatSession(
-            id = "chat-session-${UUID.randomUUID()}",
-            title = question.firstLineOrTitle(24),
-            createdAt = now,
-            updatedAt = now
+        if (entries.none { it.indexStatus == KnowledgeIndexStatus.INDEXED }) {
+            throw IllegalStateException("知识库尚未完成索引，请先在知识库页重建索引后再提问。")
+        }
+    }
+
+    private suspend fun getOrCreateChatSession(sessionId: String?, question: String): ChatSession {
+        val selected = sessionId?.let { chatSessionDao.getSession(it)?.toModel() }
+        if (selected != null) {
+            return selected
+        }
+        return createChatSession(question)
+    }
+
+    private suspend fun resolveQuestionMessageForRetry(messageId: String): ChatMessage {
+        val target = chatMessageDao.getMessage(messageId)?.toModel()
+            ?: throw IllegalArgumentException("找不到对应的问答记录。")
+        if (target.role == ChatRole.USER) {
+            return target
+        }
+        val parentId = target.parentMessageId
+            ?: throw IllegalArgumentException("这条旧回答缺少问题关联，无法直接重试。")
+        return chatMessageDao.getMessage(parentId)?.toModel()
+            ?: throw IllegalArgumentException("找不到这条回答对应的问题。")
+    }
+
+    private suspend fun nextAssistantAttempt(parentMessageId: String): Int {
+        val latestAttempt = chatMessageDao.getAssistantMessagesForParent(parentMessageId)
+            .maxOfOrNull { it.attempt }
+            ?: 0
+        return latestAttempt + 1
+    }
+
+    private suspend fun updateChatSessionOverview(
+        sessionId: String,
+        titleSeed: String? = null,
+        updatedAt: Long = System.currentTimeMillis()
+    ) {
+        val session = chatSessionDao.getSession(sessionId)?.toModel() ?: return
+        val messages = chatMessageDao.getMessagesForSession(sessionId).map { it.toModel() }
+        val firstQuestion = messages.firstOrNull { it.role == ChatRole.USER }?.content ?: titleSeed
+        val resolvedTitle = when {
+            session.title.isBlank() || session.title == DEFAULT_CHAT_SESSION_TITLE -> {
+                firstQuestion?.firstLineOrTitle(24) ?: DEFAULT_CHAT_SESSION_TITLE
+            }
+            else -> session.title
+        }
+        val lastMessage = messages.lastOrNull()
+        chatSessionDao.updateOverview(
+            id = sessionId,
+            title = resolvedTitle,
+            messageCount = messages.size,
+            lastMessagePreview = lastMessage?.content?.compactPreview(64).orEmpty(),
+            updatedAt = lastMessage?.updatedAt ?: updatedAt
         )
-        chatSessionDao.upsert(session.toEntity())
-        return session
     }
 
     private suspend fun saveAssistantMessage(
         sessionId: String,
+        parentMessageId: String,
         content: String,
         status: ChatMessageStatus,
         errorMessage: String?,
+        attempt: Int,
+        progressStage: String?,
+        errorCode: String?,
         citations: List<com.nazhi.app.core.network.KnowledgeChatCitation>,
         matchedResults: List<SemanticSearchResult>
     ): ChatMessage {
@@ -1099,15 +1505,19 @@ class LocalNazhiRepository(
         val message = ChatMessage(
             id = "chat-assistant-${UUID.randomUUID()}",
             sessionId = sessionId,
+            parentMessageId = parentMessageId,
             role = ChatRole.ASSISTANT,
             content = content,
             status = status,
             errorMessage = errorMessage,
+            attempt = attempt,
+            progressStage = progressStage,
+            errorCode = errorCode,
             createdAt = now,
             updatedAt = now
         )
         chatMessageDao.upsert(message.toEntity())
-        chatSessionDao.updateTime(sessionId, now)
+        updateChatSessionOverview(sessionId, updatedAt = now)
 
         val resultById = matchedResults.associateBy { it.entry.id }
         val citationEntities = citations.mapNotNull { citation ->
@@ -1127,6 +1537,30 @@ class LocalNazhiRepository(
             chatCitationDao.upsertAll(citationEntities)
         }
         return message
+    }
+
+    private suspend fun updateChatSessionMemoryIfUseful(
+        sessionId: String,
+        answer: String,
+        citations: List<com.nazhi.app.core.network.KnowledgeChatCitation>,
+        updatedMemoryDigest: String
+    ) {
+        val normalizedDigest = updatedMemoryDigest
+            .compactSingleLine()
+            .take(MAX_MEMORY_DIGEST_LENGTH)
+        if (
+            normalizedDigest.isBlank() ||
+            citations.isEmpty() ||
+            answer.isKnowledgeInsufficientAnswer() ||
+            normalizedDigest.isKnowledgeInsufficientAnswer()
+        ) {
+            return
+        }
+        chatSessionDao.updateMemoryDigest(
+            id = sessionId,
+            memoryDigest = normalizedDigest,
+            updatedAt = System.currentTimeMillis()
+        )
     }
 
     private fun BackendTaskResponse.toAiTaskProgress(): AiTaskProgress {
@@ -1195,6 +1629,31 @@ class LocalNazhiRepository(
                 }
             }
         }
+    }
+
+    private fun Throwable.toErrorCode(): String {
+        return when (this) {
+            is NazhiBackendException -> code ?: "HTTP_$statusCode"
+            else -> this::class.java.simpleName.ifBlank { "UNKNOWN_ERROR" }
+        }
+    }
+
+    private fun String.compactPreview(maxLength: Int): String {
+        return compactSingleLine().take(maxLength)
+    }
+
+    private fun String.compactSingleLine(): String {
+        return lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .joinToString(separator = " ")
+    }
+
+    private fun String.isKnowledgeInsufficientAnswer(): Boolean {
+        return contains("当前知识库中没有足够信息") ||
+            contains("没有足够信息") ||
+            contains("不足以回答") ||
+            contains("无法回答")
     }
 
     private fun String.firstLineOrTitle(maxLength: Int = 40): String {

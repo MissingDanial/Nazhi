@@ -152,6 +152,9 @@ data class ExportKnowledgeDraft(
 data class ExportChatSession(
     val id: String,
     val title: String,
+    val memoryDigest: String? = null,
+    val messageCount: Int = 0,
+    val lastMessagePreview: String = "",
     val createdAt: Long,
     val updatedAt: Long
 )
@@ -160,10 +163,14 @@ data class ExportChatSession(
 data class ExportChatMessage(
     val id: String,
     val sessionId: String,
+    val parentMessageId: String? = null,
     val role: String,
     val content: String,
     val status: String,
     val errorMessage: String?,
+    val attempt: Int = 1,
+    val progressStage: String? = null,
+    val errorCode: String? = null,
     val createdAt: Long,
     val updatedAt: Long
 )
@@ -239,6 +246,9 @@ fun ChatSession.toExportChatSession(): ExportChatSession {
     return ExportChatSession(
         id = id,
         title = title,
+        memoryDigest = memoryDigest,
+        messageCount = messageCount,
+        lastMessagePreview = lastMessagePreview,
         createdAt = createdAt,
         updatedAt = updatedAt
     )
@@ -248,10 +258,14 @@ fun ChatMessage.toExportChatMessage(): ExportChatMessage {
     return ExportChatMessage(
         id = id,
         sessionId = sessionId,
+        parentMessageId = parentMessageId,
         role = role.name,
         content = content,
         status = status.name,
         errorMessage = errorMessage,
+        attempt = attempt,
+        progressStage = progressStage,
+        errorCode = errorCode,
         createdAt = createdAt,
         updatedAt = updatedAt
     )
@@ -333,6 +347,9 @@ fun ExportChatSession.toImportedChatSession(): ChatSession {
     return ChatSession(
         id = id,
         title = title,
+        memoryDigest = memoryDigest,
+        messageCount = messageCount,
+        lastMessagePreview = lastMessagePreview,
         createdAt = createdAt,
         updatedAt = updatedAt
     )
@@ -342,10 +359,14 @@ fun ExportChatMessage.toImportedChatMessage(): ChatMessage {
     return ChatMessage(
         id = id,
         sessionId = sessionId,
+        parentMessageId = parentMessageId,
         role = enumValueOrDefault(role, ChatRole.USER),
         content = content,
         status = enumValueOrDefault(status, ChatMessageStatus.DONE),
         errorMessage = errorMessage,
+        attempt = attempt.coerceAtLeast(1),
+        progressStage = progressStage,
+        errorCode = errorCode,
         createdAt = createdAt,
         updatedAt = updatedAt
     )

@@ -24,6 +24,9 @@ interface ChatCitationDao {
     @Query("SELECT * FROM chat_citations WHERE id = :id LIMIT 1")
     suspend fun getCitation(id: String): ChatCitationEntity?
 
+    @Query("SELECT * FROM chat_citations WHERE messageId = :messageId ORDER BY createdAt ASC")
+    suspend fun getCitationsForMessage(messageId: String): List<ChatCitationEntity>
+
     @Upsert
     suspend fun upsert(citation: ChatCitationEntity)
 

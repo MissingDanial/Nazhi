@@ -196,10 +196,50 @@ class NazhiBackendClient(
         path = "/v1/tasks/$taskId"
     )
 
+    suspend fun rewriteQuestion(
+        requestId: String,
+        currentQuestion: String,
+        sessionMemory: String = "",
+        lastUserQuestion: String = "",
+        lastAssistantAnswerPreview: String = "",
+        previousCitationTitles: List<String> = emptyList(),
+        language: String = "zh-CN"
+    ): QuestionRewriteResponse {
+        val backendConfig = configProvider()
+        if (backendConfig.serviceMode == AiServiceMode.DIRECT_API) {
+            return rewriteQuestionDirect(
+                config = backendConfig,
+                requestId = requestId,
+                currentQuestion = currentQuestion,
+                language = language,
+                sessionMemory = sessionMemory,
+                lastUserQuestion = lastUserQuestion,
+                lastAssistantAnswerPreview = lastAssistantAnswerPreview,
+                previousCitationTitles = previousCitationTitles
+            )
+        }
+        return post(
+            path = "/v1/rewrite-question",
+            body = QuestionRewriteRequest(
+                requestId = requestId,
+                currentQuestion = currentQuestion,
+                language = language,
+                sessionMemory = sessionMemory,
+                lastUserQuestion = lastUserQuestion,
+                lastAssistantAnswerPreview = lastAssistantAnswerPreview,
+                previousCitationTitles = previousCitationTitles
+            ),
+            config = backendConfig
+        )
+    }
+
     suspend fun chatWithKnowledge(
         requestId: String,
         question: String,
         contexts: List<KnowledgeChatContextInput>,
+        resolvedQuestion: String = "",
+        sessionMemory: String = "",
+        previousCitationIds: List<String> = emptyList(),
         language: String = "zh-CN"
     ): KnowledgeChatResponse {
         val backendConfig = configProvider()
@@ -209,7 +249,10 @@ class NazhiBackendClient(
                 requestId = requestId,
                 question = question,
                 language = language,
-                contexts = contexts
+                contexts = contexts,
+                resolvedQuestion = resolvedQuestion,
+                sessionMemory = sessionMemory,
+                previousCitationIds = previousCitationIds
             )
         }
         return post(
@@ -218,7 +261,10 @@ class NazhiBackendClient(
                 requestId = requestId,
                 question = question,
                 language = language,
-                contexts = contexts
+                contexts = contexts,
+                resolvedQuestion = resolvedQuestion,
+                sessionMemory = sessionMemory,
+                previousCitationIds = previousCitationIds
             ),
             config = backendConfig
         )
@@ -434,13 +480,17 @@ class NazhiBackendClient(
         requestId: String,
         question: String,
         language: String,
-        contexts: List<KnowledgeChatContextInput>
+        contexts: List<KnowledgeChatContextInput>,
+        resolvedQuestion: String,
+        sessionMemory: String,
+        previousCitationIds: List<String>
     ): KnowledgeChatResponse {
         if (contexts.isEmpty()) {
             return KnowledgeChatResponse(
                 requestId = requestId,
                 answer = "当前知识库中没有足够信息回答这个问题。",
-                citations = emptyList()
+                citations = emptyList(),
+                updatedMemoryDigest = ""
             )
         }
         val content = chatDirect(
@@ -452,7 +502,14 @@ class NazhiBackendClient(
                 ),
                 DirectChatMessage(
                     role = "user",
-                    content = buildKnowledgeChatPrompt(question, language, contexts)
+                    content = buildKnowledgeChatPrompt(
+                        question = question,
+                        resolvedQuestion = resolvedQuestion,
+                        language = language,
+                        contexts = contexts,
+                        sessionMemory = sessionMemory,
+                        previousCitationIds = previousCitationIds
+                    )
                 )
             ),
             temperature = 0.2f,
@@ -464,7 +521,57 @@ class NazhiBackendClient(
         return KnowledgeChatResponse(
             requestId = requestId,
             answer = parsed.answer,
-            citations = parsed.citations.filter { it.contextId in allowedContextIds }.take(5)
+            citations = parsed.citations.filter { it.contextId in allowedContextIds }.take(5),
+            updatedMemoryDigest = parsed.updatedMemoryDigest.takeIf {
+                parsed.citations.any { citation -> citation.contextId in allowedContextIds }
+            }.orEmpty()
+        )
+    }
+
+    private suspend fun rewriteQuestionDirect(
+        config: BackendConfig,
+        requestId: String,
+        currentQuestion: String,
+        language: String,
+        sessionMemory: String,
+        lastUserQuestion: String,
+        lastAssistantAnswerPreview: String,
+        previousCitationTitles: List<String>
+    ): QuestionRewriteResponse {
+        val content = chatDirect(
+            config = config,
+            messages = listOf(
+                DirectChatMessage(
+                    role = "system",
+                    content = "你是纳知的追问识别与检索问题改写器。不要回答问题，只返回合法 JSON。"
+                ),
+                DirectChatMessage(
+                    role = "user",
+                    content = buildQuestionRewritePrompt(
+                        currentQuestion = currentQuestion,
+                        language = language,
+                        sessionMemory = sessionMemory,
+                        lastUserQuestion = lastUserQuestion,
+                        lastAssistantAnswerPreview = lastAssistantAnswerPreview,
+                        previousCitationTitles = previousCitationTitles
+                    )
+                )
+            ),
+            temperature = 0.1f,
+            maxTokens = 512
+        )
+        val jsonText = extractJsonObject(content)
+        val parsed = json.decodeFromString<DirectQuestionRewritePayload>(jsonText)
+        return QuestionRewriteResponse(
+            requestId = requestId,
+            isFollowUp = parsed.isFollowUp,
+            standaloneQuestion = parsed.standaloneQuestion.trim().ifBlank { currentQuestion.trim() }.take(240),
+            retrievalQuery = parsed.retrievalQuery.trim()
+                .ifBlank { parsed.standaloneQuestion.trim() }
+                .ifBlank { currentQuestion.trim() }
+                .take(220),
+            shouldUsePreviousCitations = parsed.shouldUsePreviousCitations,
+            confidence = parsed.confidence.coerceIn(0f, 1f)
         )
     }
 
@@ -652,8 +759,11 @@ class NazhiBackendClient(
 
     private fun buildKnowledgeChatPrompt(
         question: String,
+        resolvedQuestion: String = "",
         language: String,
-        contexts: List<KnowledgeChatContextInput>
+        contexts: List<KnowledgeChatContextInput>,
+        sessionMemory: String = "",
+        previousCitationIds: List<String> = emptyList()
     ): String {
         val contextPayload = contexts.map { context ->
             buildJsonObject {
@@ -666,19 +776,74 @@ class NazhiBackendClient(
                 put("score", context.score)
             }
         }
+        val normalizedSessionMemory = sessionMemory.trim().take(300)
+        val normalizedResolvedQuestion = resolvedQuestion.trim().take(300)
+        val normalizedPreviousCitationIds = previousCitationIds.filter { it.isNotBlank() }.take(5)
         return """
             请只基于 contexts 回答用户问题。
             规则：
             1. 不要使用 contexts 之外的事实。
             2. 如果 contexts 不足以回答，answer 必须说明“当前知识库中没有足够信息”。
-            3. citations 只能引用 contexts[].id。
-            4. 使用 $language，保持简洁、可执行。
-            5. 只输出 JSON，不要 Markdown。
+            3. contexts 数组非空时，不要说“没有上下文”或“未提供上下文”；只能判断这些 contexts 是否足以回答。
+            4. citations 只能引用 contexts[].id。
+            5. sessionMemory 只用于理解用户追问和指代关系，不能作为事实来源。
+            6. previousCitationIds 只表示用户可能在追问这些来源，不能作为独立事实来源。
+            7. 补全后的独立问题只用于理解追问和检索意图，不能作为事实来源。
+            8. updatedMemoryDigest 是完整替换后的本会话摘要，最多 200 个中文字符，只总结主题、用户关注点和已基于 contexts 讨论过的结论。
+            9. 如果 contexts 不足、answer 表示知识不足、或 citations 为空，updatedMemoryDigest 必须为空字符串。
+            10. 使用 $language，保持简洁、可执行。
+            11. 只输出 JSON 对象，不要在 JSON 外输出 Markdown 或解释。
+            12. answer 字段内部使用轻量 Markdown，便于 Android 展示：
+               - 可以使用 "# 标题"、"## 小标题"、"- 要点"、"1. 步骤" 和普通段落。
+               - 优先给出一个简短标题，再用“核心结论 / 展开说明 / 可以继续追问”等小标题组织内容。
+               - 不要输出表格、代码块、HTML、图片链接或复杂嵌套列表。
+               - 单段尽量不超过 3 行，避免长篇纯文本。
             输出格式：
-            {"answer":"回答正文","citations":[{"contextId":"knowledge-id","quote":"引用短句","reason":"引用理由"}]}
+            {"answer":"# 简短标题\n## 核心结论\n- 要点一\n- 要点二\n## 展开说明\n1. 步骤或说明一\n2. 步骤或说明二","citations":[{"contextId":"knowledge-id","quote":"引用短句","reason":"引用理由"}],"updatedMemoryDigest":"完整替换后的本会话摘要，最多200字"}
             用户问题：$question
+            补全后的独立问题：
+            ${normalizedResolvedQuestion.ifBlank { "无" }}
+            sessionMemory:
+            ${normalizedSessionMemory.ifBlank { "无" }}
+            previousCitationIds:
+            ${buildJsonArray { normalizedPreviousCitationIds.forEach { add(it) } }}
             contexts:
             ${JsonArray(contextPayload)}
+        """.trimIndent()
+    }
+
+    private fun buildQuestionRewritePrompt(
+        currentQuestion: String,
+        language: String,
+        sessionMemory: String,
+        lastUserQuestion: String,
+        lastAssistantAnswerPreview: String,
+        previousCitationTitles: List<String>
+    ): String {
+        val titles = previousCitationTitles.map { it.trim() }.filter { it.isNotBlank() }.take(5)
+        return """
+            你是纳知的“追问识别与检索问题改写器”。你的任务不是回答问题，只能把用户当前问题改写为适合知识库向量检索的独立问题。
+            规则：
+            1. 只判断 currentQuestion 是否延续上一轮会话，不要回答 currentQuestion。
+            2. 如果 currentQuestion 是新的独立问题，isFollowUp=false，standaloneQuestion 和 retrievalQuery 都使用 currentQuestion。
+            3. 如果 currentQuestion 是追问、指代、展开、继续、举例、优化、总结或要求基于上一轮继续分析，isFollowUp=true。
+            4. standaloneQuestion 要补全指代，让它离开历史会话也能被理解。
+            5. retrievalQuery 用于向量检索，应保留核心名词、主题、动作和限制。
+            6. shouldUsePreviousCitations 只在当前问题明显依赖上一轮引用来源时为 true。
+            7. confidence 为 0 到 1；不确定时降低 confidence。
+            8. 使用 $language；只输出 JSON，不要 Markdown。
+            输出格式：
+            {"isFollowUp":true,"standaloneQuestion":"补全后的独立问题","retrievalQuery":"适合向量检索的短查询","shouldUsePreviousCitations":true,"confidence":0.82}
+            currentQuestion:
+            ${currentQuestion.trim()}
+            sessionMemory:
+            ${sessionMemory.trim().take(300).ifBlank { "无" }}
+            lastUserQuestion:
+            ${lastUserQuestion.trim().take(300).ifBlank { "无" }}
+            lastAssistantAnswerPreview:
+            ${lastAssistantAnswerPreview.trim().take(400).ifBlank { "无" }}
+            previousCitationTitles:
+            ${buildJsonArray { titles.forEach { add(it) } }}
         """.trimIndent()
     }
 
@@ -818,11 +983,35 @@ data class BackendTaskError(
 )
 
 @Serializable
+private data class QuestionRewriteRequest(
+    val requestId: String,
+    val currentQuestion: String,
+    val language: String,
+    val sessionMemory: String = "",
+    val lastUserQuestion: String = "",
+    val lastAssistantAnswerPreview: String = "",
+    val previousCitationTitles: List<String> = emptyList()
+)
+
+@Serializable
+data class QuestionRewriteResponse(
+    val requestId: String,
+    val isFollowUp: Boolean = false,
+    val standaloneQuestion: String = "",
+    val retrievalQuery: String = "",
+    val shouldUsePreviousCitations: Boolean = false,
+    val confidence: Float = 0f
+)
+
+@Serializable
 private data class KnowledgeChatRequest(
     val requestId: String,
     val question: String,
     val language: String,
-    val contexts: List<KnowledgeChatContextInput>
+    val contexts: List<KnowledgeChatContextInput>,
+    val resolvedQuestion: String = "",
+    val sessionMemory: String = "",
+    val previousCitationIds: List<String> = emptyList()
 )
 
 @Serializable
@@ -840,7 +1029,8 @@ data class KnowledgeChatContextInput(
 data class KnowledgeChatResponse(
     val requestId: String,
     val answer: String,
-    val citations: List<KnowledgeChatCitation> = emptyList()
+    val citations: List<KnowledgeChatCitation> = emptyList(),
+    val updatedMemoryDigest: String = ""
 )
 
 @Serializable
@@ -926,7 +1116,17 @@ private data class DirectOrganizePayload(
 @Serializable
 private data class DirectKnowledgeChatPayload(
     val answer: String,
-    val citations: List<KnowledgeChatCitation> = emptyList()
+    val citations: List<KnowledgeChatCitation> = emptyList(),
+    val updatedMemoryDigest: String = ""
+)
+
+@Serializable
+private data class DirectQuestionRewritePayload(
+    val isFollowUp: Boolean = false,
+    val standaloneQuestion: String = "",
+    val retrievalQuery: String = "",
+    val shouldUsePreviousCitations: Boolean = false,
+    val confidence: Float = 0f
 )
 
 @Serializable

@@ -106,8 +106,29 @@ interface NazhiRepository {
     suspend fun askKnowledgeQuestion(
         question: String,
         topK: Int = 5,
+        sessionId: String? = null,
         onProgress: (AiTaskProgress) -> Unit = {}
     ): ChatMessage
+
+    suspend fun retryChatMessage(
+        messageId: String,
+        topK: Int = 5,
+        onProgress: (AiTaskProgress) -> Unit = {}
+    ): ChatMessage
+
+    suspend fun regenerateChatAnswer(
+        messageId: String,
+        topK: Int = 5,
+        onProgress: (AiTaskProgress) -> Unit = {}
+    ): ChatMessage
+
+    suspend fun createChatSession(title: String? = null): ChatSession
+
+    suspend fun deleteChatSession(sessionId: String)
+
+    suspend fun clearChatSessionMemory(sessionId: String)
+
+    suspend fun clearChatSessions()
 
     fun observeReviewSessions(): Flow<List<ReviewSession>>
 

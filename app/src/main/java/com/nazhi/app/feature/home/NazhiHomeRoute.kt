@@ -14,6 +14,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import com.nazhi.app.core.chat.KnowledgeChatCoordinator
+import com.nazhi.app.core.knowledge.KnowledgeIngestionCoordinator
 import com.nazhi.app.core.network.NazhiBackendClient
 import com.nazhi.app.core.repository.NazhiRepository
 import com.nazhi.app.core.settings.BackendSettingsStore
@@ -36,12 +38,13 @@ fun NazhiHomeRoute(
     repository: NazhiRepository,
     backendSettingsStore: BackendSettingsStore,
     backendClient: NazhiBackendClient,
+    knowledgeIngestionCoordinator: KnowledgeIngestionCoordinator,
+    knowledgeChatCoordinator: KnowledgeChatCoordinator,
     initialShareText: String? = null,
     initialShareSource: String? = null,
     onShareConsumed: () -> Unit = {}
 ) {
     var selectedTab by remember { mutableStateOf(MainTab.TODAY) }
-    var focusedKnowledgeEntryId by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(initialShareText) {
         if (!initialShareText.isNullOrBlank()) {
@@ -93,6 +96,7 @@ fun NazhiHomeRoute(
             when (selectedTab) {
                 MainTab.TODAY -> InboxRoute(
                     repository = repository,
+                    knowledgeIngestionCoordinator = knowledgeIngestionCoordinator,
                     initialShareText = initialShareText,
                     initialShareSource = initialShareSource,
                     onShareConsumed = onShareConsumed,
@@ -104,16 +108,12 @@ fun NazhiHomeRoute(
 
                 MainTab.CHAT -> KnowledgeChatRoute(
                     repository = repository,
-                    onOpenKnowledgeEntry = { entryId ->
-                        focusedKnowledgeEntryId = entryId
-                        selectedTab = MainTab.KNOWLEDGE
-                    }
+                    knowledgeChatCoordinator = knowledgeChatCoordinator
                 )
 
                 MainTab.KNOWLEDGE -> KnowledgeRoute(
                     repository = repository,
-                    focusedEntryId = focusedKnowledgeEntryId,
-                    onFocusedEntryConsumed = { focusedKnowledgeEntryId = null }
+                    knowledgeIngestionCoordinator = knowledgeIngestionCoordinator
                 )
 
                 MainTab.SETTINGS -> SettingsRoute(

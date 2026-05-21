@@ -20,16 +20,21 @@ import com.nazhi.app.core.model.ChatRole
     ],
     indices = [
         Index(value = ["sessionId"]),
+        Index(value = ["parentMessageId"]),
         Index(value = ["createdAt"])
     ]
 )
 data class ChatMessageEntity(
     @PrimaryKey val id: String,
     val sessionId: String,
+    val parentMessageId: String?,
     val role: ChatRole,
     val content: String,
     val status: ChatMessageStatus,
     val errorMessage: String?,
+    val attempt: Int,
+    val progressStage: String?,
+    val errorCode: String?,
     val createdAt: Long,
     val updatedAt: Long
 )
@@ -38,10 +43,14 @@ fun ChatMessageEntity.toModel(): ChatMessage {
     return ChatMessage(
         id = id,
         sessionId = sessionId,
+        parentMessageId = parentMessageId,
         role = role,
         content = content,
         status = status,
         errorMessage = errorMessage,
+        attempt = attempt,
+        progressStage = progressStage,
+        errorCode = errorCode,
         createdAt = createdAt,
         updatedAt = updatedAt
     )
@@ -51,12 +60,15 @@ fun ChatMessage.toEntity(): ChatMessageEntity {
     return ChatMessageEntity(
         id = id,
         sessionId = sessionId,
+        parentMessageId = parentMessageId,
         role = role,
         content = content,
         status = status,
         errorMessage = errorMessage,
+        attempt = attempt,
+        progressStage = progressStage,
+        errorCode = errorCode,
         createdAt = createdAt,
         updatedAt = updatedAt
     )
 }
-

@@ -37,6 +37,8 @@ class MainActivity : ComponentActivity() {
                     repository = appContainer.repository,
                     backendSettingsStore = appContainer.backendSettingsStore,
                     backendClient = appContainer.backendClient,
+                    knowledgeIngestionCoordinator = appContainer.knowledgeIngestionCoordinator,
+                    knowledgeChatCoordinator = appContainer.knowledgeChatCoordinator,
                     initialShareText = sharedText,
                     initialShareSource = sharedSource,
                     onShareConsumed = {

@@ -54,6 +54,9 @@ import com.nazhi.app.core.model.ReviewSession
 import com.nazhi.app.core.model.SourceType
 import com.nazhi.app.core.model.isMeaningfulKnowledgeDuplicateKey
 import com.nazhi.app.core.model.toKnowledgeDuplicateKey
+import com.nazhi.app.core.knowledge.KnowledgeIngestionCoordinator
+import com.nazhi.app.core.knowledge.KnowledgeIngestionState
+import com.nazhi.app.core.knowledge.KnowledgeTaskKind
 import com.nazhi.app.core.network.NazhiBackendException
 import com.nazhi.app.core.repository.NazhiRepository
 import com.nazhi.app.core.util.toLocalDateId
@@ -62,11 +65,13 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
 @Composable
 fun InboxRoute(
     repository: NazhiRepository,
+    knowledgeIngestionCoordinator: KnowledgeIngestionCoordinator,
     initialShareText: String? = null,
     initialShareSource: String? = null,
     onShareConsumed: () -> Unit = {},
@@ -80,6 +85,7 @@ fun InboxRoute(
 
     DateNotesRoute(
         repository = repository,
+        knowledgeIngestionCoordinator = knowledgeIngestionCoordinator,
         dateId = dateId,
         screenTitle = "纳知",
         screenSubtitle = "今日",
@@ -98,6 +104,7 @@ fun InboxRoute(
 @Composable
 fun DateNotesRoute(
     repository: NazhiRepository,
+    knowledgeIngestionCoordinator: KnowledgeIngestionCoordinator? = null,
     dateId: String,
     screenTitle: String,
     screenSubtitle: String,
@@ -118,6 +125,9 @@ fun DateNotesRoute(
     val dayKnowledgeStatus by remember(repository, dateId) {
         repository.observeDayKnowledgeStatus(dateId)
     }.collectAsState(initial = DayKnowledgeStatus(dateId, 0, 0, 0, 0, 0, 0, 0, 0))
+    val knowledgeIngestionState by remember(knowledgeIngestionCoordinator) {
+        knowledgeIngestionCoordinator?.state ?: flowOf(KnowledgeIngestionState())
+    }.collectAsState(initial = KnowledgeIngestionState())
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -135,8 +145,16 @@ fun DateNotesRoute(
     var editingNote by remember { mutableStateOf<Note?>(null) }
     var deletingNote by remember { mutableStateOf<Note?>(null) }
     var deleteUpdatesReviewSession by remember { mutableStateOf(false) }
-    var isAiOrganizing by remember { mutableStateOf(false) }
-    var aiOrganizeProgress by remember { mutableStateOf<AiTaskProgress?>(null) }
+    var handledKnowledgeTaskEventId by remember { mutableStateOf(knowledgeIngestionState.eventId) }
+    val isAiOrganizing = knowledgeIngestionState.isRunning &&
+        knowledgeIngestionState.taskKind == KnowledgeTaskKind.ORGANIZE
+    val isKnowledgeTaskRunning = knowledgeIngestionState.isRunning
+    val aiOrganizeProgress = if (isAiOrganizing) knowledgeIngestionState.progress else null
+    val aiOrganizeMessage = knowledgeIngestionState.message.takeIf {
+        knowledgeIngestionState.isRunning &&
+            knowledgeIngestionState.taskKind == KnowledgeTaskKind.ORGANIZE &&
+            knowledgeIngestionState.progress == null
+    }
     val currentReviewNote = pendingReviewNotes.getOrNull(
         reviewIndex.coerceAtMost((pendingReviewNotes.size - 1).coerceAtLeast(0))
     )
@@ -147,6 +165,20 @@ fun DateNotesRoute(
             reviewIndex = 0
         } else if (reviewIndex > pendingReviewNotes.lastIndex) {
             reviewIndex = pendingReviewNotes.lastIndex
+        }
+    }
+
+    LaunchedEffect(knowledgeIngestionState.eventId) {
+        val message = knowledgeIngestionState.message
+        if (knowledgeIngestionState.eventId != handledKnowledgeTaskEventId && !message.isNullOrBlank()) {
+            handledKnowledgeTaskEventId = knowledgeIngestionState.eventId
+            snackbarHostState.showSnackbar(message)
+            if (
+                knowledgeIngestionState.completedTaskKind == KnowledgeTaskKind.ORGANIZE &&
+                message.startsWith("已生成")
+            ) {
+                onOpenKnowledge()
+            }
         }
     }
 
@@ -164,7 +196,9 @@ fun DateNotesRoute(
         pendingDraftCount = dayKnowledgeStatus.pendingDraftCount,
         reviewedCount = reviewedCount,
         isAiOrganizing = isAiOrganizing,
+        isKnowledgeTaskRunning = isKnowledgeTaskRunning,
         aiOrganizeProgress = aiOrganizeProgress,
+        aiOrganizeMessage = aiOrganizeMessage,
         isReviewMode = isReviewMode,
         currentReviewNote = currentReviewNote,
         reviewIndex = reviewIndex,
@@ -245,26 +279,7 @@ fun DateNotesRoute(
             deleteUpdatesReviewSession = false
         },
         onAiOrganizeToday = {
-            coroutineScope.launch {
-                isAiOrganizing = true
-                val message = runCatching {
-                    val count = repository.organizeNotesForDate(dateId) { progress ->
-                        aiOrganizeProgress = progress
-                    }
-                    if (count == 0) {
-                        "没有可整理的内容"
-                    } else {
-                        "AI 已整理出 $count 条草稿"
-                    }
-                }.getOrElse { error ->
-                    "AI 整理失败：${error.toUserFacingMessage()}"
-                }
-                isAiOrganizing = false
-                snackbarHostState.showSnackbar(message)
-                if (message.startsWith("AI 已整理出")) {
-                    onOpenKnowledge()
-                }
-            }
+            knowledgeIngestionCoordinator?.organizeToday(dateId)
         },
         onStartReview = {
             if (pendingReviewNotes.isEmpty()) {
@@ -418,7 +433,9 @@ fun InboxScreen(
     pendingDraftCount: Int,
     reviewedCount: Int,
     isAiOrganizing: Boolean,
+    isKnowledgeTaskRunning: Boolean,
     aiOrganizeProgress: AiTaskProgress?,
+    aiOrganizeMessage: String?,
     isReviewMode: Boolean,
     currentReviewNote: Note?,
     reviewIndex: Int,
@@ -488,7 +505,9 @@ fun InboxScreen(
                         pendingDraftCount = pendingDraftCount,
                         reviewedCount = reviewedCount,
                         isOrganizing = isAiOrganizing,
+                        isKnowledgeTaskRunning = isKnowledgeTaskRunning,
                         progress = aiOrganizeProgress,
+                        statusMessage = aiOrganizeMessage,
                         onOrganize = onAiOrganizeToday
                     )
                 }
@@ -554,7 +573,9 @@ private fun AiOrganizeTodayCard(
     pendingDraftCount: Int,
     reviewedCount: Int,
     isOrganizing: Boolean,
+    isKnowledgeTaskRunning: Boolean,
     progress: AiTaskProgress?,
+    statusMessage: String?,
     onOrganize: () -> Unit
 ) {
     val canOrganize = pendingCount > 0 && pendingDraftCount == 0
@@ -586,6 +607,14 @@ private fun AiOrganizeTodayCard(
             progress?.let { taskProgress ->
                 RequestProgressBlock(progress = taskProgress)
             }
+            if (progress == null && isOrganizing && !statusMessage.isNullOrBlank()) {
+                Text(
+                    text = statusMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
             if (!canOrganize) {
                 Text(
                     text = when {
@@ -599,12 +628,13 @@ private fun AiOrganizeTodayCard(
             }
             Button(
                 onClick = onOrganize,
-                enabled = canOrganize && !isOrganizing,
+                enabled = canOrganize && !isKnowledgeTaskRunning,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
                     text = when {
                         isOrganizing -> "AI 整理中"
+                        isKnowledgeTaskRunning -> "知识处理中"
                         pendingDraftCount > 0 -> "先确认草稿"
                         pendingCount == 0 -> "暂无可整理"
                         else -> "AI 整理今日"
@@ -1098,7 +1128,9 @@ fun InboxPreview() {
             pendingDraftCount = 0,
             reviewedCount = 0,
             isAiOrganizing = false,
+            isKnowledgeTaskRunning = false,
             aiOrganizeProgress = null,
+            aiOrganizeMessage = null,
             isReviewMode = false,
             currentReviewNote = null,
             reviewIndex = 0,

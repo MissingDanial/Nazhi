@@ -54,15 +54,19 @@ import com.nazhi.app.core.model.KnowledgeIndexStatus
 import com.nazhi.app.core.model.Note
 import com.nazhi.app.core.model.SemanticSearchResult
 import com.nazhi.app.core.model.findDuplicateEntry
+import com.nazhi.app.core.knowledge.KnowledgeIngestionCoordinator
+import com.nazhi.app.core.knowledge.KnowledgeIngestionState
+import com.nazhi.app.core.knowledge.KnowledgeTaskKind
 import com.nazhi.app.core.network.NazhiBackendException
-import com.nazhi.app.core.repository.DuplicateKnowledgeEntryException
 import com.nazhi.app.core.repository.NazhiRepository
+import com.nazhi.app.core.ui.KnowledgeEntryDetailDialog
 import com.nazhi.app.core.util.todayDateId
 import kotlinx.coroutines.launch
 
 @Composable
 fun KnowledgeRoute(
     repository: NazhiRepository,
+    knowledgeIngestionCoordinator: KnowledgeIngestionCoordinator,
     focusedEntryId: String? = null,
     onFocusedEntryConsumed: () -> Unit = {}
 ) {
@@ -79,14 +83,15 @@ fun KnowledgeRoute(
     val embeddingCount by remember(repository) {
         repository.observeEmbeddingCount()
     }.collectAsState(initial = 0)
+    val knowledgeIngestionState by remember(knowledgeIngestionCoordinator) {
+        knowledgeIngestionCoordinator.state
+    }.collectAsState(initial = KnowledgeIngestionState())
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf<List<SemanticSearchResult>>(emptyList()) }
     var hasSearched by remember { mutableStateOf(false) }
-    var isOrganizing by remember { mutableStateOf(false) }
-    var organizeProgress by remember { mutableStateOf<AiTaskProgress?>(null) }
     var isSubmitting by remember { mutableStateOf(false) }
     var editingDraft by remember { mutableStateOf<KnowledgeEntryDraft?>(null) }
     var sourceDialogTitle by remember { mutableStateOf<String?>(null) }
@@ -102,6 +107,9 @@ fun KnowledgeRoute(
     val hasDuplicateDrafts = pendingDrafts.any { draft ->
         draft.findDuplicateEntry(entries) != null
     }
+    var handledKnowledgeIngestionEventId by remember {
+        mutableStateOf(knowledgeIngestionState.eventId)
+    }
 
     LaunchedEffect(focusedEntryId, entries) {
         val entryId = focusedEntryId?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
@@ -110,6 +118,14 @@ fun KnowledgeRoute(
             detailEntry = entry
             detailSourceNotes = repository.getNotesByIds(entry.sourceNoteIds)
             onFocusedEntryConsumed()
+        }
+    }
+
+    LaunchedEffect(knowledgeIngestionState.eventId) {
+        val message = knowledgeIngestionState.message
+        if (knowledgeIngestionState.eventId != handledKnowledgeIngestionEventId && !message.isNullOrBlank()) {
+            handledKnowledgeIngestionEventId = knowledgeIngestionState.eventId
+            snackbarHostState.showSnackbar(message)
         }
     }
 
@@ -125,9 +141,11 @@ fun KnowledgeRoute(
         query = query,
         results = results,
         hasSearched = hasSearched,
-        isOrganizing = isOrganizing,
-        organizeProgress = organizeProgress,
-        isSubmitting = isSubmitting,
+        isOrganizing = knowledgeIngestionState.isRunning &&
+            knowledgeIngestionState.taskKind == KnowledgeTaskKind.ORGANIZE,
+        organizeProgress = knowledgeIngestionState.progress,
+        isSubmitting = isSubmitting || knowledgeIngestionState.isRunning,
+        knowledgeIngestionState = knowledgeIngestionState,
         hasDuplicateDrafts = hasDuplicateDrafts,
         snackbarHostState = snackbarHostState,
         onQueryChange = {
@@ -138,36 +156,10 @@ fun KnowledgeRoute(
             }
         },
         onOrganizeToday = {
-            coroutineScope.launch {
-                isOrganizing = true
-                val message = runCatching {
-                    val count = repository.organizeNotesForDate(today) { progress ->
-                        organizeProgress = progress
-                    }
-                    if (count == 0) "今日没有可整理的笔记" else "已生成 $count 条 AI 草稿"
-                }.getOrElse { error ->
-                    "AI 整理失败：${error.toUserFacingMessage()}"
-                }
-                isOrganizing = false
-                snackbarHostState.showSnackbar(message)
-            }
+            knowledgeIngestionCoordinator.organizeToday(today)
         },
         onSubmitDraft = { draft ->
-            coroutineScope.launch {
-                isSubmitting = true
-                val message = runCatching {
-                    val entry = repository.submitKnowledgeDraft(draft.id)
-                    if (entry == null) "草稿已处理或不存在" else "已提交知识库并尝试生成向量"
-                }.getOrElse { error ->
-                    if (error is DuplicateKnowledgeEntryException) {
-                        error.message ?: "已跳过重复草稿"
-                    } else {
-                        "提交失败：${error.toUserFacingMessage()}"
-                    }
-                }
-                isSubmitting = false
-                snackbarHostState.showSnackbar(message)
-            }
+            knowledgeIngestionCoordinator.submitDraft(draft.id)
         },
         onEditDraft = { draft ->
             editingDraft = draft
@@ -193,36 +185,17 @@ fun KnowledgeRoute(
             }
         },
         onSubmitAll = {
-            coroutineScope.launch {
-                isSubmitting = true
-                val message = runCatching {
-                    val count = repository.submitAllKnowledgeDraftsForDate(today)
-                    val hasReviewRequiredDrafts = drafts.any {
-                        it.status == KnowledgeDraftStatus.PENDING && it.needsReview
-                    }
-                    when {
-                        count > 0 -> "已提交 $count 条草稿"
-                        hasDuplicateDrafts -> "存在重复草稿，请逐条查看后跳过或编辑"
-                        hasReviewRequiredDrafts -> "存在需确认草稿，请逐条确认后提交"
-                        else -> "没有待提交草稿"
-                    }
-                }.getOrElse { error ->
-                    "批量提交失败：${error.toUserFacingMessage()}"
-                }
-                isSubmitting = false
-                snackbarHostState.showSnackbar(message)
+            val hasReviewRequiredDrafts = drafts.any {
+                it.status == KnowledgeDraftStatus.PENDING && it.needsReview
             }
+            knowledgeIngestionCoordinator.submitAll(
+                date = today,
+                hasDuplicateDrafts = hasDuplicateDrafts,
+                hasReviewRequiredDrafts = hasReviewRequiredDrafts
+            )
         },
         onRetryIndex = {
-            coroutineScope.launch {
-                val message = runCatching {
-                    val count = repository.indexPendingKnowledgeEntries()
-                    if (count == 0) "没有可重试的向量任务" else "已完成 $count 条向量入库"
-                }.getOrElse { error ->
-                    "向量入库失败：${error.toUserFacingMessage()}"
-                }
-                snackbarHostState.showSnackbar(message)
-            }
+            knowledgeIngestionCoordinator.indexPending()
         },
         onSearch = {
             coroutineScope.launch {
@@ -311,6 +284,7 @@ private fun KnowledgeScreen(
     isOrganizing: Boolean,
     organizeProgress: AiTaskProgress?,
     isSubmitting: Boolean,
+    knowledgeIngestionState: KnowledgeIngestionState,
     hasDuplicateDrafts: Boolean,
     snackbarHostState: SnackbarHostState,
     onQueryChange: (String) -> Unit,
@@ -359,6 +333,7 @@ private fun KnowledgeScreen(
                     isOrganizing = isOrganizing,
                     organizeProgress = organizeProgress,
                     isSubmitting = isSubmitting,
+                    knowledgeIngestionState = knowledgeIngestionState,
                     pendingIndexCount = pendingIndexCount,
                     failedIndexCount = failedIndexCount,
                     onOrganizeToday = onOrganizeToday,
@@ -454,6 +429,7 @@ private fun DayKnowledgeStatusCard(
     isOrganizing: Boolean,
     organizeProgress: AiTaskProgress?,
     isSubmitting: Boolean,
+    knowledgeIngestionState: KnowledgeIngestionState,
     pendingIndexCount: Int,
     failedIndexCount: Int,
     onOrganizeToday: () -> Unit,
@@ -484,13 +460,29 @@ private fun DayKnowledgeStatusCard(
             organizeProgress?.let { progress ->
                 RequestProgressBlock(progress = progress)
             }
+            val shouldShowKnowledgeTaskMessage = knowledgeIngestionState.progress == null ||
+                !knowledgeIngestionState.isRunning
+            knowledgeIngestionState.message?.takeIf { shouldShowKnowledgeTaskMessage }?.let { message ->
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (knowledgeIngestionState.isRunning) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                )
+            }
+            if (knowledgeIngestionState.isRunning && knowledgeIngestionState.progress == null) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 OutlinedButton(
                     onClick = onOrganizeToday,
-                    enabled = !isOrganizing && canOrganize,
+                    enabled = !isOrganizing && !knowledgeIngestionState.isRunning && canOrganize,
                     modifier = Modifier.weight(1f)
                 ) {
                     Text(
@@ -505,6 +497,7 @@ private fun DayKnowledgeStatusCard(
                 Button(
                     onClick = onSubmitAll,
                     enabled = !isSubmitting &&
+                        !knowledgeIngestionState.isRunning &&
                         status.pendingDraftCount > 0 &&
                         !hasReviewRequiredDrafts &&
                         !hasDuplicateDrafts,
@@ -512,6 +505,7 @@ private fun DayKnowledgeStatusCard(
                 ) {
                     Text(
                         text = when {
+                            knowledgeIngestionState.isRunning -> "入库中"
                             isSubmitting -> "提交中"
                             hasDuplicateDrafts -> "先处理重复"
                             hasReviewRequiredDrafts -> "先确认草稿"
@@ -547,11 +541,12 @@ private fun DayKnowledgeStatusCard(
             }
             OutlinedButton(
                 onClick = onRetryIndex,
-                enabled = failedIndexCount > 0 || pendingIndexCount > 0,
+                enabled = !knowledgeIngestionState.isRunning && (failedIndexCount > 0 || pendingIndexCount > 0),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
                     text = when {
+                        knowledgeIngestionState.isRunning -> knowledgeIngestionState.runningLabel ?: "向量入库中"
                         failedIndexCount > 0 -> "重试失败索引"
                         pendingIndexCount > 0 -> "重建待索引知识"
                         else -> "索引已完成"
@@ -825,136 +820,6 @@ private fun SourceNotesDialog(
                             )
                         }
                         if (index != notes.lastIndex) {
-                            HorizontalDivider()
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text(text = "关闭")
-            }
-        }
-    )
-}
-
-@Composable
-private fun KnowledgeEntryDetailDialog(
-    entry: KnowledgeEntry,
-    sourceNotes: List<Note>,
-    onCopyEntry: () -> Unit,
-    onCopyNote: (Note) -> Unit,
-    onDismiss: () -> Unit
-) {
-    var copyFeedback by remember(entry.id) { mutableStateOf<String?>(null) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(text = "知识条目详情") },
-        text = {
-            Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text(
-                    text = entry.userTitle?.takeIf { it.isNotBlank() }
-                        ?: entry.content.lineSequence().firstOrNull().orEmpty().ifBlank { "未命名知识" },
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = "${entry.intentType.label()} · ${entry.confirmedDate} · ${entry.indexStatus.label()}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    text = "来源 ${sourceNotes.size} 条",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                OutlinedButton(
-                    onClick = {
-                        onCopyEntry()
-                        copyFeedback = "已复制知识条目"
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(text = "复制知识条目")
-                }
-                copyFeedback?.let { feedback ->
-                    Text(
-                        text = feedback,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-                if (entry.summary.isNotBlank()) {
-                    Text(
-                        text = entry.summary,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-                Text(
-                    text = entry.content,
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                if (entry.tags.isNotEmpty()) {
-                    Text(
-                        text = entry.tags.joinToString(prefix = "标签："),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                entry.userRemark?.takeIf { it.isNotBlank() }?.let { remark ->
-                    Text(
-                        text = "备注：$remark",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                HorizontalDivider()
-                Text(
-                    text = "原始 Note",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold
-                )
-                if (sourceNotes.isEmpty()) {
-                    Text(text = "没有找到对应的原始 Note。")
-                } else {
-                    sourceNotes.forEachIndexed { index, note ->
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(
-                                text = "${index + 1}. ${note.title ?: "未命名记录"}",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                text = "${note.sourceType.label()} · ${note.createdDate}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Text(
-                                text = note.content,
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                            note.userRemark?.takeIf { it.isNotBlank() }?.let { remark ->
-                                Text(
-                                    text = "备注：$remark",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            TextButton(
-                                onClick = {
-                                    onCopyNote(note)
-                                    copyFeedback = "已复制第 ${index + 1} 条原始 Note"
-                                }
-                            ) {
-                                Text(text = "复制这条 Note")
-                            }
-                        }
-                        if (index != sourceNotes.lastIndex) {
                             HorizontalDivider()
                         }
                     }

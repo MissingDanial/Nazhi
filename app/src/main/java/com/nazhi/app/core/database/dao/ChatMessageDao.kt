@@ -14,8 +14,20 @@ interface ChatMessageDao {
     @Query("SELECT * FROM chat_messages ORDER BY createdAt ASC")
     suspend fun getMessages(): List<ChatMessageEntity>
 
+    @Query("SELECT * FROM chat_messages WHERE sessionId = :sessionId ORDER BY createdAt ASC")
+    suspend fun getMessagesForSession(sessionId: String): List<ChatMessageEntity>
+
     @Query("SELECT * FROM chat_messages WHERE id = :id LIMIT 1")
     suspend fun getMessage(id: String): ChatMessageEntity?
+
+    @Query(
+        """
+        SELECT * FROM chat_messages
+        WHERE parentMessageId = :parentMessageId AND role = 'ASSISTANT'
+        ORDER BY attempt DESC, createdAt DESC
+        """
+    )
+    suspend fun getAssistantMessagesForParent(parentMessageId: String): List<ChatMessageEntity>
 
     @Upsert
     suspend fun upsert(message: ChatMessageEntity)

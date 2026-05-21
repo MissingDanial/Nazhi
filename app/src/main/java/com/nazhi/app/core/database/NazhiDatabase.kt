@@ -35,7 +35,7 @@ import com.nazhi.app.core.database.entity.ReviewSessionEntity
         ChatMessageEntity::class,
         ChatCitationEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = true
 )
 @TypeConverters(NazhiTypeConverters::class)
@@ -58,7 +58,7 @@ abstract class NazhiDatabase : RoomDatabase() {
                 NazhiDatabase::class.java,
                 DATABASE_NAME
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 .build()
         }
 
@@ -222,6 +222,41 @@ abstract class NazhiDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_chat_citations_messageId ON chat_citations(messageId)")
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS index_chat_citations_knowledgeEntryId ON chat_citations(knowledgeEntryId)"
+                )
+            }
+        }
+
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE chat_sessions ADD COLUMN memoryDigest TEXT")
+                db.execSQL("ALTER TABLE chat_sessions ADD COLUMN messageCount INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE chat_sessions ADD COLUMN lastMessagePreview TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE chat_messages ADD COLUMN parentMessageId TEXT")
+                db.execSQL("ALTER TABLE chat_messages ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE chat_messages ADD COLUMN progressStage TEXT")
+                db.execSQL("ALTER TABLE chat_messages ADD COLUMN errorCode TEXT")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_chat_messages_parentMessageId ON chat_messages(parentMessageId)")
+                db.execSQL(
+                    """
+                    UPDATE chat_sessions
+                    SET messageCount = (
+                        SELECT COUNT(*)
+                        FROM chat_messages
+                        WHERE chat_messages.sessionId = chat_sessions.id
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    UPDATE chat_sessions
+                    SET lastMessagePreview = COALESCE((
+                        SELECT content
+                        FROM chat_messages
+                        WHERE chat_messages.sessionId = chat_sessions.id
+                        ORDER BY createdAt DESC
+                        LIMIT 1
+                    ), '')
+                    """.trimIndent()
                 )
             }
         }

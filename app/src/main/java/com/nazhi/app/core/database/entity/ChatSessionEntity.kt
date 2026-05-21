@@ -8,6 +8,9 @@ import com.nazhi.app.core.model.ChatSession
 data class ChatSessionEntity(
     @PrimaryKey val id: String,
     val title: String,
+    val memoryDigest: String?,
+    val messageCount: Int,
+    val lastMessagePreview: String,
     val createdAt: Long,
     val updatedAt: Long
 )
@@ -16,6 +19,9 @@ fun ChatSessionEntity.toModel(): ChatSession {
     return ChatSession(
         id = id,
         title = title,
+        memoryDigest = memoryDigest,
+        messageCount = messageCount,
+        lastMessagePreview = lastMessagePreview,
         createdAt = createdAt,
         updatedAt = updatedAt
     )
@@ -25,8 +31,10 @@ fun ChatSession.toEntity(): ChatSessionEntity {
     return ChatSessionEntity(
         id = id,
         title = title,
+        memoryDigest = memoryDigest,
+        messageCount = messageCount,
+        lastMessagePreview = lastMessagePreview,
         createdAt = createdAt,
         updatedAt = updatedAt
     )
 }
-
