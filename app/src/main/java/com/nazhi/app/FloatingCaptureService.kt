@@ -234,6 +234,10 @@ class FloatingCaptureService : Service() {
                     bubbleParams?.let { params -> windowManager.updateViewLayout(view, params) }
                 }
             }
+            actions.addIconButton("🎧") {
+                collapseBubble()
+                openSystemAudioPermission()
+            }
         }
     }
 
@@ -290,6 +294,21 @@ class FloatingCaptureService : Service() {
             startActivity(intent)
         }.onFailure {
             Toast.makeText(this, "无法请求麦克风权限", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun openSystemAudioPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            Toast.makeText(this, "系统音频模式需要 Android 10 或更高版本", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val intent = Intent(this, SystemAudioCapturePermissionActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            .addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
+        runCatching {
+            startActivity(intent)
+        }.onFailure {
+            Toast.makeText(this, "无法请求系统音频授权", Toast.LENGTH_SHORT).show()
         }
     }
 

@@ -8,11 +8,14 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import com.nazhi.app.core.audio.PlaybackAudioRecorder
 import com.nazhi.app.core.audio.RecordedAudio
 import com.nazhi.app.core.audio.WavAudioRecorder
 import com.nazhi.app.core.capture.CaptureSaveResult
@@ -31,18 +34,22 @@ import kotlinx.coroutines.launch
 class AudioTranscriptionService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var recorder: WavAudioRecorder
+    private lateinit var playbackRecorder: PlaybackAudioRecorder
     private var recordingJob: Job? = null
     private var activeAudio: RecordedAudio? = null
+    private var activeMode: AudioCaptureMode = AudioCaptureMode.MICROPHONE
 
     override fun onCreate() {
         super.onCreate()
         recorder = WavAudioRecorder(applicationContext)
+        playbackRecorder = PlaybackAudioRecorder(applicationContext.cacheDir)
         createNotificationChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> startRecording()
+            ACTION_START_SYSTEM_AUDIO -> startSystemAudioRecording(intent)
             ACTION_PAUSE -> pauseRecording()
             ACTION_RESUME -> resumeRecording()
             ACTION_FINISH -> finishRecording()
@@ -54,6 +61,7 @@ class AudioTranscriptionService : Service() {
     override fun onDestroy() {
         recordingJob?.cancel()
         recorder.cancel()
+        playbackRecorder.cancel()
         scope.cancel()
         state = AudioFloatingState.IDLE
         notifyFloating()
@@ -76,7 +84,8 @@ class AudioTranscriptionService : Service() {
             return
         }
 
-        startForeground(NOTIFICATION_ID, buildNotification("录音中"))
+        activeMode = AudioCaptureMode.MICROPHONE
+        startAudioForeground("录音中", AudioCaptureMode.MICROPHONE)
         updateState(AudioFloatingState.RECORDING, "录音中")
         recordingJob = scope.launch {
             val result = runCatching {
@@ -89,7 +98,7 @@ class AudioTranscriptionService : Service() {
                         audio.file.delete()
                         fail("没有录到有效声音")
                     } else {
-                        processAudio(audio)
+                        processAudio(audio, AudioCaptureMode.MICROPHONE)
                     }
                 },
                 onFailure = { error ->
@@ -99,17 +108,68 @@ class AudioTranscriptionService : Service() {
         }
     }
 
+    private fun startSystemAudioRecording(intent: Intent) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            fail("系统音频模式需要 Android 10 或更高版本")
+            return
+        }
+        if (state == AudioFloatingState.PAUSED) {
+            resumeRecording()
+            return
+        }
+        if (state == AudioFloatingState.RECORDING || state == AudioFloatingState.UPLOADING || state == AudioFloatingState.TRANSCRIBING) {
+            return
+        }
+        val projectionData = intent.projectionData()
+        val resultCode = intent.getIntExtra(EXTRA_PROJECTION_RESULT_CODE, 0)
+        if (resultCode == 0 || projectionData == null) {
+            fail("未获得系统音频捕获授权")
+            return
+        }
+        activeMode = AudioCaptureMode.SYSTEM_AUDIO
+        startAudioForeground("系统音频录制中", AudioCaptureMode.SYSTEM_AUDIO)
+        updateState(AudioFloatingState.RECORDING, "系统音频录制中")
+        updateNotification(statusText)
+        val projectionManager = getSystemService(MediaProjectionManager::class.java)
+        val mediaProjection = runCatching {
+            projectionManager.getMediaProjection(resultCode, projectionData)
+        }.getOrNull()
+        if (mediaProjection == null) {
+            fail("系统音频授权已失效，请重新授权")
+            return
+        }
+        recordingJob = scope.launch {
+            val result = runCatching {
+                playbackRecorder.record(mediaProjection)
+            }
+            result.fold(
+                onSuccess = { audio ->
+                    activeAudio = audio
+                    if (audio.byteSize <= 0) {
+                        audio.file.delete()
+                        fail("没有捕获到系统音频，当前 App 可能不允许音频捕获")
+                    } else {
+                        processAudio(audio, AudioCaptureMode.SYSTEM_AUDIO)
+                    }
+                },
+                onFailure = { error ->
+                    fail(error.message ?: "系统音频录制失败")
+                }
+            )
+        }
+    }
+
     private fun pauseRecording() {
         if (state != AudioFloatingState.RECORDING) return
-        recorder.pause()
-        updateState(AudioFloatingState.PAUSED, "录音已暂停")
+        pauseActiveRecorder()
+        updateState(AudioFloatingState.PAUSED, activeMode.pausedText())
         updateNotification(statusText)
     }
 
     private fun resumeRecording() {
         if (state != AudioFloatingState.PAUSED) return
-        recorder.resume()
-        updateState(AudioFloatingState.RECORDING, "录音中")
+        resumeActiveRecorder()
+        updateState(AudioFloatingState.RECORDING, activeMode.recordingText())
         updateNotification(statusText)
     }
 
@@ -118,11 +178,11 @@ class AudioTranscriptionService : Service() {
         updateState(AudioFloatingState.FINISHING, "录音已结束，正在准备转写")
         updateNotification(statusText)
         Toast.makeText(this, "录音已结束，正在转写", Toast.LENGTH_SHORT).show()
-        recorder.stop()
+        stopActiveRecorder()
     }
 
     private fun cancelRecording() {
-        recorder.cancel()
+        cancelActiveRecorder()
         activeAudio?.file?.delete()
         activeAudio = null
         updateState(AudioFloatingState.IDLE, "")
@@ -130,17 +190,18 @@ class AudioTranscriptionService : Service() {
         stopSelf()
     }
 
-    private suspend fun processAudio(audio: RecordedAudio) {
+    private suspend fun processAudio(audio: RecordedAudio, mode: AudioCaptureMode) {
         val appContainer = (application as NazhiApp).appContainer
         updateState(
             AudioFloatingState.UPLOADING,
-            if (audio.reachedLimit) "已达到 15 分钟上限，正在上传" else "音频上传中"
+            if (audio.reachedLimit) "已达到 15 分钟上限，正在上传" else mode.uploadingText()
         )
         updateNotification(statusText)
         val createdTask = runCatching {
             appContainer.backendClient.createAudioTranscriptionJob(
                 audioFile = audio.file,
-                durationMs = audio.durationMs
+                durationMs = audio.durationMs,
+                source = mode.backendSource
             )
         }.getOrElse { error ->
             fail(error.toAudioUserMessage())
@@ -187,7 +248,7 @@ class AudioTranscriptionService : Service() {
                 repository = repository,
                 rawText = text,
                 sourceType = SourceType.AUDIO_TRANSCRIPTION,
-                sourceApp = "悬浮球录音转写"
+                sourceApp = activeMode.sourceApp
             )
         }.getOrElse {
             null
@@ -229,6 +290,34 @@ class AudioTranscriptionService : Service() {
         ) == PackageManager.PERMISSION_GRANTED
     }
 
+    private fun pauseActiveRecorder() {
+        when (activeMode) {
+            AudioCaptureMode.MICROPHONE -> recorder.pause()
+            AudioCaptureMode.SYSTEM_AUDIO -> playbackRecorder.pause()
+        }
+    }
+
+    private fun resumeActiveRecorder() {
+        when (activeMode) {
+            AudioCaptureMode.MICROPHONE -> recorder.resume()
+            AudioCaptureMode.SYSTEM_AUDIO -> playbackRecorder.resume()
+        }
+    }
+
+    private fun stopActiveRecorder() {
+        when (activeMode) {
+            AudioCaptureMode.MICROPHONE -> recorder.stop()
+            AudioCaptureMode.SYSTEM_AUDIO -> playbackRecorder.stop()
+        }
+    }
+
+    private fun cancelActiveRecorder() {
+        when (activeMode) {
+            AudioCaptureMode.MICROPHONE -> recorder.cancel()
+            AudioCaptureMode.SYSTEM_AUDIO -> playbackRecorder.cancel()
+        }
+    }
+
     private fun updateState(next: AudioFloatingState, message: String = next.defaultStatusText()) {
         state = next
         statusText = message
@@ -247,6 +336,14 @@ class AudioTranscriptionService : Service() {
     private fun updateNotification(text: String) {
         val manager = getSystemService(NotificationManager::class.java)
         manager.notify(NOTIFICATION_ID, buildNotification(text))
+    }
+
+    private fun startAudioForeground(text: String, mode: AudioCaptureMode) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && mode.foregroundServiceType != 0) {
+            startForeground(NOTIFICATION_ID, buildNotification(text), mode.foregroundServiceType)
+        } else {
+            startForeground(NOTIFICATION_ID, buildNotification(text))
+        }
     }
 
     private fun buildNotification(text: String): Notification {
@@ -279,10 +376,13 @@ class AudioTranscriptionService : Service() {
 
     companion object {
         const val ACTION_START = "com.nazhi.app.audio.START"
+        const val ACTION_START_SYSTEM_AUDIO = "com.nazhi.app.audio.START_SYSTEM_AUDIO"
         const val ACTION_PAUSE = "com.nazhi.app.audio.PAUSE"
         const val ACTION_RESUME = "com.nazhi.app.audio.RESUME"
         const val ACTION_FINISH = "com.nazhi.app.audio.FINISH"
         const val ACTION_CANCEL = "com.nazhi.app.audio.CANCEL"
+        const val EXTRA_PROJECTION_RESULT_CODE = "projection_result_code"
+        const val EXTRA_PROJECTION_DATA = "projection_data"
         private const val CHANNEL_ID = "nazhi_audio_transcription"
         private const val NOTIFICATION_ID = 1002
 
@@ -306,6 +406,57 @@ enum class AudioFloatingState {
     SAVING,
     SAVED,
     FAILED
+}
+
+private enum class AudioCaptureMode(
+    val sourceApp: String,
+    val backendSource: String,
+    val foregroundServiceType: Int
+) {
+    MICROPHONE(
+        sourceApp = "悬浮球录音转写",
+        backendSource = "floating_ball_mic",
+        foregroundServiceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        } else {
+            0
+        }
+    ),
+    SYSTEM_AUDIO(
+        sourceApp = "悬浮球系统音频转写",
+        backendSource = "floating_ball_system_audio",
+        foregroundServiceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+    );
+
+    fun recordingText(): String {
+        return when (this) {
+            MICROPHONE -> "录音中"
+            SYSTEM_AUDIO -> "系统音频录制中"
+        }
+    }
+
+    fun pausedText(): String {
+        return when (this) {
+            MICROPHONE -> "录音已暂停"
+            SYSTEM_AUDIO -> "系统音频已暂停"
+        }
+    }
+
+    fun uploadingText(): String {
+        return when (this) {
+            MICROPHONE -> "音频上传中"
+            SYSTEM_AUDIO -> "系统音频上传中"
+        }
+    }
+}
+
+private fun Intent.projectionData(): Intent? {
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        getParcelableExtra(AudioTranscriptionService.EXTRA_PROJECTION_DATA, Intent::class.java)
+    } else {
+        @Suppress("DEPRECATION")
+        getParcelableExtra(AudioTranscriptionService.EXTRA_PROJECTION_DATA)
+    }
 }
 
 private fun Throwable.toAudioUserMessage(): String {

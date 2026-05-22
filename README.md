@@ -10,6 +10,7 @@
 
 - **悬浮球捕获**：全局悬浮球覆盖层，复制文字后点击悬浮球一键保存，无需切换应用
 - **悬浮球录音转写**：用户主动开始录音后上传后端 ASR，转写成功自动保存为今日音频 Note
+- **系统音频转写（实验）**：Android 10+ 通过系统授权捕获可被捕获的播放音频，适配耳机场景
 - **系统分享**：从任意应用通过系统分享菜单直接发送到纳知
 - **Direct Share**：系统分享面板直接显示纳知快捷入口
 - **文本选择捕获**：选中文字后通过 `ACTION_PROCESS_TEXT` 菜单直接收纳
@@ -68,6 +69,13 @@ AI 驱动的知识管理核心：
 - **数据导入**：从 JSON 文件导入知识数据，导入后自动重建向量索引
 - **悬浮球开关**：控制悬浮球服务的启停
 
+### 7. V1.2 音频模式边界
+
+- 麦克风模式适合外放场景，兼容性高，但耳机场景可能录不到短视频声音。
+- 系统音频模式适合耳机场景，需要系统 MediaProjection 授权。
+- 系统音频模式只捕获允许被捕获的媒体音频；若第三方 App 禁止捕获，可能只能得到静音。
+- 两种模式都复用同一个后端 ASR Job 接口，转写完成后保存为今日 `AUDIO_TRANSCRIPTION` Note。
+
 ## 技术架构
 
 ### 技术栈
@@ -123,6 +131,7 @@ app/src/main/java/com/nazhi/app/
 ├── AudioTranscriptionActivity.kt
 ├── AudioTranscriptionPermissionActivity.kt
 ├── AudioTranscriptionService.kt
+├── SystemAudioCapturePermissionActivity.kt
 ├── FloatingCaptureService.kt
 ├── ProcessTextCaptureActivity.kt
 └── ShareCaptureActivity.kt
