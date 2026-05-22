@@ -555,7 +555,7 @@ private fun SettingsScreen(
     onTestConnection: () -> Unit
 ) {
     val canUseConfig = when (serviceMode) {
-        AiServiceMode.NAZHI -> baseUrl.isValidBackendUrl()
+        AiServiceMode.NAZHI -> baseUrl.isValidBackendUrl() && devToken.isNotBlank()
         AiServiceMode.DIRECT_API -> {
             directApiBaseUrl.isValidBackendUrl() &&
                 (directEmbeddingApiBaseUrl.isBlank() || directEmbeddingApiBaseUrl.isValidBackendUrl()) &&
@@ -739,6 +739,13 @@ private fun HealthResultView(health: BackendHealthResponse) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+        if (health.asrProvider.isNotBlank()) {
+            Text(
+                text = "asr: ${health.asrProvider}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }
 
@@ -844,7 +851,7 @@ private fun BackendConfigCard(
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
                     label = { Text(text = "服务访问 Token") },
-                    supportingText = { Text(text = "用于访问纳知后端服务") }
+                    supportingText = { Text(text = "需要与服务器 NAZHI_DEV_TOKEN 保持一致") }
                 )
             } else {
                 VendorSelector(

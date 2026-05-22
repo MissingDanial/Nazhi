@@ -1430,6 +1430,7 @@ private fun com.nazhi.app.core.model.SourceType.label(): String {
         com.nazhi.app.core.model.SourceType.MANUAL -> "手动输入"
         com.nazhi.app.core.model.SourceType.CLIPBOARD -> "剪贴板"
         com.nazhi.app.core.model.SourceType.TEXT_SELECTION -> "划词"
+        com.nazhi.app.core.model.SourceType.AUDIO_TRANSCRIPTION -> "音频转写"
     }
 }
 

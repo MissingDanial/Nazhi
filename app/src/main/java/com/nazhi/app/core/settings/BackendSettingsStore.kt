@@ -49,8 +49,8 @@ class BackendSettingsStore(context: Context) {
         }
         .map { preferences ->
             BackendConfig(
-                baseUrl = preferences[Keys.BASE_URL] ?: defaultConfig.baseUrl,
-                devToken = preferences[Keys.DEV_TOKEN] ?: defaultConfig.devToken,
+                baseUrl = preferences[Keys.BASE_URL].nonBlankOrDefault(defaultConfig.baseUrl),
+                devToken = preferences[Keys.DEV_TOKEN].nonBlankOrDefault(defaultConfig.devToken),
                 serviceMode = preferences[Keys.SERVICE_MODE].toEnumOrDefault(defaultConfig.serviceMode),
                 vendor = preferences[Keys.VENDOR].toEnumOrDefault(defaultConfig.vendor),
                 directApiBaseUrl = preferences[Keys.DIRECT_API_BASE_URL] ?: defaultConfig.directApiBaseUrl,
@@ -77,8 +77,12 @@ class BackendSettingsStore(context: Context) {
         encryptedSettingsStore.write(EncryptedSetting.DirectApiKey, config.directApiKey)
         encryptedSettingsStore.write(EncryptedSetting.DirectEmbeddingApiKey, config.directEmbeddingApiKey)
         dataStore.edit { preferences ->
-            preferences[Keys.BASE_URL] = config.normalizedBaseUrl
-            preferences[Keys.DEV_TOKEN] = config.devToken.trim()
+            config.normalizedBaseUrl.takeIf { it.isNotBlank() }?.let { value ->
+                preferences[Keys.BASE_URL] = value
+            } ?: preferences.remove(Keys.BASE_URL)
+            config.devToken.trim().takeIf { it.isNotBlank() }?.let { value ->
+                preferences[Keys.DEV_TOKEN] = value
+            } ?: preferences.remove(Keys.DEV_TOKEN)
             preferences[Keys.SERVICE_MODE] = config.serviceMode.name
             preferences[Keys.VENDOR] = config.vendor.name
             preferences[Keys.DIRECT_API_BASE_URL] = config.normalizedDirectApiBaseUrl
@@ -125,4 +129,8 @@ private inline fun <reified T : Enum<T>> String?.toEnumOrDefault(defaultValue: T
     return this?.let { value ->
         enumValues<T>().firstOrNull { it.name == value }
     } ?: defaultValue
+}
+
+private fun String?.nonBlankOrDefault(defaultValue: String): String {
+    return this?.trim()?.takeIf { it.isNotBlank() } ?: defaultValue
 }

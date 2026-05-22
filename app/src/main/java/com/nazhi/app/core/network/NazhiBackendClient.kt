@@ -2,7 +2,9 @@ package com.nazhi.app.core.network
 
 import com.nazhi.app.core.model.IntentType
 import com.nazhi.app.core.model.Note
+import java.io.File
 import java.io.IOException
+import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlinx.coroutines.Dispatchers
@@ -270,6 +272,39 @@ class NazhiBackendClient(
         )
     }
 
+    suspend fun createAudioTranscriptionJob(
+        audioFile: File,
+        durationMs: Long,
+        source: String = "floating_ball",
+        language: String = "zh-CN"
+    ): AudioTranscriptionTaskResponse {
+        val backendConfig = configProvider()
+        if (backendConfig.serviceMode == AiServiceMode.DIRECT_API) {
+            throw NazhiBackendException(
+                statusCode = 400,
+                code = "AUDIO_TRANSCRIPTION_REQUIRES_NAZHI_SERVICE",
+                publicMessage = "录音转写需要纳知后端服务，暂不支持自带模型 API 直连。"
+            )
+        }
+        return postMultipartAudio(
+            path = "/v1/audio-transcriptions/jobs",
+            audioFile = audioFile,
+            fields = mapOf(
+                "durationMs" to durationMs.toString(),
+                "source" to source,
+                "language" to language,
+                "sampleRate" to "16000",
+                "channels" to "1",
+                "encoding" to "wav"
+            ),
+            config = backendConfig
+        )
+    }
+
+    suspend fun getAudioTranscriptionJob(taskId: String): AudioTranscriptionTaskResponse = get(
+        path = "/v1/audio-transcriptions/jobs/$taskId"
+    )
+
     private suspend inline fun <reified Request, reified Response> post(
         path: String,
         body: Request,
@@ -303,7 +338,60 @@ class NazhiBackendClient(
             val backendError = runCatching {
                 json.decodeFromString<BackendErrorResponse>(responseText).error
             }.getOrNull()
-            throw NazhiBackendException(statusCode, backendError?.code, backendError?.message ?: "Backend request failed with HTTP $statusCode.")
+            throw NazhiBackendException(statusCode, backendError?.code, backendError.toPublicMessage(statusCode))
+        }
+
+        json.decodeFromString(responseText)
+    }
+
+    private suspend inline fun <reified Response> postMultipartAudio(
+        path: String,
+        audioFile: File,
+        fields: Map<String, String>,
+        config: BackendConfig
+    ): Response = withContext(Dispatchers.IO) {
+        val boundary = "NazhiBoundary${System.currentTimeMillis()}"
+        val url = URL(config.normalizedBaseUrl + path)
+        val connection = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 15_000
+            readTimeout = 60_000
+            doOutput = true
+            setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            if (config.devToken.isNotBlank()) {
+                setRequestProperty("Authorization", "Bearer ${config.devToken.trim()}")
+            }
+        }
+
+        connection.outputStream.use { output ->
+            fields.forEach { (name, value) ->
+                output.writeUtf8("--$boundary\r\n")
+                output.writeUtf8("Content-Disposition: form-data; name=\"$name\"\r\n\r\n")
+                output.writeUtf8(value)
+                output.writeUtf8("\r\n")
+            }
+            output.writeUtf8("--$boundary\r\n")
+            output.writeUtf8(
+                "Content-Disposition: form-data; name=\"audio\"; filename=\"${audioFile.name}\"\r\n"
+            )
+            output.writeUtf8("Content-Type: audio/wav\r\n\r\n")
+            audioFile.inputStream().use { input -> input.copyTo(output) }
+            output.writeUtf8("\r\n--$boundary--\r\n")
+        }
+
+        val statusCode = connection.responseCode
+        val responseText = try {
+            val stream = if (statusCode in 200..299) connection.inputStream else connection.errorStream
+            stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+        } finally {
+            connection.disconnect()
+        }
+
+        if (statusCode !in 200..299) {
+            val backendError = runCatching {
+                json.decodeFromString<BackendErrorResponse>(responseText).error
+            }.getOrNull()
+            throw NazhiBackendException(statusCode, backendError?.code, backendError.toPublicMessage(statusCode))
         }
 
         json.decodeFromString(responseText)
@@ -336,10 +424,14 @@ class NazhiBackendClient(
             val backendError = runCatching {
                 json.decodeFromString<BackendErrorResponse>(responseText).error
             }.getOrNull()
-            throw NazhiBackendException(statusCode, backendError?.code, backendError?.message ?: "Backend request failed with HTTP $statusCode.")
+            throw NazhiBackendException(statusCode, backendError?.code, backendError.toPublicMessage(statusCode))
         }
 
         json.decodeFromString(responseText)
+    }
+
+    private fun OutputStream.writeUtf8(text: String) {
+        write(text.toByteArray(Charsets.UTF_8))
     }
 
     private suspend fun createDirectEmbeddings(
@@ -891,7 +983,8 @@ data class BackendHealthResponse(
     val ok: Boolean,
     val service: String,
     val embeddingProvider: String,
-    val chatProvider: String
+    val chatProvider: String,
+    val asrProvider: String = ""
 )
 
 @Serializable
@@ -983,6 +1076,27 @@ data class BackendTaskResponse(
 data class BackendTaskError(
     val code: String? = null,
     val message: String? = null
+)
+
+@Serializable
+data class AudioTranscriptionTaskResponse(
+    val taskId: String,
+    val requestId: String,
+    val type: String,
+    val status: String,
+    val stage: String,
+    val progress: Int = 0,
+    val message: String = "",
+    val result: AudioTranscriptionResult? = null,
+    val error: BackendTaskError? = null
+)
+
+@Serializable
+data class AudioTranscriptionResult(
+    val text: String = "",
+    val durationMs: Long = 0,
+    val provider: String = "",
+    val mode: String = ""
 )
 
 @Serializable
@@ -1142,3 +1256,10 @@ private data class BackendError(
     val code: String? = null,
     @SerialName("message") val message: String? = null
 )
+
+private fun BackendError?.toPublicMessage(statusCode: Int): String {
+    if (statusCode == 401 || this?.code == "UNAUTHORIZED") {
+        return "后端鉴权失败，请在设置页检查服务访问 Token 是否与服务器 NAZHI_DEV_TOKEN 一致。"
+    }
+    return this?.message ?: "Backend request failed with HTTP $statusCode."
+}
