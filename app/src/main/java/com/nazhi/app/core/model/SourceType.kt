@@ -4,5 +4,6 @@ enum class SourceType {
     SHARE,
     MANUAL,
     CLIPBOARD,
-    TEXT_SELECTION
+    TEXT_SELECTION,
+    AUDIO_TRANSCRIPTION
 }

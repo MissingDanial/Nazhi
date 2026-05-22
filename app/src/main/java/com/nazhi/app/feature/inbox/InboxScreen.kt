@@ -1171,6 +1171,7 @@ private fun SourceType.label(): String {
         SourceType.MANUAL -> "手动输入"
         SourceType.CLIPBOARD -> "剪贴板"
         SourceType.TEXT_SELECTION -> "划词"
+        SourceType.AUDIO_TRANSCRIPTION -> "音频转写"
     }
 }
 

@@ -9,6 +9,7 @@
 多入口快速捕获文字内容，随时随地记录灵感与信息：
 
 - **悬浮球捕获**：全局悬浮球覆盖层，复制文字后点击悬浮球一键保存，无需切换应用
+- **悬浮球录音转写**：用户主动开始录音后上传后端 ASR，转写成功自动保存为今日音频 Note
 - **系统分享**：从任意应用通过系统分享菜单直接发送到纳知
 - **Direct Share**：系统分享面板直接显示纳知快捷入口
 - **文本选择捕获**：选中文字后通过 `ACTION_PROCESS_TEXT` 菜单直接收纳
@@ -102,6 +103,7 @@ AI 驱动的知识管理核心：
 app/src/main/java/com/nazhi/app/
 ├── core/
 │   ├── capture/          # 捕获服务（悬浮球、剪贴板）
+│   ├── audio/            # WAV 录音与音频转写基础能力
 │   ├── database/         # Room 数据库、DAO、Entity
 │   ├── embedding/        # 本地向量嵌入引擎
 │   ├── export/           # 数据导入导出
@@ -118,6 +120,9 @@ app/src/main/java/com/nazhi/app/
 ├── MainActivity.kt
 ├── NazhiApp.kt           # 应用入口与导航
 ├── ClipboardCaptureActivity.kt
+├── AudioTranscriptionActivity.kt
+├── AudioTranscriptionPermissionActivity.kt
+├── AudioTranscriptionService.kt
 ├── FloatingCaptureService.kt
 ├── ProcessTextCaptureActivity.kt
 └── ShareCaptureActivity.kt
@@ -169,4 +174,3 @@ app/build/outputs/apk/debug/app-debug.apk
 ## 许可证
 
 Private
-
