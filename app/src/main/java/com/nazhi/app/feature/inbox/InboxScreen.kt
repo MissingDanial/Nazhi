@@ -3,6 +3,7 @@ package com.nazhi.app.feature.inbox
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -44,7 +45,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import com.nazhi.app.AudioTranscriptionService
 import com.nazhi.app.core.model.AiTaskProgress
+import com.nazhi.app.core.model.AudioTranscriptionJob
+import com.nazhi.app.core.model.AudioTranscriptionJobStatus
 import com.nazhi.app.core.model.DayKnowledgeStatus
 import com.nazhi.app.core.model.IntentType
 import com.nazhi.app.core.model.KnowledgeEntry
@@ -122,6 +127,9 @@ fun DateNotesRoute(
     val notes by remember(repository, dateId) {
         repository.observeNotesForDate(dateId)
     }.collectAsState(initial = emptyList())
+    val audioJobs by remember(repository, dateId) {
+        repository.observeAudioTranscriptionJobsForDate(dateId)
+    }.collectAsState(initial = emptyList())
     val dayKnowledgeStatus by remember(repository, dateId) {
         repository.observeDayKnowledgeStatus(dateId)
     }.collectAsState(initial = DayKnowledgeStatus(dateId, 0, 0, 0, 0, 0, 0, 0, 0))
@@ -132,6 +140,7 @@ fun DateNotesRoute(
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
     val pendingReviewNotes = notes.filter { it.status == NoteStatus.INBOX }
+    val visibleAudioJobs = audioJobs.filter { it.shouldShowInInbox() }
     val reviewedCount = notes.count { it.status == NoteStatus.REVIEWED }
     var isReviewMode by remember { mutableStateOf(false) }
     var reviewIndex by remember { mutableStateOf(0) }
@@ -188,6 +197,7 @@ fun DateNotesRoute(
         summaryLabel = summaryLabel,
         reviewTitle = reviewTitle,
         notes = notes,
+        audioJobs = visibleAudioJobs,
         input = input,
         inputSourceType = inputSourceType,
         showQuickInput = showQuickInput,
@@ -277,6 +287,14 @@ fun DateNotesRoute(
         onDelete = { note ->
             deletingNote = note
             deleteUpdatesReviewSession = false
+        },
+        onRetryAudioJobs = {
+            val intent = Intent(context, AudioTranscriptionService::class.java)
+                .setAction(AudioTranscriptionService.ACTION_RETRY_PENDING)
+            ContextCompat.startForegroundService(context, intent)
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar("已提交待转写音频重试")
+            }
         },
         onAiOrganizeToday = {
             knowledgeIngestionCoordinator?.organizeToday(dateId)
@@ -425,6 +443,7 @@ fun InboxScreen(
     summaryLabel: String,
     reviewTitle: String,
     notes: List<Note>,
+    audioJobs: List<AudioTranscriptionJob>,
     input: String,
     inputSourceType: SourceType,
     showQuickInput: Boolean,
@@ -446,6 +465,7 @@ fun InboxScreen(
     onEdit: (Note) -> Unit,
     onCopy: (Note) -> Unit,
     onDelete: (Note) -> Unit,
+    onRetryAudioJobs: () -> Unit,
     onAiOrganizeToday: () -> Unit,
     onStartReview: () -> Unit,
     onStopReview: () -> Unit,
@@ -509,6 +529,15 @@ fun InboxScreen(
                         progress = aiOrganizeProgress,
                         statusMessage = aiOrganizeMessage,
                         onOrganize = onAiOrganizeToday
+                    )
+                }
+            }
+
+            if (audioJobs.isNotEmpty()) {
+                item {
+                    AudioTranscriptionJobsCard(
+                        jobs = audioJobs,
+                        onRetry = onRetryAudioJobs
                     )
                 }
             }
@@ -664,6 +693,52 @@ private fun RequestProgressBlock(progress: AiTaskProgress) {
     }
 }
 
+@Composable
+private fun AudioTranscriptionJobsCard(
+    jobs: List<AudioTranscriptionJob>,
+    onRetry: () -> Unit
+) {
+    val retryableCount = jobs.count { it.canRetry }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.errorContainer
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = "待转写音频",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "$retryableCount 条可重试 · 失败音频已暂存",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onErrorContainer
+            )
+            jobs.take(3).forEach { job ->
+                Text(
+                    text = job.audioJobLine(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Button(
+                onClick = onRetry,
+                enabled = retryableCount > 0,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(text = if (retryableCount > 0) "重试待转写" else "暂无可重试")
+            }
+        }
+    }
+}
+
 private fun com.nazhi.app.core.model.AiTaskStage.label(): String {
     return when (this) {
         com.nazhi.app.core.model.AiTaskStage.ACCEPTED -> "已提交"
@@ -764,6 +839,13 @@ private fun ReviewPanel(
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.primary
             )
+            if (note.isAudioNote()) {
+                Text(
+                    text = note.audioMetaText(includeStatus = false),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
             Text(
                 text = note.title ?: "未命名记录",
                 style = MaterialTheme.typography.titleMedium,
@@ -778,7 +860,11 @@ private fun ReviewPanel(
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                text = "${note.sourceType.label()} · ${note.createdAt.formatTime()}",
+                text = if (note.isAudioNote()) {
+                    note.status.label()
+                } else {
+                    "${note.sourceType.label()} · ${note.createdAt.formatTime()}"
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -966,30 +1052,49 @@ private fun NoteCard(
     onCopy: () -> Unit,
     onDelete: () -> Unit
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
+    val isAudioNote = note.isAudioNote()
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = if (isAudioNote) {
+            CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
+        } else {
+            CardDefaults.cardColors()
+        }
+    ) {
         Column(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            if (isAudioNote) {
+                Text(
+                    text = note.audioMetaText(includeStatus = true),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
             Text(
                 text = note.title ?: "未命名记录",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
+                maxLines = if (isAudioNote) 2 else 1,
                 overflow = TextOverflow.Ellipsis
             )
             Text(
                 text = note.content,
                 style = MaterialTheme.typography.bodyMedium,
-                maxLines = 3,
+                maxLines = if (isAudioNote) 2 else 3,
                 overflow = TextOverflow.Ellipsis
             )
             Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "${note.sourceType.label()} · ${note.status.label()} · ${note.createdAt.formatTime()}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            if (!isAudioNote) {
+                Text(
+                    text = "${note.sourceType.label()} · ${note.status.label()} · ${note.createdAt.formatTime()}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             note.userRemark?.takeIf { it.isNotBlank() }?.let { remark ->
                 Text(
                     text = "备注：$remark",
@@ -1119,6 +1224,7 @@ fun InboxPreview() {
                     userRemark = null
                 )
             ),
+            audioJobs = emptyList(),
             input = "",
             inputSourceType = SourceType.MANUAL,
             showQuickInput = true,
@@ -1140,6 +1246,7 @@ fun InboxPreview() {
             onEdit = {},
             onCopy = {},
             onDelete = {},
+            onRetryAudioJobs = {},
             onAiOrganizeToday = {},
             onStartReview = {},
             onStopReview = {},
@@ -1172,6 +1279,70 @@ private fun SourceType.label(): String {
         SourceType.CLIPBOARD -> "剪贴板"
         SourceType.TEXT_SELECTION -> "划词"
         SourceType.AUDIO_TRANSCRIPTION -> "音频转写"
+    }
+}
+
+private fun Note.isAudioNote(): Boolean {
+    return sourceType == SourceType.AUDIO_TRANSCRIPTION
+}
+
+private fun Note.audioMetaText(includeStatus: Boolean): String {
+    val parts = mutableListOf(audioSourceLabel())
+    audioDurationMs?.takeIf { it > 0L }?.let { duration ->
+        parts += "时长 ${duration.formatDuration()}"
+    }
+    if (includeStatus) {
+        parts += status.label()
+    }
+    parts += createdAt.formatTime()
+    return parts.joinToString(" · ")
+}
+
+private fun Note.audioSourceLabel(): String {
+    val source = sourceApp.orEmpty()
+    return when {
+        source.contains("系统") -> "系统音频转写"
+        source.contains("麦克风") || source.contains("录音") -> "麦克风转写"
+        else -> "音频转写"
+    }
+}
+
+private fun AudioTranscriptionJob.shouldShowInInbox(): Boolean {
+    return status == AudioTranscriptionJobStatus.PENDING ||
+        status == AudioTranscriptionJobStatus.UPLOADING ||
+        status == AudioTranscriptionJobStatus.TRANSCRIBING ||
+        status == AudioTranscriptionJobStatus.FAILED
+}
+
+private fun AudioTranscriptionJob.audioJobLine(): String {
+    val source = when {
+        sourceApp.contains("系统") -> "系统音频"
+        sourceApp.contains("麦克风") || sourceApp.contains("录音") -> "麦克风"
+        else -> "音频"
+    }
+    val error = errorMessage?.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
+    return "$source · ${durationMs.formatDuration()} · ${status.label()} · 重试 $retryCount 次$error"
+}
+
+private fun AudioTranscriptionJobStatus.label(): String {
+    return when (this) {
+        AudioTranscriptionJobStatus.PENDING -> "待转写"
+        AudioTranscriptionJobStatus.UPLOADING -> "上传中"
+        AudioTranscriptionJobStatus.TRANSCRIBING -> "转写中"
+        AudioTranscriptionJobStatus.FAILED -> "失败"
+        AudioTranscriptionJobStatus.SAVED -> "已生成文本"
+        AudioTranscriptionJobStatus.AUDIO_CLEANED -> "原音频已清理"
+    }
+}
+
+private fun Long.formatDuration(): String {
+    val totalSeconds = (this / 1000L).coerceAtLeast(0L)
+    val minutes = totalSeconds / 60L
+    val seconds = totalSeconds % 60L
+    return if (minutes > 0L) {
+        "${minutes}分${seconds.toString().padStart(2, '0')}秒"
+    } else {
+        "${seconds}秒"
     }
 }
 

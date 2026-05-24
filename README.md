@@ -9,7 +9,9 @@
 多入口快速捕获文字内容，随时随地记录灵感与信息：
 
 - **悬浮球捕获**：全局悬浮球覆盖层，复制文字后点击悬浮球一键保存，无需切换应用
-- **悬浮球录音转写**：用户主动开始录音后上传后端 ASR，转写成功自动保存为今日音频 Note
+- **系统音频转写（实验）**：Android 10+ 通过系统授权捕获可被捕获的播放音频，优先适配耳机场景
+- **悬浮球麦克风转写**：作为外放、环境声音和系统音频不可用时的备用录音路径
+- **音频失败暂存**：上传或转写失败时保留有效音频，今日页可统一重试；生成 Note 后在入库或删除时清理原始音频
 - **系统分享**：从任意应用通过系统分享菜单直接发送到纳知
 - **Direct Share**：系统分享面板直接显示纳知快捷入口
 - **文本选择捕获**：选中文字后通过 `ACTION_PROCESS_TEXT` 菜单直接收纳
@@ -68,6 +70,16 @@ AI 驱动的知识管理核心：
 - **数据导入**：从 JSON 文件导入知识数据，导入后自动重建向量索引
 - **悬浮球开关**：控制悬浮球服务的启停
 
+### 7. V1.2 音频模式边界
+
+- 系统音频模式优先服务耳机场景，需要系统 MediaProjection 授权。
+- 麦克风模式保留为备用路径，适合外放、会议和环境声音，但耳机场景可能录不到短视频声音。
+- 系统音频模式授权前会先显示纳知说明页，说明系统授权弹窗与音频捕获边界。
+- 系统音频模式只捕获允许被捕获的媒体音频；若第三方 App 禁止捕获或得到静音，录制结束后会提示失败并避免保存空 Note。
+- 两种模式都复用同一个后端 ASR Job 接口，转写完成后保存为今日 `AUDIO_TRANSCRIPTION` Note。
+- 有效音频在上传或转写失败时会暂存，用户可在今日页重试；原始音频不进入知识库和导出数据，关联 Note 入库或删除后自动清理。
+- 今日收件箱会展示音频来源、录音时长、保存时间和状态，复制、编辑、删除继续复用普通 Note 能力。
+
 ## 技术架构
 
 ### 技术栈
@@ -123,6 +135,7 @@ app/src/main/java/com/nazhi/app/
 ├── AudioTranscriptionActivity.kt
 ├── AudioTranscriptionPermissionActivity.kt
 ├── AudioTranscriptionService.kt
+├── SystemAudioCapturePermissionActivity.kt
 ├── FloatingCaptureService.kt
 ├── ProcessTextCaptureActivity.kt
 └── ShareCaptureActivity.kt

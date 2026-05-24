@@ -7,6 +7,7 @@ data class Note(
     val sourceType: SourceType,
     val sourceApp: String?,
     val sourceUrl: String?,
+    val audioDurationMs: Long? = null,
     val createdAt: Long,
     val createdDate: String,
     val updatedAt: Long,

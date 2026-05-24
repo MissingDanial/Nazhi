@@ -7,6 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.nazhi.app.core.database.dao.AudioTranscriptionJobDao
 import com.nazhi.app.core.database.dao.ChatCitationDao
 import com.nazhi.app.core.database.dao.ChatMessageDao
 import com.nazhi.app.core.database.dao.ChatSessionDao
@@ -15,6 +16,7 @@ import com.nazhi.app.core.database.dao.KnowledgeEntryDraftDao
 import com.nazhi.app.core.database.dao.KnowledgeEntryDao
 import com.nazhi.app.core.database.dao.NoteDao
 import com.nazhi.app.core.database.dao.ReviewSessionDao
+import com.nazhi.app.core.database.entity.AudioTranscriptionJobEntity
 import com.nazhi.app.core.database.entity.ChatCitationEntity
 import com.nazhi.app.core.database.entity.ChatMessageEntity
 import com.nazhi.app.core.database.entity.ChatSessionEntity
@@ -33,9 +35,10 @@ import com.nazhi.app.core.database.entity.ReviewSessionEntity
         EmbeddingRecordEntity::class,
         ChatSessionEntity::class,
         ChatMessageEntity::class,
-        ChatCitationEntity::class
+        ChatCitationEntity::class,
+        AudioTranscriptionJobEntity::class
     ],
-    version = 6,
+    version = 8,
     exportSchema = true
 )
 @TypeConverters(NazhiTypeConverters::class)
@@ -48,6 +51,7 @@ abstract class NazhiDatabase : RoomDatabase() {
     abstract fun chatSessionDao(): ChatSessionDao
     abstract fun chatMessageDao(): ChatMessageDao
     abstract fun chatCitationDao(): ChatCitationDao
+    abstract fun audioTranscriptionJobDao(): AudioTranscriptionJobDao
 
     companion object {
         private const val DATABASE_NAME = "nazhi.db"
@@ -58,7 +62,15 @@ abstract class NazhiDatabase : RoomDatabase() {
                 NazhiDatabase::class.java,
                 DATABASE_NAME
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(
+                    MIGRATION_1_2,
+                    MIGRATION_2_3,
+                    MIGRATION_3_4,
+                    MIGRATION_4_5,
+                    MIGRATION_5_6,
+                    MIGRATION_6_7,
+                    MIGRATION_7_8
+                )
                 .build()
         }
 
@@ -258,6 +270,42 @@ abstract class NazhiDatabase : RoomDatabase() {
                     ), '')
                     """.trimIndent()
                 )
+            }
+        }
+
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE notes ADD COLUMN audioDurationMs INTEGER")
+            }
+        }
+
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS audio_transcription_jobs (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        sourceApp TEXT NOT NULL,
+                        backendSource TEXT NOT NULL,
+                        filePath TEXT NOT NULL,
+                        durationMs INTEGER NOT NULL,
+                        byteSize INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        noteId TEXT,
+                        transcriptText TEXT,
+                        errorMessage TEXT,
+                        retryCount INTEGER NOT NULL,
+                        lastTriedAt INTEGER,
+                        createdAt INTEGER NOT NULL,
+                        createdDate TEXT NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        audioDeletedAt INTEGER
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_audio_transcription_jobs_createdDate ON audio_transcription_jobs(createdDate)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_audio_transcription_jobs_status ON audio_transcription_jobs(status)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_audio_transcription_jobs_noteId ON audio_transcription_jobs(noteId)")
             }
         }
     }

@@ -4,6 +4,8 @@ import com.nazhi.app.core.model.EmbeddingRecord
 import com.nazhi.app.core.export.LocalDataImportPreview
 import com.nazhi.app.core.export.LocalDataImportResult
 import com.nazhi.app.core.model.AiTaskProgress
+import com.nazhi.app.core.model.AudioTranscriptionJob
+import com.nazhi.app.core.model.AudioTranscriptionJobStatus
 import com.nazhi.app.core.model.ChatCitation
 import com.nazhi.app.core.model.ChatMessage
 import com.nazhi.app.core.model.ChatSession
@@ -137,4 +139,28 @@ interface NazhiRepository {
     suspend fun getReviewSession(id: String): ReviewSession?
 
     suspend fun saveReviewSession(session: ReviewSession)
+
+    fun observeAudioTranscriptionJobsForDate(date: String): Flow<List<AudioTranscriptionJob>>
+
+    suspend fun getAudioTranscriptionJob(id: String): AudioTranscriptionJob?
+
+    suspend fun getRetryableAudioTranscriptionJobs(): List<AudioTranscriptionJob>
+
+    suspend fun saveAudioTranscriptionJob(job: AudioTranscriptionJob)
+
+    suspend fun updateAudioTranscriptionJobStatus(
+        id: String,
+        status: AudioTranscriptionJobStatus,
+        errorMessage: String? = null,
+        retryIncrement: Int = 0,
+        lastTriedAt: Long? = null,
+        updatedAt: Long = System.currentTimeMillis()
+    )
+
+    suspend fun markAudioTranscriptionJobSaved(
+        id: String,
+        noteId: String,
+        transcriptText: String,
+        updatedAt: Long = System.currentTimeMillis()
+    )
 }

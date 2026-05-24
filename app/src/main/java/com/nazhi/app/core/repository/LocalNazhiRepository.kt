@@ -1,5 +1,6 @@
 package com.nazhi.app.core.repository
 
+import com.nazhi.app.core.database.dao.AudioTranscriptionJobDao
 import com.nazhi.app.core.database.dao.EmbeddingDao
 import com.nazhi.app.core.database.dao.ChatCitationDao
 import com.nazhi.app.core.database.dao.ChatMessageDao
@@ -37,6 +38,8 @@ import com.nazhi.app.core.export.toImportedNote
 import com.nazhi.app.core.model.AiTaskProgress
 import com.nazhi.app.core.model.AiTaskStage
 import com.nazhi.app.core.model.AiTaskStatus
+import com.nazhi.app.core.model.AudioTranscriptionJob
+import com.nazhi.app.core.model.AudioTranscriptionJobStatus
 import com.nazhi.app.core.model.ChatCitation
 import com.nazhi.app.core.model.ChatMessage
 import com.nazhi.app.core.model.ChatMessageStatus
@@ -61,6 +64,7 @@ import com.nazhi.app.core.network.KnowledgeChatContextInput
 import com.nazhi.app.core.network.NazhiBackendException
 import com.nazhi.app.core.network.NazhiBackendClient
 import com.nazhi.app.core.network.QuestionRewriteResponse
+import java.io.File
 import java.io.IOException
 import java.util.UUID
 import kotlinx.coroutines.delay
@@ -80,6 +84,7 @@ class LocalNazhiRepository(
     private val chatSessionDao: ChatSessionDao,
     private val chatMessageDao: ChatMessageDao,
     private val chatCitationDao: ChatCitationDao,
+    private val audioTranscriptionJobDao: AudioTranscriptionJobDao,
     private val backendClient: NazhiBackendClient
 ) : NazhiRepository {
     private val exportJson = Json {
@@ -171,10 +176,14 @@ class LocalNazhiRepository(
 
     override suspend fun updateNoteStatus(id: String, status: NoteStatus, updatedAt: Long) {
         noteDao.updateStatus(id, status, updatedAt)
+        if (status == NoteStatus.REVIEWED) {
+            cleanupAudioForNote(id, updatedAt)
+        }
     }
 
     override suspend fun softDeleteNote(id: String, updatedAt: Long) {
         noteDao.updateStatus(id, NoteStatus.DELETED, updatedAt)
+        cleanupAudioForNote(id, updatedAt)
     }
 
     override fun observeKnowledgeEntries(): Flow<List<KnowledgeEntry>> {
@@ -433,6 +442,7 @@ class LocalNazhiRepository(
         if (duplicateEntry != null) {
             draft.sourceNoteIds.forEach { noteId ->
                 noteDao.updateStatus(noteId, NoteStatus.REVIEWED, now)
+                cleanupAudioForNote(noteId, now)
             }
             knowledgeEntryDraftDao.updateStatus(draft.id, KnowledgeDraftStatus.SKIPPED, now)
             throw DuplicateKnowledgeEntryException(duplicateEntry.userTitle)
@@ -457,6 +467,7 @@ class LocalNazhiRepository(
         knowledgeEntryDao.upsert(entry.toEntity())
         draft.sourceNoteIds.forEach { noteId ->
             noteDao.updateStatus(noteId, NoteStatus.REVIEWED, now)
+            cleanupAudioForNote(noteId, now)
         }
         knowledgeEntryDraftDao.updateStatus(draft.id, KnowledgeDraftStatus.CONFIRMED, now)
         indexKnowledgeEntry(entry.id)
@@ -1338,6 +1349,76 @@ class LocalNazhiRepository(
 
     override suspend fun saveReviewSession(session: ReviewSession) {
         reviewSessionDao.upsert(session.toEntity())
+    }
+
+    override fun observeAudioTranscriptionJobsForDate(date: String): Flow<List<AudioTranscriptionJob>> {
+        return audioTranscriptionJobDao.observeJobsForDate(date)
+            .map { jobs -> jobs.map { it.toModel() } }
+    }
+
+    override suspend fun getAudioTranscriptionJob(id: String): AudioTranscriptionJob? {
+        return audioTranscriptionJobDao.getJob(id)?.toModel()
+    }
+
+    override suspend fun getRetryableAudioTranscriptionJobs(): List<AudioTranscriptionJob> {
+        return audioTranscriptionJobDao.getRetryableJobs().map { it.toModel() }
+    }
+
+    override suspend fun saveAudioTranscriptionJob(job: AudioTranscriptionJob) {
+        audioTranscriptionJobDao.upsert(job.toEntity())
+    }
+
+    override suspend fun updateAudioTranscriptionJobStatus(
+        id: String,
+        status: AudioTranscriptionJobStatus,
+        errorMessage: String?,
+        retryIncrement: Int,
+        lastTriedAt: Long?,
+        updatedAt: Long
+    ) {
+        val existing = audioTranscriptionJobDao.getJob(id)?.toModel() ?: return
+        audioTranscriptionJobDao.upsert(
+            existing.copy(
+                status = status,
+                errorMessage = errorMessage,
+                retryCount = existing.retryCount + retryIncrement,
+                lastTriedAt = lastTriedAt ?: existing.lastTriedAt,
+                updatedAt = updatedAt
+            ).toEntity()
+        )
+    }
+
+    override suspend fun markAudioTranscriptionJobSaved(
+        id: String,
+        noteId: String,
+        transcriptText: String,
+        updatedAt: Long
+    ) {
+        val existing = audioTranscriptionJobDao.getJob(id)?.toModel() ?: return
+        audioTranscriptionJobDao.upsert(
+            existing.copy(
+                status = AudioTranscriptionJobStatus.SAVED,
+                noteId = noteId,
+                transcriptText = transcriptText,
+                errorMessage = null,
+                updatedAt = updatedAt
+            ).toEntity()
+        )
+    }
+
+    private suspend fun cleanupAudioForNote(noteId: String, now: Long) {
+        audioTranscriptionJobDao.getJobsForNote(noteId)
+            .filter { job -> job.audioDeletedAt == null && job.filePath.isNotBlank() }
+            .forEach { entity ->
+                runCatching { File(entity.filePath).delete() }
+                audioTranscriptionJobDao.upsert(
+                    entity.copy(
+                        status = AudioTranscriptionJobStatus.AUDIO_CLEANED,
+                        audioDeletedAt = now,
+                        updatedAt = now
+                    )
+                )
+            }
     }
 
     private suspend fun upsertMockEmbeddingForEntry(entry: KnowledgeEntry) {
