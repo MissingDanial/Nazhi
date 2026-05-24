@@ -725,17 +725,17 @@ private fun HealthResultView(health: BackendHealthResponse) {
             color = if (health.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
         )
         Text(
-            text = "service: ${health.service}",
+            text = "service: ${health.service.ifBlank { "unknown" }}",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Text(
-            text = "embedding: ${health.embeddingProvider}",
+            text = "embedding: ${health.embeddingProvider.ifBlank { "unknown" }}",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Text(
-            text = "chat: ${health.chatProvider}",
+            text = "chat: ${health.chatProvider.ifBlank { "unknown" }}",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )

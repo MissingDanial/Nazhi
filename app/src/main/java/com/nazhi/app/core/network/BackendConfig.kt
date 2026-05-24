@@ -1,5 +1,7 @@
 package com.nazhi.app.core.network
 
+import java.net.URI
+
 data class BackendConfig(
     val baseUrl: String,
     val devToken: String,
@@ -14,7 +16,15 @@ data class BackendConfig(
     val directExtraId: String = ""
 ) {
     val normalizedBaseUrl: String
-        get() = baseUrl.trim().trimEnd('/')
+        get() {
+            val trimmed = baseUrl.trim().trimEnd('/')
+            return runCatching {
+                val uri = URI(trimmed)
+                val scheme = uri.scheme ?: return@runCatching trimmed
+                val authority = uri.rawAuthority ?: return@runCatching trimmed
+                "$scheme://$authority"
+            }.getOrDefault(trimmed)
+        }
 
     val normalizedDirectApiBaseUrl: String
         get() = directApiBaseUrl.trim().trimEnd('/')
