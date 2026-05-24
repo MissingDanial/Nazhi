@@ -2,6 +2,7 @@
 .gradle/
 build/
 **/build/
+gradle/gradle-daemon-jvm.properties
 
 # Android Studio
 .idea/

@@ -19,7 +19,9 @@ data class RecordedAudio(
     val file: File,
     val durationMs: Long,
     val byteSize: Long,
-    val reachedLimit: Boolean
+    val reachedLimit: Boolean,
+    val peakAmplitude: Int = 0,
+    val rmsAmplitude: Double = 0.0
 )
 
 class WavAudioRecorder(

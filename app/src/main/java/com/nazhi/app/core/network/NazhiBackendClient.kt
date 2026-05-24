@@ -980,17 +980,17 @@ data class DirectApiCheckResponse(
 
 @Serializable
 data class BackendHealthResponse(
-    val ok: Boolean,
-    val service: String,
-    val embeddingProvider: String,
-    val chatProvider: String,
+    val ok: Boolean = false,
+    val service: String = "",
+    val embeddingProvider: String = "",
+    val chatProvider: String = "",
     val asrProvider: String = ""
 )
 
 @Serializable
 data class BackendAuthCheckResponse(
-    val ok: Boolean,
-    val service: String
+    val ok: Boolean = false,
+    val service: String = ""
 )
 
 class NazhiBackendException(

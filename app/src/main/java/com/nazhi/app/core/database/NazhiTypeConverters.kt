@@ -1,6 +1,7 @@
 package com.nazhi.app.core.database
 
 import androidx.room.TypeConverter
+import com.nazhi.app.core.model.AudioTranscriptionJobStatus
 import com.nazhi.app.core.model.ChatMessageStatus
 import com.nazhi.app.core.model.ChatRole
 import com.nazhi.app.core.model.IntentType
@@ -67,6 +68,15 @@ class NazhiTypeConverters {
     fun stringToKnowledgeDraftStatus(value: String): KnowledgeDraftStatus {
         return runCatching { KnowledgeDraftStatus.valueOf(value) }
             .getOrDefault(KnowledgeDraftStatus.PENDING)
+    }
+
+    @TypeConverter
+    fun audioTranscriptionJobStatusToString(value: AudioTranscriptionJobStatus): String = value.name
+
+    @TypeConverter
+    fun stringToAudioTranscriptionJobStatus(value: String): AudioTranscriptionJobStatus {
+        return runCatching { AudioTranscriptionJobStatus.valueOf(value) }
+            .getOrDefault(AudioTranscriptionJobStatus.PENDING)
     }
 
     @TypeConverter

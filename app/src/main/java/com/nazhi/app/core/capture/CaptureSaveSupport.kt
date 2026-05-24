@@ -11,7 +11,7 @@ import java.util.UUID
 import kotlinx.coroutines.flow.first
 
 sealed interface CaptureSaveResult {
-    data object Saved : CaptureSaveResult
+    data class Saved(val noteId: String) : CaptureSaveResult
     data object Empty : CaptureSaveResult
     data object DuplicateToday : CaptureSaveResult
     data object VerificationCodeLike : CaptureSaveResult
@@ -21,7 +21,9 @@ suspend fun saveCapturedText(
     repository: NazhiRepository,
     rawText: String?,
     sourceType: SourceType,
-    sourceApp: String?
+    sourceApp: String?,
+    title: String? = null,
+    audioDurationMs: Long? = null
 ): CaptureSaveResult {
     val content = rawText?.trim().orEmpty()
     if (content.isEmpty()) {
@@ -42,14 +44,16 @@ suspend fun saveCapturedText(
         return CaptureSaveResult.DuplicateToday
     }
 
+    val noteId = UUID.randomUUID().toString()
     repository.saveNote(
         Note(
-            id = UUID.randomUUID().toString(),
+            id = noteId,
             content = content,
-            title = content.toTitle(),
+            title = title?.takeIf { it.isNotBlank() } ?: content.toTitle(),
             sourceType = sourceType,
             sourceApp = sourceApp,
             sourceUrl = content.extractFirstUrl(),
+            audioDurationMs = audioDurationMs,
             createdAt = now,
             createdDate = dateId,
             updatedAt = now,
@@ -57,12 +61,12 @@ suspend fun saveCapturedText(
             userRemark = null
         )
     )
-    return CaptureSaveResult.Saved
+    return CaptureSaveResult.Saved(noteId)
 }
 
 fun CaptureSaveResult.toToastMessage(emptyMessage: String = "没有读取到可收纳文本"): String {
     return when (this) {
-        CaptureSaveResult.Saved -> "已收纳到今日"
+        is CaptureSaveResult.Saved -> "已收纳到今日"
         CaptureSaveResult.Empty -> emptyMessage
         CaptureSaveResult.DuplicateToday -> "今日已存在相同内容，未重复收纳"
         CaptureSaveResult.VerificationCodeLike -> "疑似验证码，未收纳"

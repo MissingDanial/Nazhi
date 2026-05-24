@@ -29,6 +29,7 @@ class AppContainer(context: Context) {
         chatSessionDao = database.chatSessionDao(),
         chatMessageDao = database.chatMessageDao(),
         chatCitationDao = database.chatCitationDao(),
+        audioTranscriptionJobDao = database.audioTranscriptionJobDao(),
         backendClient = backendClient
     )
 

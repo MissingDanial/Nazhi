@@ -8,7 +8,9 @@ import android.media.projection.MediaProjection.Callback
 import android.os.SystemClock
 import java.io.File
 import java.io.RandomAccessFile
+import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.sqrt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -62,6 +64,7 @@ class PlaybackAudioRecorder(
         var dataSize = 0L
         var reachedLimit = false
         val buffer = ByteArray(bufferSize)
+        val audioLevels = AudioLevelAccumulator()
         val projectionCallback = object : Callback() {
             override fun onStop() {
                 stop()
@@ -92,6 +95,7 @@ class PlaybackAudioRecorder(
                     val read = audioRecord.read(buffer, 0, buffer.size)
                     if (read > 0) {
                         output.write(buffer, 0, read)
+                        audioLevels.addPcm16Le(buffer, read)
                         dataSize += read
                     }
                 }
@@ -116,7 +120,9 @@ class PlaybackAudioRecorder(
             file = outputFile,
             durationMs = dataSize.toRecordedDurationMs(),
             byteSize = dataSize,
-            reachedLimit = reachedLimit
+            reachedLimit = reachedLimit,
+            peakAmplitude = audioLevels.peakAmplitude,
+            rmsAmplitude = audioLevels.rmsAmplitude
         )
     }
 
@@ -183,5 +189,29 @@ class PlaybackAudioRecorder(
     private fun Long.toRecordedDurationMs(): Long {
         val bytesPerSecond = WavAudioRecorder.SAMPLE_RATE * WavAudioRecorder.CHANNELS * WavAudioRecorder.BITS_PER_SAMPLE / 8
         return if (bytesPerSecond <= 0) 0 else this * 1000L / bytesPerSecond
+    }
+
+    private class AudioLevelAccumulator {
+        private var sumSquares = 0.0
+        private var sampleCount = 0L
+        var peakAmplitude = 0
+            private set
+
+        val rmsAmplitude: Double
+            get() = if (sampleCount == 0L) 0.0 else sqrt(sumSquares / sampleCount)
+
+        fun addPcm16Le(buffer: ByteArray, read: Int) {
+            var index = 0
+            while (index + 1 < read) {
+                val sample = ((buffer[index + 1].toInt() shl 8) or (buffer[index].toInt() and 0xff))
+                    .toShort()
+                    .toInt()
+                val amplitude = abs(sample)
+                peakAmplitude = max(peakAmplitude, amplitude)
+                sumSquares += sample.toDouble() * sample.toDouble()
+                sampleCount += 1
+                index += 2
+            }
+        }
     }
 }

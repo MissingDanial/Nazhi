@@ -5,7 +5,9 @@ import android.content.Intent
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -25,6 +27,8 @@ class FloatingCaptureService : Service() {
     private var bubbleParams: WindowManager.LayoutParams? = null
     private var isExpanded = false
     private var isAudioMenu = false
+    private val handler = Handler(Looper.getMainLooper())
+    private val hideStatusRunnable = Runnable { refreshBubble() }
 
     override fun onCreate() {
         super.onCreate()
@@ -147,6 +151,7 @@ class FloatingCaptureService : Service() {
     }
 
     private fun removeBubble() {
+        handler.removeCallbacks(hideStatusRunnable)
         bubbleView?.let { view ->
             runCatching {
                 windowManager.removeView(view)
@@ -226,6 +231,10 @@ class FloatingCaptureService : Service() {
                 collapseBubble()
                 openClipboardCapture()
             }
+            actions.addIconButton("🎧") {
+                collapseBubble()
+                openSystemAudioPermission()
+            }
             actions.addIconButton("🎙") {
                 isAudioMenu = true
                 renderActions()
@@ -233,10 +242,6 @@ class FloatingCaptureService : Service() {
                 bubbleView?.let { view ->
                     bubbleParams?.let { params -> windowManager.updateViewLayout(view, params) }
                 }
-            }
-            actions.addIconButton("🎧") {
-                collapseBubble()
-                openSystemAudioPermission()
             }
         }
     }
@@ -329,11 +334,17 @@ class FloatingCaptureService : Service() {
 
     private fun renderStatus() {
         val status = statusView ?: return
-        val state = AudioTranscriptionService.state
-        val textValue = AudioTranscriptionService.statusText.ifBlank { state.defaultStatusText() }
-        val shouldShow = !isExpanded && state.shouldShowStatusChip() && textValue.isNotBlank()
+        handler.removeCallbacks(hideStatusRunnable)
+        val textValue = AudioTranscriptionService.statusText
+        val shouldShow = !isExpanded && AudioTranscriptionService.shouldShowFloatingStatus()
         status.text = textValue
         status.visibility = if (shouldShow) View.VISIBLE else View.GONE
+        if (shouldShow) {
+            handler.postDelayed(
+                hideStatusRunnable,
+                AudioTranscriptionService.floatingStatusRemainingMs() + 80L
+            )
+        }
     }
 
     private fun LinearLayout.addIconButton(
@@ -467,32 +478,4 @@ private fun AudioFloatingState.startSymbol(): String {
 
 private fun AudioFloatingState.canFinish(): Boolean {
     return this == AudioFloatingState.RECORDING || this == AudioFloatingState.PAUSED
-}
-
-private fun AudioFloatingState.shouldShowStatusChip(): Boolean {
-    return when (this) {
-        AudioFloatingState.FINISHING,
-        AudioFloatingState.UPLOADING,
-        AudioFloatingState.TRANSCRIBING,
-        AudioFloatingState.SAVING,
-        AudioFloatingState.SAVED,
-        AudioFloatingState.FAILED -> true
-        AudioFloatingState.IDLE,
-        AudioFloatingState.RECORDING,
-        AudioFloatingState.PAUSED -> false
-    }
-}
-
-private fun AudioFloatingState.defaultStatusText(): String {
-    return when (this) {
-        AudioFloatingState.IDLE -> ""
-        AudioFloatingState.RECORDING -> "录音中"
-        AudioFloatingState.PAUSED -> "录音已暂停"
-        AudioFloatingState.FINISHING -> "录音已结束，正在准备转写"
-        AudioFloatingState.UPLOADING -> "音频上传中"
-        AudioFloatingState.TRANSCRIBING -> "音频转写中"
-        AudioFloatingState.SAVING -> "正在加入今日收件箱"
-        AudioFloatingState.SAVED -> "音频已加入今日收件箱"
-        AudioFloatingState.FAILED -> "转写失败"
-    }
 }

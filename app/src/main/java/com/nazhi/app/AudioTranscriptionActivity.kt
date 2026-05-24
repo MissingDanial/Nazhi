@@ -242,7 +242,11 @@ private fun AudioTranscriptionScreen(
                                             repository = appContainer.repository,
                                             rawText = transcribedText,
                                             sourceType = SourceType.AUDIO_TRANSCRIPTION,
-                                            sourceApp = "悬浮球录音转写"
+                                            sourceApp = "麦克风转写",
+                                            title = recordedAudio?.durationMs?.let { duration ->
+                                                "麦克风转写 · ${duration.toDurationLabel()}"
+                                            },
+                                            audioDurationMs = recordedAudio?.durationMs
                                         ).toToastMessage(emptyMessage = "转写文本为空，未保存")
                                     }.getOrElse {
                                         "保存失败，请稍后重试"
@@ -438,6 +442,17 @@ private fun Long.formatDuration(): String {
     val minutes = totalSeconds / 60
     val seconds = totalSeconds % 60
     return "%02d:%02d".format(minutes, seconds)
+}
+
+private fun Long.toDurationLabel(): String {
+    val totalSeconds = (this / 1000L).coerceAtLeast(0L)
+    val minutes = totalSeconds / 60L
+    val seconds = totalSeconds % 60L
+    return if (minutes > 0L) {
+        "${minutes}分${seconds.toString().padStart(2, '0')}秒"
+    } else {
+        "${seconds}秒"
+    }
 }
 
 private fun Throwable.toAudioUserMessage(): String {
