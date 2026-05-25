@@ -63,8 +63,6 @@ fun CalendarRoute(repository: NazhiRepository) {
             dateId = date,
             screenTitle = "日历",
             screenSubtitle = displayDateLabel(date),
-            summaryLabel = "当天记录",
-            reviewTitle = "日期回顾",
             showQuickInput = false,
             onNavigateBack = { selectedDate = null }
         )
