@@ -688,7 +688,7 @@ class LocalNazhiRepository(
                 add("导入流程不会恢复 API Key、服务 Token 或后端配置。")
             }
             if (!payload.safety.excludesEmbeddingVectors || payload.knowledgeEntries.isNotEmpty()) {
-                add("导入不会恢复本地向量，知识条目会重新标记为待索引。")
+                add("导入后需要重新生成问答能力。")
             }
             add("同 ID 数据会跳过，不覆盖当前手机已有内容。")
         }
@@ -912,7 +912,7 @@ class LocalNazhiRepository(
                 status = AiTaskStatus.RUNNING,
                 stage = AiTaskStage.LOCAL_RETRIEVAL,
                 progress = 20,
-                message = "正在理解问题并生成检索向量"
+                message = "正在理解问题并检索知识"
             )
         )
         val retrievalContext = buildChatRetrievalContext(
@@ -966,7 +966,7 @@ class LocalNazhiRepository(
             return saveAssistantMessage(
                 sessionId = questionMessage.sessionId,
                 parentMessageId = questionMessage.id,
-                content = "当前知识库中没有足够信息回答这个问题。请先完成知识入库和向量索引，或换一个更具体的问题。",
+                content = "当前知识库中没有足够信息回答这个问题。请先完成知识沉淀，或换一个更具体的问题。",
                 status = ChatMessageStatus.DONE,
                 errorMessage = null,
                 attempt = attempt,
@@ -1527,10 +1527,10 @@ class LocalNazhiRepository(
     private suspend fun ensureKnowledgeChatReady() {
         val entries = knowledgeEntryDao.getEntries()
         if (entries.isEmpty()) {
-            throw IllegalStateException("当前还没有知识条目，请先完成知识入库后再提问。")
+            throw IllegalStateException("当前还没有知识条目，请先完成知识沉淀后再提问。")
         }
         if (entries.none { it.indexStatus == KnowledgeIndexStatus.INDEXED }) {
-            throw IllegalStateException("知识库尚未完成索引，请先在知识库页重建索引后再提问。")
+            throw IllegalStateException("知识库尚未完成沉淀，请先在知识库页完成沉淀后再提问。")
         }
     }
 

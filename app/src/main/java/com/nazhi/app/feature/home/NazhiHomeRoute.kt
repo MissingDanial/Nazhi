@@ -104,7 +104,10 @@ fun NazhiHomeRoute(
                     onOpenKnowledge = { selectedTab = MainTab.KNOWLEDGE }
                 )
 
-                MainTab.CALENDAR -> CalendarRoute(repository = repository)
+                MainTab.CALENDAR -> CalendarRoute(
+                    repository = repository,
+                    knowledgeIngestionCoordinator = knowledgeIngestionCoordinator
+                )
 
                 MainTab.CHAT -> KnowledgeChatRoute(
                     repository = repository,

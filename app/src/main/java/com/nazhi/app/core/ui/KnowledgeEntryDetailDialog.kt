@@ -220,9 +220,9 @@ private fun SourceType.label(): String {
 
 private fun KnowledgeIndexStatus.label(): String {
     return when (this) {
-        KnowledgeIndexStatus.PENDING -> "待索引"
-        KnowledgeIndexStatus.INDEXING -> "索引中"
-        KnowledgeIndexStatus.INDEXED -> "已索引"
-        KnowledgeIndexStatus.FAILED -> "索引失败"
+        KnowledgeIndexStatus.PENDING -> "待沉淀"
+        KnowledgeIndexStatus.INDEXING -> "沉淀中"
+        KnowledgeIndexStatus.INDEXED -> "已沉淀"
+        KnowledgeIndexStatus.FAILED -> "沉淀失败"
     }
 }

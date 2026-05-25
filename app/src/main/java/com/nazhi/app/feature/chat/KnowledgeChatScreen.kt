@@ -672,8 +672,8 @@ private fun ChatQuestionInputBlock(
             Text(
                 text = when {
                     isAsking -> "回答中"
-                    entryCount == 0 -> "先完成知识入库"
-                    indexedEntryCount == 0 -> "先重建索引"
+                    entryCount == 0 -> "先完成知识沉淀"
+                    indexedEntryCount == 0 -> "先完成沉淀"
                     else -> "发送"
                 }
             )
@@ -896,7 +896,7 @@ private fun KnowledgeChatIndexStatusBlock(
     embeddingCount: Int
 ) {
     Text(
-        text = "本地向量 $embeddingCount 条",
+        text = "可问答知识 $embeddingCount 条",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
@@ -1508,10 +1508,10 @@ private fun KnowledgeEntry.displayTitle(): String {
 
 private fun KnowledgeIndexStatus.label(): String {
     return when (this) {
-        KnowledgeIndexStatus.PENDING -> "待索引"
-        KnowledgeIndexStatus.INDEXING -> "索引中"
-        KnowledgeIndexStatus.INDEXED -> "已索引"
-        KnowledgeIndexStatus.FAILED -> "索引失败"
+        KnowledgeIndexStatus.PENDING -> "待沉淀"
+        KnowledgeIndexStatus.INDEXING -> "沉淀中"
+        KnowledgeIndexStatus.INDEXED -> "已沉淀"
+        KnowledgeIndexStatus.FAILED -> "沉淀失败"
     }
 }
 

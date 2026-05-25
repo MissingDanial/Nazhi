@@ -236,12 +236,12 @@ fun KnowledgeRoute(
                 isUpdatingEntry = true
                 val message = runCatching {
                     if (repository.indexKnowledgeEntry(entry.id)) {
-                        "问答索引已更新"
+                        "问答能力已更新"
                     } else {
-                        "索引更新失败，请检查网络或 API 配置后重试"
+                        "问答能力更新失败，请检查网络或 API 配置后重试"
                     }
                 }.getOrElse { error ->
-                    "索引更新失败：${error.toUserFacingMessage()}"
+                    "问答能力更新失败：${error.toUserFacingMessage()}"
                 }
                 isUpdatingEntry = false
                 snackbarHostState.showSnackbar(message)
@@ -284,9 +284,9 @@ fun KnowledgeRoute(
                             editingEntry = null
                             snackbarHostState.showSnackbar(
                                 if (indexed) {
-                                    "已保存并更新问答索引"
+                                    "已保存并更新问答能力"
                                 } else {
-                                    "已保存，索引更新失败，可稍后重试"
+                                    "已保存，问答能力更新失败，可稍后重试"
                                 }
                             )
                         },
@@ -383,7 +383,7 @@ private fun KnowledgeScreen(
                     Column {
                         Text(text = "知识库")
                         Text(
-                            text = "AI 整理、提交入库与本地向量检索",
+                            text = "AI 整理、确认沉淀与知识库问答",
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
@@ -458,7 +458,7 @@ private fun KnowledgeScreen(
                 }
                 if (results.isEmpty()) {
                     item {
-                        EmptyKnowledgeCard(text = "没有找到相近内容。可先完成今日入库，或换一个问题。")
+                        EmptyKnowledgeCard(text = "没有找到相近内容。可先完成今日沉淀，或换一个问题。")
                     }
                 } else {
                     items(
@@ -474,7 +474,7 @@ private fun KnowledgeScreen(
                 }
             } else {
                 item {
-                    SectionTitle(text = "已入库内容")
+                    SectionTitle(text = "已沉淀内容")
                 }
                 item {
                     KnowledgeEntryManagementCard(
@@ -537,7 +537,7 @@ private fun DayKnowledgeStatusCard(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
-                text = "今日入库状态 · $today",
+                text = "今日沉淀状态 · $today",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
             )
@@ -547,7 +547,7 @@ private fun DayKnowledgeStatusCard(
                 color = MaterialTheme.colorScheme.primary
             )
             Text(
-                text = "笔记 ${status.noteCount} 条 · 待回顾 ${status.pendingNoteCount} 条 · 草稿 ${status.pendingDraftCount}/${status.draftCount} 条 · 已入库 ${status.knowledgeEntryCount} 条 · 已索引 ${status.indexedEntryCount} 条",
+                text = "笔记 ${status.noteCount} 条 · 待整理 ${status.pendingNoteCount} 条 · 待确认 ${status.pendingDraftCount} 条 · 已沉淀 ${status.indexedEntryCount} 条",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -599,25 +599,25 @@ private fun DayKnowledgeStatusCard(
                 ) {
                     Text(
                         text = when {
-                            knowledgeIngestionState.isRunning -> "入库中"
+                            knowledgeIngestionState.isRunning -> "沉淀中"
                             isSubmitting -> "提交中"
                             hasDuplicateDrafts -> "先处理重复"
                             hasReviewRequiredDrafts -> "先确认草稿"
-                            else -> "提交入库"
+                            else -> "确认沉淀"
                         }
                     )
                 }
             }
             if (hasReviewRequiredDrafts) {
                 Text(
-                    text = "存在需确认草稿，需逐条查看后再入库。",
+                    text = "存在需确认草稿，需逐条查看后再沉淀。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             if (hasDuplicateDrafts) {
                 Text(
-                    text = "存在疑似重复草稿，请先跳过或编辑后再入库。",
+                    text = "存在疑似重复草稿，请先跳过或编辑后再沉淀。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -640,10 +640,10 @@ private fun DayKnowledgeStatusCard(
             ) {
                 Text(
                     text = when {
-                        knowledgeIngestionState.isRunning -> knowledgeIngestionState.runningLabel ?: "向量入库中"
-                        failedIndexCount > 0 -> "重试失败索引"
-                        pendingIndexCount > 0 -> "重建待索引知识"
-                        else -> "索引已完成"
+                        knowledgeIngestionState.isRunning -> knowledgeIngestionState.runningLabel ?: "沉淀中"
+                        failedIndexCount > 0 -> "重试沉淀"
+                        pendingIndexCount > 0 -> "完成待沉淀知识"
+                        else -> "已沉淀"
                     }
                 )
             }
@@ -740,7 +740,7 @@ private fun KnowledgeDraftCard(
                         onClick = onSubmit,
                         enabled = !isSubmitting && duplicateEntry == null
                     ) {
-                        Text(text = if (duplicateEntry == null) "确认入库" else "重复不可入库")
+                        Text(text = if (duplicateEntry == null) "确认沉淀" else "重复不可沉淀")
                     }
                 }
             }
@@ -901,7 +901,7 @@ private fun KnowledgeEntryEditDialog(
                     label = { Text(text = "备注，可选") }
                 )
                 Text(
-                    text = if (isSaving) "正在保存并更新问答索引" else "保存后会更新该条目的问答索引。",
+                    text = if (isSaving) "正在保存并更新问答能力" else "保存后会更新该条目的问答能力。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1047,12 +1047,12 @@ private fun KnowledgeSearchCard(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
-                text = "本地向量检索",
+                text = "本地知识检索",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "知识条目 $entryCount 条 · 已索引 $indexedEntryCount 条 · 本地向量 $embeddingCount 条",
+                text = "知识条目 $entryCount 条 · 可问答 $indexedEntryCount 条",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1076,8 +1076,8 @@ private fun KnowledgeSearchCard(
             ) {
                 Text(
                     text = when {
-                        entryCount == 0 -> "先完成知识入库"
-                        indexedEntryCount == 0 -> "先重建索引"
+                        entryCount == 0 -> "先完成知识沉淀"
+                        indexedEntryCount == 0 -> "先完成沉淀"
                         else -> "语义检索"
                     }
                 )
@@ -1164,13 +1164,13 @@ private fun KnowledgeIndexStatusHint(
     val text = when {
         entryCount == 0 -> "当前还没有知识条目。"
         indexedEntryCount == 0 && pendingIndexCount > 0 -> {
-            "知识库已有内容但尚未完成索引，请点击上方“重试向量入库”后再检索或问答。"
+            "知识库已有内容但尚未完成沉淀，请点击上方“重试沉淀”后再检索或问答。"
         }
         indexedEntryCount == 0 && failedIndexCount > 0 -> {
-            "知识索引失败，请检查网络或 API 配置后重试向量入库。"
+            "知识沉淀失败，请检查网络或 API 配置后重试。"
         }
         pendingIndexCount > 0 || failedIndexCount > 0 -> {
-            "部分知识尚未索引，当前检索和问答只会使用已索引内容。"
+            "部分知识尚未完成沉淀，当前检索和问答只会使用已沉淀内容。"
         }
         else -> null
     }
@@ -1353,8 +1353,8 @@ private fun DayKnowledgeStatus.statusText(): String {
         noteCount == 0 -> "未收纳"
         pendingDraftCount > 0 -> "草稿待确认"
         failedIndexCount > 0 -> "部分失败，可重试"
-        isComplete -> "已完成入库"
-        knowledgeEntryCount > indexedEntryCount -> "向量入库中或待重试"
+        isComplete -> "已沉淀"
+        knowledgeEntryCount > indexedEntryCount -> "沉淀中或待重试"
         draftCount > 0 -> "草稿已处理"
         pendingNoteCount > 0 -> "已保存，待整理"
         else -> "未整理"
@@ -1367,8 +1367,8 @@ private fun KnowledgeEntryDraft.reviewLabel(): String {
 
 private enum class KnowledgeEntryIndexFilter(val label: String) {
     ALL("全部"),
-    INDEXED("已索引"),
-    PENDING("待更新"),
+    INDEXED("已沉淀"),
+    PENDING("待完成"),
     FAILED("失败")
 }
 
@@ -1402,9 +1402,9 @@ private fun KnowledgeEntry.matchesKeyword(query: String): Boolean {
 
 private fun KnowledgeEntry.indexActionText(): String {
     return when (indexStatus) {
-        KnowledgeIndexStatus.FAILED -> "重试索引"
-        KnowledgeIndexStatus.INDEXING -> "索引中"
-        else -> "更新索引"
+        KnowledgeIndexStatus.FAILED -> "重试沉淀"
+        KnowledgeIndexStatus.INDEXING -> "沉淀中"
+        else -> "更新沉淀"
     }
 }
 
@@ -1460,10 +1460,10 @@ private fun Throwable.toUserFacingMessage(): String {
 
 private fun com.nazhi.app.core.model.KnowledgeIndexStatus.label(): String {
     return when (this) {
-        com.nazhi.app.core.model.KnowledgeIndexStatus.PENDING -> "待索引"
-        com.nazhi.app.core.model.KnowledgeIndexStatus.INDEXING -> "索引中"
-        com.nazhi.app.core.model.KnowledgeIndexStatus.INDEXED -> "已索引"
-        com.nazhi.app.core.model.KnowledgeIndexStatus.FAILED -> "索引失败"
+        com.nazhi.app.core.model.KnowledgeIndexStatus.PENDING -> "待沉淀"
+        com.nazhi.app.core.model.KnowledgeIndexStatus.INDEXING -> "沉淀中"
+        com.nazhi.app.core.model.KnowledgeIndexStatus.INDEXED -> "已沉淀"
+        com.nazhi.app.core.model.KnowledgeIndexStatus.FAILED -> "沉淀失败"
     }
 }
 

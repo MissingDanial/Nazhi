@@ -32,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.nazhi.app.core.knowledge.KnowledgeIngestionCoordinator
 import com.nazhi.app.core.model.DaySummary
 import com.nazhi.app.core.repository.NazhiRepository
 import com.nazhi.app.core.util.displayDateLabel
@@ -47,7 +48,10 @@ import java.time.LocalDate
 import java.time.YearMonth
 
 @Composable
-fun CalendarRoute(repository: NazhiRepository) {
+fun CalendarRoute(
+    repository: NazhiRepository,
+    knowledgeIngestionCoordinator: KnowledgeIngestionCoordinator
+) {
     var visibleMonthDate by remember { mutableStateOf(todayDateId()) }
     var selectedDate by remember { mutableStateOf<String?>(null) }
     val startDate = remember(visibleMonthDate) { monthStartDateId(visibleMonthDate) }
@@ -60,6 +64,7 @@ fun CalendarRoute(repository: NazhiRepository) {
     if (date != null) {
         DateNotesRoute(
             repository = repository,
+            knowledgeIngestionCoordinator = knowledgeIngestionCoordinator,
             dateId = date,
             screenTitle = "日历",
             screenSubtitle = displayDateLabel(date),

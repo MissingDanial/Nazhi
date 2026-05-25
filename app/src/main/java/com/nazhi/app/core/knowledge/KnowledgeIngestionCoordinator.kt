@@ -17,6 +17,8 @@ data class KnowledgeIngestionState(
     val isRunning: Boolean = false,
     val taskKind: KnowledgeTaskKind? = null,
     val completedTaskKind: KnowledgeTaskKind? = null,
+    val activeDateId: String? = null,
+    val completedDateId: String? = null,
     val runningLabel: String? = null,
     val progress: AiTaskProgress? = null,
     val message: String? = null,
@@ -41,7 +43,8 @@ class KnowledgeIngestionCoordinator(
     fun organizeToday(date: String) {
         launchTask(
             taskKind = KnowledgeTaskKind.ORGANIZE,
-            runningLabel = "正在后台 AI 整理"
+            runningLabel = "正在后台 AI 整理",
+            dateId = date
         ) {
             val count = repository.organizeNotesForDate(date) { progress ->
                 _state.update { state ->
@@ -58,14 +61,14 @@ class KnowledgeIngestionCoordinator(
     fun submitDraft(draftId: String) {
         launchTask(
             taskKind = KnowledgeTaskKind.SUBMIT_DRAFT,
-            runningLabel = "正在提交知识并生成向量"
+            runningLabel = "正在沉淀知识"
         ) {
             val entry = repository.submitKnowledgeDraft(draftId)
             when {
                 entry == null -> "草稿已处理或不存在"
-                entry.indexStatus == KnowledgeIndexStatus.INDEXED -> "已提交知识库并完成向量入库"
-                entry.indexStatus == KnowledgeIndexStatus.FAILED -> "已提交知识库，向量入库失败，可稍后重试"
-                else -> "已提交知识库并开始向量入库"
+                entry.indexStatus == KnowledgeIndexStatus.INDEXED -> "已沉淀，可用于知识库问答"
+                entry.indexStatus == KnowledgeIndexStatus.FAILED -> "已保存知识，沉淀失败，可稍后重试"
+                else -> "已保存知识，正在完成沉淀"
             }
         }
     }
@@ -73,11 +76,12 @@ class KnowledgeIngestionCoordinator(
     fun submitAll(date: String, hasDuplicateDrafts: Boolean, hasReviewRequiredDrafts: Boolean) {
         launchTask(
             taskKind = KnowledgeTaskKind.SUBMIT_ALL,
-            runningLabel = "正在批量提交知识并生成向量"
+            runningLabel = "正在批量沉淀知识",
+            dateId = date
         ) {
             val count = repository.submitAllKnowledgeDraftsForDate(date)
             when {
-                count > 0 -> "已提交 $count 条草稿并尝试向量入库"
+                count > 0 -> "已处理 $count 条草稿，沉淀失败项可在异常中重试"
                 hasDuplicateDrafts -> "存在重复草稿，请逐条查看后跳过或编辑"
                 hasReviewRequiredDrafts -> "存在需确认草稿，请逐条确认后提交"
                 else -> "没有待提交草稿"
@@ -88,16 +92,17 @@ class KnowledgeIngestionCoordinator(
     fun indexPending() {
         launchTask(
             taskKind = KnowledgeTaskKind.INDEX_PENDING,
-            runningLabel = "正在后台向量入库"
+            runningLabel = "正在重试沉淀"
         ) {
             val count = repository.indexPendingKnowledgeEntries()
-            if (count == 0) "没有可重试的向量任务" else "已完成 $count 条向量入库"
+            if (count == 0) "没有可重试的沉淀任务" else "已完成 $count 条知识沉淀"
         }
     }
 
     private fun launchTask(
         taskKind: KnowledgeTaskKind,
         runningLabel: String,
+        dateId: String? = null,
         block: suspend () -> String
     ) {
         if (activeJob?.isActive == true) {
@@ -116,6 +121,8 @@ class KnowledgeIngestionCoordinator(
                     isRunning = true,
                     taskKind = taskKind,
                     completedTaskKind = null,
+                    activeDateId = dateId,
+                    completedDateId = null,
                     runningLabel = runningLabel,
                     progress = null,
                     message = "$runningLabel，可切换页面，不会中断。"
@@ -125,7 +132,7 @@ class KnowledgeIngestionCoordinator(
                 if (error is DuplicateKnowledgeEntryException) {
                     error.toUserFacingMessage()
                 } else {
-                    "知识入库失败：${error.toUserFacingMessage()}"
+                    "知识沉淀失败：${error.toUserFacingMessage()}"
                 }
             }
             _state.update {
@@ -133,6 +140,8 @@ class KnowledgeIngestionCoordinator(
                     isRunning = false,
                     taskKind = null,
                     completedTaskKind = taskKind,
+                    activeDateId = null,
+                    completedDateId = dateId,
                     runningLabel = null,
                     progress = null,
                     message = message,

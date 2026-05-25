@@ -464,7 +464,7 @@ fun SettingsRoute(
                     Text(text = result.toResultText())
                     if (result.shouldOfferIndexRebuild()) {
                         Text(
-                            text = "导入的知识条目未包含本地向量，需要重建索引后才能用于语义检索和知识库问答。",
+                            text = "导入的知识条目需要重新生成问答能力后才能用于检索和问答。",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -480,9 +480,9 @@ fun SettingsRoute(
                                 isReindexingAfterImport = true
                                 val message = runCatching {
                                     val count = repository.indexPendingKnowledgeEntries()
-                                    if (count == 0) "没有完成新的索引，请检查网络、API 配置或知识库状态" else "已重建 $count 条知识索引"
+                                    if (count == 0) "没有完成新的沉淀，请检查网络、API 配置或知识库状态" else "已完成 $count 条知识沉淀"
                                 }.getOrElse { error ->
-                                    "重建索引失败：${error.toUserMessage()}"
+                                    "重试沉淀失败：${error.toUserMessage()}"
                                 }
                                 isReindexingAfterImport = false
                                 importResult = null
@@ -490,7 +490,7 @@ fun SettingsRoute(
                             }
                         }
                     ) {
-                        Text(text = if (isReindexingAfterImport) "重建中" else "重建索引")
+                        Text(text = if (isReindexingAfterImport) "处理中" else "生成问答能力")
                     }
                 } else {
                     TextButton(onClick = { importResult = null }) {
@@ -1184,7 +1184,7 @@ private fun LocalDataExportCard(
                 style = MaterialTheme.typography.bodyMedium
             )
             Text(
-                text = "导入导出都不会处理 API Key、服务 Token、后端配置或本地向量 BLOB；同 ID 数据导入时会跳过。",
+                text = "导入导出都不会处理 API Key、服务 Token、后端配置或本地问答能力数据；同 ID 数据导入时会跳过。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

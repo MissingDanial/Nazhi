@@ -69,6 +69,7 @@ import com.nazhi.app.core.model.isMeaningfulKnowledgeDuplicateKey
 import com.nazhi.app.core.model.toKnowledgeDuplicateKey
 import com.nazhi.app.core.network.NazhiBackendException
 import com.nazhi.app.core.repository.NazhiRepository
+import com.nazhi.app.core.util.displayDateLabel
 import com.nazhi.app.core.util.toLocalDateId
 import com.nazhi.app.core.util.todayDateId
 import com.nazhi.app.feature.farm.DailyFarmPreview
@@ -150,19 +151,21 @@ fun DateNotesRoute(
     val pendingReviewNotes = notes.filter { it.status == NoteStatus.INBOX }
     val visibleAudioJobs = audioJobs.filter { it.shouldShowInInbox() }
     val pendingDrafts = drafts.filter { it.status == KnowledgeDraftStatus.PENDING }
+    val settledKnowledgeEntries = knowledgeEntries.filter { it.indexStatus == KnowledgeIndexStatus.INDEXED }
     val hasDuplicateDrafts = pendingDrafts.any { draft ->
         draft.findDuplicateEntry(knowledgeEntries) != null
     }
     val hasReviewRequiredDrafts = pendingDrafts.any { it.needsReview }
-    val farmSnapshot = remember(dateId, notes, dayKnowledgeStatus, visibleAudioJobs) {
+    val farmSnapshot = remember(dateId, notes, drafts, knowledgeEntries, dayKnowledgeStatus, visibleAudioJobs) {
         DailyFarmRuleEngine.buildSnapshot(
             dateId = dateId,
             notes = notes,
+            drafts = drafts,
+            knowledgeEntries = knowledgeEntries,
             knowledgeStatus = dayKnowledgeStatus,
             audioJobs = visibleAudioJobs
         )
     }
-    val reviewedCount = notes.count { it.status == NoteStatus.REVIEWED }
     var input by remember(initialShareText) { mutableStateOf(initialShareText.orEmpty()) }
     var inputSourceType by remember(initialShareText) {
         mutableStateOf(if (initialShareText.isNullOrBlank()) SourceType.MANUAL else SourceType.SHARE)
@@ -173,14 +176,23 @@ fun DateNotesRoute(
     var editingNote by remember { mutableStateOf<Note?>(null) }
     var deletingNote by remember { mutableStateOf<Note?>(null) }
     var handledKnowledgeTaskEventId by remember { mutableStateOf(knowledgeIngestionState.eventId) }
+    val isToday = dateId == todayDateId()
+    val activeTaskDateId = knowledgeIngestionState.activeDateId
+    val isCurrentDateTask = activeTaskDateId == null || activeTaskDateId == dateId
+    val activeOtherDateLabel = activeTaskDateId
+        ?.takeIf { knowledgeIngestionState.isRunning && it != dateId }
+        ?.let { displayDateLabel(it) }
     val isAiOrganizing = knowledgeIngestionState.isRunning &&
-        knowledgeIngestionState.taskKind == KnowledgeTaskKind.ORGANIZE
+        knowledgeIngestionState.taskKind == KnowledgeTaskKind.ORGANIZE &&
+        isCurrentDateTask
     val isKnowledgeTaskRunning = knowledgeIngestionState.isRunning
     val aiOrganizeProgress = if (isAiOrganizing) knowledgeIngestionState.progress else null
-    val aiOrganizeMessage = knowledgeIngestionState.message.takeIf {
+    val aiOrganizeMessage = when {
+        activeOtherDateLabel != null -> "正在处理 $activeOtherDateLabel，完成后可处理当前日期。"
         knowledgeIngestionState.isRunning &&
-            knowledgeIngestionState.taskKind == KnowledgeTaskKind.ORGANIZE &&
-            knowledgeIngestionState.progress == null
+            isCurrentDateTask &&
+            knowledgeIngestionState.progress == null -> knowledgeIngestionState.message
+        else -> null
     }
     LaunchedEffect(knowledgeIngestionState.eventId) {
         val message = knowledgeIngestionState.message
@@ -193,19 +205,19 @@ fun DateNotesRoute(
     InboxScreen(
         screenTitle = screenTitle,
         screenSubtitle = screenSubtitle,
+        isToday = isToday,
         notes = notes,
         audioJobs = visibleAudioJobs,
         farmSnapshot = farmSnapshot,
         dayKnowledgeStatus = dayKnowledgeStatus,
         pendingDrafts = pendingDrafts,
-        knowledgeEntries = knowledgeEntries,
+        knowledgeEntries = settledKnowledgeEntries,
         input = input,
         inputSourceType = inputSourceType,
         showQuickInput = showQuickInput,
         historyPendingCount = historyPendingCount,
         pendingReviewCount = pendingReviewNotes.size,
         pendingDraftCount = dayKnowledgeStatus.pendingDraftCount,
-        reviewedCount = reviewedCount,
         hasDuplicateDrafts = hasDuplicateDrafts,
         hasReviewRequiredDrafts = hasReviewRequiredDrafts,
         isAiOrganizing = isAiOrganizing,
@@ -361,6 +373,7 @@ fun DateNotesRoute(
 fun InboxScreen(
     screenTitle: String,
     screenSubtitle: String,
+    isToday: Boolean,
     notes: List<Note>,
     audioJobs: List<AudioTranscriptionJob>,
     farmSnapshot: DailyFarmSnapshot,
@@ -373,7 +386,6 @@ fun InboxScreen(
     historyPendingCount: Int,
     pendingReviewCount: Int,
     pendingDraftCount: Int,
-    reviewedCount: Int,
     hasDuplicateDrafts: Boolean,
     hasReviewRequiredDrafts: Boolean,
     isAiOrganizing: Boolean,
@@ -440,7 +452,7 @@ fun InboxScreen(
                     totalCount = notes.size,
                     pendingCount = pendingReviewCount,
                     pendingDraftCount = pendingDraftCount,
-                    knowledgeCount = dayKnowledgeStatus.knowledgeEntryCount,
+                    knowledgeCount = dayKnowledgeStatus.indexedEntryCount,
                     issueCount = retryableAudioCount + dayKnowledgeStatus.failedIndexCount,
                     selectedPanel = selectedPanel,
                     onSelectPanel = { panel ->
@@ -455,12 +467,12 @@ fun InboxScreen(
 
             item {
                 TodayPrimaryActionCard(
+                    isToday = isToday,
                     showQuickInput = showQuickInput,
                     totalCount = notes.size,
                     pendingCount = pendingReviewCount,
                     pendingDraftCount = pendingDraftCount,
-                    reviewedCount = reviewedCount,
-                    knowledgeCount = dayKnowledgeStatus.knowledgeEntryCount,
+                    knowledgeCount = dayKnowledgeStatus.indexedEntryCount,
                     hasIssue = hasIssue,
                     isAiOrganizing = isAiOrganizing,
                     isKnowledgeTaskRunning = isKnowledgeTaskRunning,
@@ -489,6 +501,7 @@ fun InboxScreen(
                 item {
                     TodayPanelCard(
                         panel = panel,
+                        isToday = isToday,
                         notes = notes,
                         pendingDrafts = pendingDrafts,
                         knowledgeEntries = knowledgeEntries,
@@ -562,7 +575,7 @@ private fun TodayStatusChips(
                 onClick = { onSelectPanel(TodayPanel.DRAFTS) }
             )
             TodayStatusChip(
-                label = "已入库",
+                label = "已沉淀",
                 count = knowledgeCount,
                 selected = selectedPanel == TodayPanel.INGESTED,
                 modifier = Modifier.weight(1f),
@@ -602,11 +615,11 @@ private fun TodayStatusChip(
 
 @Composable
 private fun TodayPrimaryActionCard(
+    isToday: Boolean,
     showQuickInput: Boolean,
     totalCount: Int,
     pendingCount: Int,
     pendingDraftCount: Int,
-    reviewedCount: Int,
     knowledgeCount: Int,
     hasIssue: Boolean,
     isAiOrganizing: Boolean,
@@ -621,20 +634,24 @@ private fun TodayPrimaryActionCard(
     onSubmitDrafts: () -> Unit,
     onOpenIssues: () -> Unit
 ) {
+    val periodLabel = if (isToday) "今日" else "这一天"
+    val completeLabel = "$periodLabel 已完成"
+    val emptyHistoryLabel = "这一天无内容"
     val label = when {
         isAiOrganizing -> "AI 整理中"
         isKnowledgeTaskRunning -> "知识处理中"
         hasIssue -> "处理异常"
         pendingDraftCount > 0 && (hasDuplicateDrafts || hasReviewRequiredDrafts) -> "查看待确认"
-        pendingDraftCount > 0 -> "确认入库"
-        pendingCount > 0 -> "AI 整理今日"
+        pendingDraftCount > 0 -> "确认沉淀"
+        pendingCount > 0 -> if (isToday) "AI 整理今日" else "整理这一天"
         totalCount == 0 && showQuickInput -> "添加内容"
-        else -> "今日已完成"
+        totalCount == 0 -> emptyHistoryLabel
+        else -> completeLabel
     }
     val enabled = when {
         isAiOrganizing || isKnowledgeTaskRunning -> false
         totalCount == 0 && !showQuickInput -> false
-        label == "今日已完成" -> false
+        label == completeLabel || label == emptyHistoryLabel -> false
         else -> true
     }
     Card(
@@ -648,12 +665,12 @@ private fun TodayPrimaryActionCard(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text(
-                text = "今日进度",
+                text = "${periodLabel}进度",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "收纳 $totalCount · 待整理 $pendingCount · 待确认 $pendingDraftCount · 已入库 $knowledgeCount · 已处理 $reviewedCount",
+                text = "收纳 $totalCount · 待整理 $pendingCount · 待确认 $pendingDraftCount · 已沉淀 $knowledgeCount",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onPrimaryContainer
             )
@@ -692,6 +709,7 @@ private fun TodayPrimaryActionCard(
 @Composable
 private fun TodayPanelCard(
     panel: TodayPanel,
+    isToday: Boolean,
     notes: List<Note>,
     pendingDrafts: List<KnowledgeEntryDraft>,
     knowledgeEntries: List<KnowledgeEntry>,
@@ -716,7 +734,7 @@ private fun TodayPanelCard(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
-                text = panel.title(),
+                text = panel.title(isToday),
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
             )
@@ -777,7 +795,7 @@ private fun TodayPanelCard(
                                 enabled = pendingDrafts.none { it.needsReview },
                                 modifier = Modifier.weight(1f)
                             ) {
-                                Text(text = "确认入库")
+                                Text(text = "确认沉淀")
                             }
                         }
                     }
@@ -785,7 +803,7 @@ private fun TodayPanelCard(
                 TodayPanel.INGESTED -> {
                     if (knowledgeEntries.isEmpty()) {
                         Text(
-                            text = "今天还没有入库知识。",
+                            text = if (isToday) "今天还没有沉淀知识。" else "这一天还没有沉淀知识。",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -822,7 +840,7 @@ private fun TodayPanelCard(
                             onClick = onRetryIndex,
                             modifier = Modifier.weight(1f)
                         ) {
-                            Text(text = "重试索引")
+                            Text(text = "重试沉淀")
                         }
                         Button(
                             onClick = onRetryAudioJobs,
@@ -906,11 +924,12 @@ private fun KnowledgeEntrySummaryCard(entry: KnowledgeEntry) {
     }
 }
 
-private fun TodayPanel.title(): String {
+private fun TodayPanel.title(isToday: Boolean): String {
+    val periodLabel = if (isToday) "今日" else "这一天"
     return when (this) {
-        TodayPanel.CAPTURED -> "今日收纳内容"
+        TodayPanel.CAPTURED -> "${periodLabel}收纳内容"
         TodayPanel.DRAFTS -> "待确认草稿"
-        TodayPanel.INGESTED -> "今日入库结果"
+        TodayPanel.INGESTED -> "${periodLabel}沉淀结果"
         TodayPanel.ISSUES -> "待处理异常"
     }
 }
@@ -1277,6 +1296,7 @@ fun InboxPreview() {
         InboxScreen(
             screenTitle = "纳知",
             screenSubtitle = "今日",
+            isToday = true,
             notes = listOf(
                 Note(
                     id = "1",
@@ -1296,6 +1316,8 @@ fun InboxPreview() {
             farmSnapshot = DailyFarmRuleEngine.buildSnapshot(
                 dateId = now.toLocalDateId(),
                 notes = emptyList(),
+                drafts = emptyList(),
+                knowledgeEntries = emptyList(),
                 knowledgeStatus = DayKnowledgeStatus(now.toLocalDateId(), 1, 1, 0, 0, 0, 0, 0, 0),
                 audioJobs = emptyList()
             ),
@@ -1309,7 +1331,6 @@ fun InboxPreview() {
             snackbarHostState = SnackbarHostState(),
             pendingReviewCount = 1,
             pendingDraftCount = 0,
-            reviewedCount = 0,
             hasDuplicateDrafts = false,
             hasReviewRequiredDrafts = false,
             isAiOrganizing = false,
@@ -1438,15 +1459,15 @@ private fun IntentType.label(): String {
 }
 
 private fun KnowledgeEntryDraft.reviewLabel(): String {
-    return if (needsReview) "需确认" else "可入库"
+    return if (needsReview) "需确认" else "可沉淀"
 }
 
 private fun KnowledgeIndexStatus.label(): String {
     return when (this) {
-        KnowledgeIndexStatus.PENDING -> "待索引"
-        KnowledgeIndexStatus.INDEXING -> "索引中"
-        KnowledgeIndexStatus.INDEXED -> "已索引"
-        KnowledgeIndexStatus.FAILED -> "索引失败"
+        KnowledgeIndexStatus.PENDING -> "待沉淀"
+        KnowledgeIndexStatus.INDEXING -> "沉淀中"
+        KnowledgeIndexStatus.INDEXED -> "已沉淀"
+        KnowledgeIndexStatus.FAILED -> "沉淀失败"
     }
 }
 
