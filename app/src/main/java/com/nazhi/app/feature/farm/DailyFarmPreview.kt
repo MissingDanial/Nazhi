@@ -1,9 +1,10 @@
 package com.nazhi.app.feature.farm
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -12,6 +13,10 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -21,19 +26,63 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.nazhi.app.core.model.DailyFarmSnapshot
+import com.nazhi.app.core.model.KnowledgeEntry
+import com.nazhi.app.core.model.KnowledgeEntryDraft
+import com.nazhi.app.core.model.Note
 import kotlin.math.abs
 import kotlin.math.min
 
 private const val FARM_SIZE = 5
 private const val FARM_CENTER = 2
+private const val MAX_FARM_PLOTS = FARM_SIZE * FARM_SIZE
+private const val PRIORITY_STAGE_SOFT_LIMIT = 8
+private const val FARM_MIN_SCALE = 1f
+private const val FARM_MAX_SCALE = 2.2f
+
+enum class FarmStage {
+    SAPLING,
+    PLANT,
+    MATURE
+}
+
+enum class FarmOwnerType {
+    NOTE,
+    DRAFT,
+    KNOWLEDGE_ENTRY
+}
+
+data class FarmContentItem(
+    val ownerType: FarmOwnerType,
+    val ownerId: String,
+    val stage: FarmStage,
+    val title: String,
+    val preview: String,
+    val charCount: Int,
+    val createdAt: Long
+)
+
+data class FarmPlotUiModel(
+    val row: Int,
+    val col: Int,
+    val stage: FarmStage,
+    val level: Int,
+    val items: List<FarmContentItem>,
+    val plotId: String = "$row:$col"
+)
 
 @Composable
 fun DailyFarmPreview(
     snapshot: DailyFarmSnapshot,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    plots: List<FarmPlotUiModel> = emptyList(),
+    onPlotClick: (FarmPlotUiModel) -> Unit = {}
 ) {
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -43,121 +92,183 @@ fun DailyFarmPreview(
     ) {
         Column(
             modifier = Modifier.padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(
-                        text = "知识农场",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = snapshot.dateId,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
-                    text = "${snapshot.maturityScore}%",
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = MaterialTheme.colorScheme.primary,
+                    text = "知识农场",
+                    style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = snapshot.dateId,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
             DailyFarmCanvas(
                 snapshot = snapshot,
+                plots = plots,
+                onPlotClick = onPlotClick,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(230.dp)
             )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly
-            ) {
-                FarmMetric(label = "小苗", value = snapshot.saplingCount)
-                FarmMetric(label = "植物", value = snapshot.plantCount)
-                FarmMetric(label = "成熟", value = snapshot.matureCount)
-            }
-
-            Text(
-                text = snapshot.summaryText(),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
         }
-    }
-}
-
-@Composable
-private fun FarmMetric(label: String, value: Int) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(
-            text = value.toString(),
-            style = MaterialTheme.typography.titleLarge,
-            color = MaterialTheme.colorScheme.primary,
-            fontWeight = FontWeight.SemiBold
-        )
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
     }
 }
 
 @Composable
 private fun DailyFarmCanvas(
     snapshot: DailyFarmSnapshot,
+    plots: List<FarmPlotUiModel>,
+    onPlotClick: (FarmPlotUiModel) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val plots = buildFarmPlots(snapshot)
-    Canvas(modifier = modifier) {
-        val tileWidth = min(size.width / 5.7f, size.height / 3.75f)
-        val tileHeight = tileWidth * 0.52f
-        val gridHeight = tileHeight * FARM_SIZE
-        val originY = ((size.height - gridHeight) / 2f + tileHeight * 0.35f).coerceAtLeast(22f)
-        val originX = size.width / 2f
-        val tiles = buildFarmTiles(originX, originY, tileWidth, tileHeight)
-        val plotByKey = plots.associateBy { it.key }
+    val displayPlots = remember(snapshot, plots) {
+        plots.ifEmpty { buildCountFarmPlots(snapshot) }
+    }
+    var zoomScale by remember(snapshot.dateId) { mutableStateOf(FARM_MIN_SCALE) }
+    var pan by remember(snapshot.dateId) { mutableStateOf(Offset.Zero) }
+    var canvasSize by remember { mutableStateOf(IntSize.Zero) }
 
-        drawRoundRect(
-            color = Color(0xFFEAF3F0),
-            cornerRadius = CornerRadius(tileWidth * 0.22f, tileWidth * 0.22f)
-        )
-
-        tiles.forEach { tile ->
-            val baseColor = if ((tile.key.row + tile.key.col) % 2 == 0) {
-                Color(0xFFDDEDDC)
-            } else {
-                Color(0xFFD2E4D2)
+    Canvas(
+        modifier = modifier
+            .onSizeChanged { canvasSize = it }
+            .pointerInput(displayPlots, zoomScale, pan, canvasSize, onPlotClick) {
+                detectTapGestures { tapOffset ->
+                    val plot = hitTestFarmPlot(
+                        tapOffset = tapOffset,
+                        canvasSize = canvasSize,
+                        scale = zoomScale,
+                        pan = pan,
+                        plots = displayPlots
+                    )
+                    if (plot != null && plot.items.isNotEmpty()) {
+                        onPlotClick(plot)
+                    }
+                }
             }
-            drawIsoTile(
-                center = tile.center,
-                tileWidth = tileWidth,
-                tileHeight = tileHeight,
-                fill = baseColor,
-                border = Color(0xFFB4CBB4)
-            )
-        }
+            .pointerInput(canvasSize) {
+                detectTransformGestures { _, panChange, zoomChange, _ ->
+                    val newScale = (zoomScale * zoomChange).coerceIn(FARM_MIN_SCALE, FARM_MAX_SCALE)
+                    zoomScale = newScale
+                    pan = if (newScale == FARM_MIN_SCALE) {
+                        Offset.Zero
+                    } else {
+                        clampPan(pan + panChange, canvasSize, newScale)
+                    }
+                }
+            }
+    ) {
+        val layout = buildFarmLayout(size.width, size.height)
+        val plotByKey = displayPlots.associateBy { PlotKey(it.row, it.col) }
 
-        tiles.forEach { tile ->
-            plotByKey[tile.key]?.let { plot ->
-                drawFarmCrop(
-                    plot = plot,
+        withTransform({
+            translate(left = pan.x, top = pan.y)
+            scale(
+                scaleX = zoomScale,
+                scaleY = zoomScale,
+                pivot = Offset(size.width / 2f, size.height / 2f)
+            )
+        }) {
+            drawRoundRect(
+                color = Color(0xFFEAF3F0),
+                cornerRadius = CornerRadius(layout.tileWidth * 0.22f, layout.tileWidth * 0.22f)
+            )
+
+            layout.tiles.forEach { tile ->
+                val baseColor = if ((tile.key.row + tile.key.col) % 2 == 0) {
+                    Color(0xFFDDEDDC)
+                } else {
+                    Color(0xFFD2E4D2)
+                }
+                drawIsoTile(
                     center = tile.center,
-                    tileWidth = tileWidth,
-                    tileHeight = tileHeight,
-                    dateSeed = snapshot.dateId
+                    tileWidth = layout.tileWidth,
+                    tileHeight = layout.tileHeight,
+                    fill = baseColor,
+                    border = Color(0xFFB4CBB4)
                 )
+            }
+
+            layout.tiles.forEach { tile ->
+                plotByKey[tile.key]?.let { plot ->
+                    drawFarmCrop(
+                        plot = plot,
+                        center = tile.center,
+                        tileWidth = layout.tileWidth,
+                        tileHeight = layout.tileHeight,
+                        dateSeed = snapshot.dateId
+                    )
+                }
             }
         }
     }
+}
+
+fun buildFarmPlotModels(
+    dateId: String,
+    notes: List<Note>,
+    drafts: List<KnowledgeEntryDraft>,
+    knowledgeEntries: List<KnowledgeEntry>
+): List<FarmPlotUiModel> {
+    val draftItems = drafts
+        .sortedByDescending { it.updatedAt }
+        .map { it.toFarmContentItem() }
+    val noteItems = notes
+        .sortedByDescending { it.updatedAt }
+        .map { it.toFarmContentItem() }
+    val matureItems = knowledgeEntries
+        .sortedByDescending { it.confirmedAt }
+        .map { it.toFarmContentItem() }
+    val allocation = allocateSlots(
+        draftCount = draftItems.size,
+        noteCount = noteItems.size,
+        matureCount = matureItems.size
+    )
+    val centerOut = centerOutPlotKeys()
+    val available = centerOut.toMutableList()
+    val result = mutableListOf<FarmPlotUiModel>()
+
+    fun appendStage(items: List<FarmContentItem>, slots: Int, stage: FarmStage) {
+        if (items.isEmpty() || slots <= 0 || available.isEmpty()) return
+        val chunks = distributeItems(items, min(slots, available.size))
+        chunks.forEach { chunk ->
+            val key = available.removeAt(0)
+            result += FarmPlotUiModel(
+                row = key.row,
+                col = key.col,
+                stage = stage,
+                level = farmPlotLevel(chunk),
+                items = chunk,
+                plotId = "$dateId:${key.row}:${key.col}"
+            )
+        }
+    }
+
+    appendStage(draftItems, allocation.draftSlots, FarmStage.PLANT)
+    appendStage(noteItems, allocation.noteSlots, FarmStage.SAPLING)
+    appendStage(matureItems, allocation.matureSlots, FarmStage.MATURE)
+
+    return result
+}
+
+private fun buildFarmLayout(
+    width: Float,
+    height: Float
+): FarmLayout {
+    val tileWidth = min(width / 5.7f, height / 3.75f)
+    val tileHeight = tileWidth * 0.52f
+    val gridHeight = tileHeight * FARM_SIZE
+    val originY = ((height - gridHeight) / 2f + tileHeight * 0.35f).coerceAtLeast(22f)
+    val originX = width / 2f
+    return FarmLayout(
+        tileWidth = tileWidth,
+        tileHeight = tileHeight,
+        tiles = buildFarmTiles(originX, originY, tileWidth, tileHeight)
+    )
 }
 
 private fun buildFarmTiles(
@@ -183,40 +294,56 @@ private fun buildFarmTiles(
     }.sortedWith(compareBy<FarmTile> { it.key.row + it.key.col }.thenBy { it.key.row })
 }
 
-private fun buildFarmPlots(snapshot: DailyFarmSnapshot): List<FarmPlot> {
-    val centerOut = allPlotKeys().sortedWith(
-        compareBy<PlotKey> { it.distanceFromCenter() }
-            .thenBy { it.row + it.col }
-            .thenBy { it.col }
+private fun buildCountFarmPlots(snapshot: DailyFarmSnapshot): List<FarmPlotUiModel> {
+    val allocation = allocateSlots(
+        draftCount = snapshot.plantCount,
+        noteCount = snapshot.saplingCount,
+        matureCount = snapshot.matureCount
     )
+    val centerOut = centerOutPlotKeys()
     val result = mutableListOf<FarmPlot>()
     val available = centerOut.toMutableList()
 
-    fun takePlots(units: Int, stage: FarmStage, order: List<PlotKey>) {
+    fun takePlots(units: Int, slots: Int, stage: FarmStage) {
         if (units <= 0 || available.isEmpty()) return
-        val keys = order.filter { it in available }
-        val cellCount = min(units, keys.size)
+        val keys = centerOut.filter { it in available }
+        val requestedSlots = min(slots, MAX_FARM_PLOTS)
+        if (requestedSlots <= 0) return
+        val cellCount = min(min(units, requestedSlots), keys.size)
         if (cellCount <= 0) return
         val baseLevel = units / cellCount
         val bonusCount = units % cellCount
 
         keys.take(cellCount).forEachIndexed { index, key ->
             val level = (baseLevel + if (index < bonusCount) 1 else 0).coerceIn(1, 3)
-            result += FarmPlot(key = key, stage = stage, level = level)
+            result += FarmPlot(
+                key = key,
+                model = FarmPlotUiModel(
+                    row = key.row,
+                    col = key.col,
+                    stage = stage,
+                    level = level,
+                    items = emptyList(),
+                    plotId = "${snapshot.dateId}:${key.row}:${key.col}"
+                )
+            )
             available.remove(key)
         }
     }
 
-    takePlots(snapshot.matureCount, FarmStage.MATURE, centerOut)
-    takePlots(snapshot.plantCount, FarmStage.PLANT, centerOut)
-    val saplingOrder = if (result.isEmpty()) {
-        centerOut
-    } else {
-        centerOut.sortedByDescending { it.distanceFromCenter() }
-    }
-    takePlots(snapshot.saplingCount, FarmStage.SAPLING, saplingOrder)
+    takePlots(snapshot.plantCount, allocation.draftSlots, FarmStage.PLANT)
+    takePlots(snapshot.saplingCount, allocation.noteSlots, FarmStage.SAPLING)
+    takePlots(snapshot.matureCount, allocation.matureSlots, FarmStage.MATURE)
 
-    return result
+    return result.map { it.model }
+}
+
+private fun centerOutPlotKeys(): List<PlotKey> {
+    return allPlotKeys().sortedWith(
+        compareBy<PlotKey> { it.distanceFromCenter() }
+            .thenBy { it.row + it.col }
+            .thenBy { it.col }
+    )
 }
 
 private fun allPlotKeys(): List<PlotKey> {
@@ -253,13 +380,13 @@ private fun DrawScope.drawIsoTile(
 }
 
 private fun DrawScope.drawFarmCrop(
-    plot: FarmPlot,
+    plot: FarmPlotUiModel,
     center: Offset,
     tileWidth: Float,
     tileHeight: Float,
     dateSeed: String
 ) {
-    val salt = plot.key.row * 31 + plot.key.col * 17 + plot.stage.ordinal * 13
+    val salt = plot.row * 31 + plot.col * 17 + plot.stage.ordinal * 13
     val jitterX = stableNoise(dateSeed, salt) * tileWidth * 0.07f
     val jitterY = stableNoise(dateSeed, salt + 7) * tileHeight * 0.14f
     val base = Offset(center.x + jitterX, center.y + jitterY + tileHeight * 0.08f)
@@ -372,19 +499,184 @@ private fun stableNoise(seed: String, salt: Int): Float {
     return (positive % 2001) / 1000f - 1f
 }
 
-private fun PlotKey.distanceFromCenter(): Int {
-    return abs(row - FARM_CENTER) + abs(col - FARM_CENTER)
+private fun hitTestFarmPlot(
+    tapOffset: Offset,
+    canvasSize: IntSize,
+    scale: Float,
+    pan: Offset,
+    plots: List<FarmPlotUiModel>
+): FarmPlotUiModel? {
+    if (canvasSize.width <= 0 || canvasSize.height <= 0 || plots.isEmpty()) return null
+    val center = Offset(canvasSize.width / 2f, canvasSize.height / 2f)
+    val contentOffset = Offset(
+        x = center.x + (tapOffset.x - pan.x - center.x) / scale,
+        y = center.y + (tapOffset.y - pan.y - center.y) / scale
+    )
+    val layout = buildFarmLayout(canvasSize.width.toFloat(), canvasSize.height.toFloat())
+    val plotByKey = plots.associateBy { PlotKey(it.row, it.col) }
+    return layout.tiles
+        .asReversed()
+        .firstNotNullOfOrNull { tile ->
+            val plot = plotByKey[tile.key] ?: return@firstNotNullOfOrNull null
+            if (isInsidePlotHitArea(contentOffset, tile.center, layout.tileWidth, layout.tileHeight)) {
+                plot
+            } else {
+                null
+            }
+        }
 }
 
-private enum class FarmStage {
-    SAPLING,
-    PLANT,
-    MATURE
+private fun isInsidePlotHitArea(
+    offset: Offset,
+    center: Offset,
+    tileWidth: Float,
+    tileHeight: Float
+): Boolean {
+    val diamondX = abs(offset.x - center.x) / (tileWidth / 2f)
+    val diamondY = abs(offset.y - center.y) / (tileHeight / 2f)
+    val insideTile = diamondX + diamondY <= 1f
+    val insideCrop = abs(offset.x - center.x) <= tileWidth * 0.30f &&
+        offset.y >= center.y - tileHeight * 1.85f &&
+        offset.y <= center.y + tileHeight * 0.42f
+    return insideTile || insideCrop
+}
+
+private fun clampPan(
+    pan: Offset,
+    canvasSize: IntSize,
+    scale: Float
+): Offset {
+    val maxPanX = canvasSize.width * (scale - 1f) / 2f
+    val maxPanY = canvasSize.height * (scale - 1f) / 2f
+    return Offset(
+        x = pan.x.coerceIn(-maxPanX, maxPanX),
+        y = pan.y.coerceIn(-maxPanY, maxPanY)
+    )
+}
+
+private fun allocateSlots(
+    draftCount: Int,
+    noteCount: Int,
+    matureCount: Int
+): FarmSlotAllocation {
+    var remaining = MAX_FARM_PLOTS
+    var draftSlots = min(draftCount, min(PRIORITY_STAGE_SOFT_LIMIT, remaining))
+    remaining -= draftSlots
+    var noteSlots = min(noteCount, min(PRIORITY_STAGE_SOFT_LIMIT, remaining))
+    remaining -= noteSlots
+    var matureSlots = min(matureCount, remaining)
+    remaining -= matureSlots
+
+    if (remaining > 0) {
+        val extraDraftSlots = min(draftCount - draftSlots, remaining)
+        draftSlots += extraDraftSlots
+        remaining -= extraDraftSlots
+    }
+    if (remaining > 0) {
+        val extraNoteSlots = min(noteCount - noteSlots, remaining)
+        noteSlots += extraNoteSlots
+        remaining -= extraNoteSlots
+    }
+    if (remaining > 0) {
+        val extraMatureSlots = min(matureCount - matureSlots, remaining)
+        matureSlots += extraMatureSlots
+    }
+
+    return FarmSlotAllocation(
+        draftSlots = draftSlots,
+        noteSlots = noteSlots,
+        matureSlots = matureSlots
+    )
+}
+
+private fun distributeItems(
+    items: List<FarmContentItem>,
+    slotCount: Int
+): List<List<FarmContentItem>> {
+    if (items.isEmpty() || slotCount <= 0) return emptyList()
+    val buckets = List(min(slotCount, items.size)) { mutableListOf<FarmContentItem>() }
+    items.forEachIndexed { index, item ->
+        buckets[index % buckets.size] += item
+    }
+    return buckets
+}
+
+private fun farmPlotLevel(items: List<FarmContentItem>): Int {
+    val charCount = items.sumOf { it.charCount }
+    return when {
+        items.size >= 5 || charCount >= 2400 -> 3
+        items.size >= 2 || charCount >= 800 -> 2
+        else -> 1
+    }
+}
+
+private fun Note.toFarmContentItem(): FarmContentItem {
+    return FarmContentItem(
+        ownerType = FarmOwnerType.NOTE,
+        ownerId = id,
+        stage = FarmStage.SAPLING,
+        title = title?.takeIf { it.isNotBlank() } ?: content.toFarmTitle("未命名收纳"),
+        preview = content.toFarmPreview(),
+        charCount = content.length,
+        createdAt = createdAt
+    )
+}
+
+private fun KnowledgeEntryDraft.toFarmContentItem(): FarmContentItem {
+    val body = summary.ifBlank { content }
+    return FarmContentItem(
+        ownerType = FarmOwnerType.DRAFT,
+        ownerId = id,
+        stage = FarmStage.PLANT,
+        title = title.ifBlank { body.toFarmTitle("未命名草稿") },
+        preview = body.toFarmPreview(),
+        charCount = content.length,
+        createdAt = updatedAt
+    )
+}
+
+private fun KnowledgeEntry.toFarmContentItem(): FarmContentItem {
+    val body = summary.ifBlank { content }
+    return FarmContentItem(
+        ownerType = FarmOwnerType.KNOWLEDGE_ENTRY,
+        ownerId = id,
+        stage = FarmStage.MATURE,
+        title = userTitle?.takeIf { it.isNotBlank() } ?: body.toFarmTitle("未命名知识"),
+        preview = body.toFarmPreview(),
+        charCount = content.length,
+        createdAt = confirmedAt
+    )
+}
+
+private fun String.toFarmTitle(fallback: String): String {
+    return lineSequence()
+        .map { it.trim() }
+        .firstOrNull { it.isNotEmpty() }
+        ?.take(32)
+        ?: fallback
+}
+
+private fun String.toFarmPreview(): String {
+    return lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .joinToString(" ")
+        .take(120)
+}
+
+private fun PlotKey.distanceFromCenter(): Int {
+    return abs(row - FARM_CENTER) + abs(col - FARM_CENTER)
 }
 
 private data class PlotKey(
     val row: Int,
     val col: Int
+)
+
+private data class FarmLayout(
+    val tileWidth: Float,
+    val tileHeight: Float,
+    val tiles: List<FarmTile>
 )
 
 private data class FarmTile(
@@ -394,16 +686,11 @@ private data class FarmTile(
 
 private data class FarmPlot(
     val key: PlotKey,
-    val stage: FarmStage,
-    val level: Int
+    val model: FarmPlotUiModel
 )
 
-private fun DailyFarmSnapshot.summaryText(): String {
-    return when {
-        saplingCount == 0 && plantCount == 0 && matureCount == 0 -> "这一天还没有作物。"
-        matureCount > 0 -> "已有 $matureCount 株成熟作物。"
-        plantCount > 0 -> "有 $plantCount 株植物等待确认沉淀。"
-        saplingCount > 0 -> "有 $saplingCount 株小苗等待 AI 整理。"
-        else -> "农场状态已更新。"
-    }
-}
+private data class FarmSlotAllocation(
+    val draftSlots: Int,
+    val noteSlots: Int,
+    val matureSlots: Int
+)
