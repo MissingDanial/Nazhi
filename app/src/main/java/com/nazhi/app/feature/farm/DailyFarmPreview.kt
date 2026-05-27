@@ -1,8 +1,11 @@
 package com.nazhi.app.feature.farm
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -28,6 +31,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
@@ -82,6 +86,7 @@ fun DailyFarmPreview(
     snapshot: DailyFarmSnapshot,
     modifier: Modifier = Modifier,
     plots: List<FarmPlotUiModel> = emptyList(),
+    selectedPlotId: String? = null,
     onPlotClick: (FarmPlotUiModel) -> Unit = {}
 ) {
     Card(
@@ -110,6 +115,7 @@ fun DailyFarmPreview(
             DailyFarmCanvas(
                 snapshot = snapshot,
                 plots = plots,
+                selectedPlotId = selectedPlotId,
                 onPlotClick = onPlotClick,
                 modifier = Modifier
                     .fillMaxWidth()
@@ -123,6 +129,7 @@ fun DailyFarmPreview(
 private fun DailyFarmCanvas(
     snapshot: DailyFarmSnapshot,
     plots: List<FarmPlotUiModel>,
+    selectedPlotId: String?,
     onPlotClick: (FarmPlotUiModel) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -151,19 +158,36 @@ private fun DailyFarmCanvas(
                 }
             }
             .pointerInput(canvasSize) {
-                detectTransformGestures { _, panChange, zoomChange, _ ->
-                    val newScale = (zoomScale * zoomChange).coerceIn(FARM_MIN_SCALE, FARM_MAX_SCALE)
-                    zoomScale = newScale
-                    pan = if (newScale == FARM_MIN_SCALE) {
-                        Offset.Zero
-                    } else {
-                        clampPan(pan + panChange, canvasSize, newScale)
-                    }
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    var anyPressed: Boolean
+                    do {
+                        val event = awaitPointerEvent()
+                        val pressedCount = event.changes.count { it.pressed }
+                        anyPressed = pressedCount > 0
+                        val shouldHandleFarmGesture = pressedCount > 1 || zoomScale > FARM_MIN_SCALE
+
+                        if (shouldHandleFarmGesture) {
+                            val newScale = (zoomScale * event.calculateZoom()).coerceIn(FARM_MIN_SCALE, FARM_MAX_SCALE)
+                            zoomScale = newScale
+                            pan = if (newScale == FARM_MIN_SCALE) {
+                                Offset.Zero
+                            } else {
+                                clampPan(pan + event.calculatePan(), canvasSize, newScale)
+                            }
+                            event.changes
+                                .filter { it.positionChanged() }
+                                .forEach { it.consume() }
+                        }
+                    } while (anyPressed)
                 }
             }
     ) {
         val layout = buildFarmLayout(size.width, size.height)
         val plotByKey = displayPlots.associateBy { PlotKey(it.row, it.col) }
+        val selectedPlotKey = displayPlots
+            .firstOrNull { it.plotId == selectedPlotId }
+            ?.let { PlotKey(it.row, it.col) }
 
         withTransform({
             translate(left = pan.x, top = pan.y)
@@ -191,6 +215,16 @@ private fun DailyFarmCanvas(
                     fill = baseColor,
                     border = Color(0xFFB4CBB4)
                 )
+            }
+
+            if (selectedPlotKey != null) {
+                layout.tiles.firstOrNull { it.key == selectedPlotKey }?.let { tile ->
+                    drawSelectedIsoTile(
+                        center = tile.center,
+                        tileWidth = layout.tileWidth,
+                        tileHeight = layout.tileHeight
+                    )
+                }
             }
 
             layout.tiles.forEach { tile ->
@@ -363,13 +397,7 @@ private fun DrawScope.drawIsoTile(
     fill: Color,
     border: Color
 ) {
-    val path = Path().apply {
-        moveTo(center.x, center.y - tileHeight / 2f)
-        lineTo(center.x + tileWidth / 2f, center.y)
-        lineTo(center.x, center.y + tileHeight / 2f)
-        lineTo(center.x - tileWidth / 2f, center.y)
-        close()
-    }
+    val path = isoTilePath(center, tileWidth, tileHeight)
     drawPath(path = path, color = Color(0x22000000))
     drawPath(path = path, color = fill)
     drawPath(
@@ -377,6 +405,39 @@ private fun DrawScope.drawIsoTile(
         color = border.copy(alpha = 0.62f),
         style = Stroke(width = (tileWidth * 0.012f).coerceAtLeast(1f))
     )
+}
+
+private fun DrawScope.drawSelectedIsoTile(
+    center: Offset,
+    tileWidth: Float,
+    tileHeight: Float
+) {
+    val path = isoTilePath(center, tileWidth, tileHeight)
+    drawPath(path = path, color = Color(0x332B6B4F))
+    drawPath(
+        path = path,
+        color = Color(0xFF2B6B4F),
+        style = Stroke(width = (tileWidth * 0.035f).coerceAtLeast(2.4f))
+    )
+    drawPath(
+        path = path,
+        color = Color.White.copy(alpha = 0.82f),
+        style = Stroke(width = (tileWidth * 0.014f).coerceAtLeast(1.2f))
+    )
+}
+
+private fun isoTilePath(
+    center: Offset,
+    tileWidth: Float,
+    tileHeight: Float
+): Path {
+    return Path().apply {
+        moveTo(center.x, center.y - tileHeight / 2f)
+        lineTo(center.x + tileWidth / 2f, center.y)
+        lineTo(center.x, center.y + tileHeight / 2f)
+        lineTo(center.x - tileWidth / 2f, center.y)
+        close()
+    }
 }
 
 private fun DrawScope.drawFarmCrop(

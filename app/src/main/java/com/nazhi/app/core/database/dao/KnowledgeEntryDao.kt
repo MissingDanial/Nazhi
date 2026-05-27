@@ -5,6 +5,7 @@ import androidx.room.Delete
 import androidx.room.Query
 import androidx.room.Upsert
 import com.nazhi.app.core.database.entity.KnowledgeEntryEntity
+import com.nazhi.app.core.model.CalendarKnowledgeFarmSummary
 import com.nazhi.app.core.model.IntentType
 import com.nazhi.app.core.model.KnowledgeIndexStatus
 import kotlinx.coroutines.flow.Flow
@@ -25,6 +26,24 @@ interface KnowledgeEntryDao {
 
     @Query("SELECT * FROM knowledge_entries WHERE createdDate = :date ORDER BY confirmedAt DESC")
     suspend fun getEntriesForCreatedDate(date: String): List<KnowledgeEntryEntity>
+
+    @Query(
+        """
+        SELECT createdDate AS date,
+               CAST(SUM(CASE WHEN indexStatus = 'INDEXED' THEN 1 ELSE 0 END) AS INTEGER) AS indexedEntryCount,
+               CAST(SUM(CASE WHEN indexStatus = 'INDEXED' THEN MIN(CAST((LENGTH(TRIM(content)) + 499) / 500 AS INTEGER), 6) ELSE 0 END) AS INTEGER) AS matureUnits,
+               CAST(SUM(CASE WHEN indexStatus = 'FAILED' THEN 1 ELSE 0 END) AS INTEGER) AS failedIndexCount
+        FROM knowledge_entries
+        WHERE createdDate >= :startDate
+          AND createdDate < :endDate
+        GROUP BY createdDate
+        ORDER BY createdDate DESC
+        """
+    )
+    fun observeCalendarFarmKnowledgeSummaries(
+        startDate: String,
+        endDate: String
+    ): Flow<List<CalendarKnowledgeFarmSummary>>
 
     @Query("SELECT * FROM knowledge_entries WHERE indexStatus = :status ORDER BY confirmedAt ASC")
     suspend fun getEntriesByIndexStatus(status: KnowledgeIndexStatus): List<KnowledgeEntryEntity>

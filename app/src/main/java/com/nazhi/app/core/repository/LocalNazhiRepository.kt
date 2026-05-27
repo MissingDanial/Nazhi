@@ -40,6 +40,10 @@ import com.nazhi.app.core.model.AiTaskStage
 import com.nazhi.app.core.model.AiTaskStatus
 import com.nazhi.app.core.model.AudioTranscriptionJob
 import com.nazhi.app.core.model.AudioTranscriptionJobStatus
+import com.nazhi.app.core.model.CalendarDraftFarmSummary
+import com.nazhi.app.core.model.CalendarFarmMarker
+import com.nazhi.app.core.model.CalendarKnowledgeFarmSummary
+import com.nazhi.app.core.model.CalendarNoteFarmSummary
 import com.nazhi.app.core.model.ChatCitation
 import com.nazhi.app.core.model.ChatMessage
 import com.nazhi.app.core.model.ChatMessageStatus
@@ -136,6 +140,20 @@ class LocalNazhiRepository(
 
     override fun observeDaySummaries(startDate: String, endDate: String): Flow<List<DaySummary>> {
         return noteDao.observeDaySummaries(startDate, endDate)
+    }
+
+    override fun observeCalendarFarmMarkers(startDate: String, endDate: String): Flow<List<CalendarFarmMarker>> {
+        return combine(
+            noteDao.observeCalendarFarmNoteSummaries(startDate, endDate),
+            knowledgeEntryDraftDao.observeCalendarFarmDraftSummaries(startDate, endDate),
+            knowledgeEntryDao.observeCalendarFarmKnowledgeSummaries(startDate, endDate)
+        ) { noteSummaries, draftSummaries, knowledgeSummaries ->
+            buildCalendarFarmMarkers(
+                noteSummaries = noteSummaries,
+                draftSummaries = draftSummaries,
+                knowledgeSummaries = knowledgeSummaries
+            )
+        }
     }
 
     override suspend fun getNote(id: String): Note? {
@@ -1760,3 +1778,34 @@ class LocalNazhiRepository(
             ?: "未命名知识"
     }
 }
+
+private fun buildCalendarFarmMarkers(
+    noteSummaries: List<CalendarNoteFarmSummary>,
+    draftSummaries: List<CalendarDraftFarmSummary>,
+    knowledgeSummaries: List<CalendarKnowledgeFarmSummary>
+): List<CalendarFarmMarker> {
+    val notesByDate = noteSummaries.associateBy { it.date }
+    val draftsByDate = draftSummaries.associateBy { it.date }
+    val knowledgeByDate = knowledgeSummaries.associateBy { it.date }
+    val dates = notesByDate.keys + draftsByDate.keys + knowledgeByDate.keys
+
+    return dates
+        .map { date ->
+            val saplingCount = notesByDate[date].orZero { it.saplingUnits }.coerceAtMost(36)
+            val plantCount = draftsByDate[date].orZero { it.plantUnits }.coerceAtMost(36)
+            val matureCount = knowledgeByDate[date].orZero { it.matureUnits }.coerceAtMost(36)
+            val issueCount = knowledgeByDate[date].orZero { it.failedIndexCount }
+            CalendarFarmMarker(
+                date = date,
+                saplingCount = saplingCount,
+                plantCount = plantCount,
+                matureCount = matureCount,
+                issueCount = issueCount,
+                maturityScore = (saplingCount * 8 + plantCount * 18 + matureCount * 28).coerceIn(0, 100)
+            )
+        }
+        .filter { it.hasFarmData }
+        .sortedByDescending { it.date }
+}
+
+private inline fun <T> T?.orZero(selector: (T) -> Int): Int = this?.let(selector) ?: 0

@@ -184,6 +184,7 @@ fun DateNotesRoute(
         mutableStateOf(initialShareSource)
     }
     var editingNote by remember { mutableStateOf<Note?>(null) }
+    var editingDraft by remember { mutableStateOf<KnowledgeEntryDraft?>(null) }
     var deletingNote by remember { mutableStateOf<Note?>(null) }
     var handledKnowledgeTaskEventId by remember { mutableStateOf(knowledgeIngestionState.eventId) }
     val isToday = dateId == todayDateId()
@@ -352,6 +353,9 @@ fun DateNotesRoute(
         onSubmitDraft = { draft ->
             knowledgeIngestionCoordinator?.submitDraft(draft.id)
         },
+        onEditDraft = { draft ->
+            editingDraft = draft
+        },
         onSubmitAllDrafts = {
             knowledgeIngestionCoordinator?.submitAll(
                 date = dateId,
@@ -384,6 +388,25 @@ fun DateNotesRoute(
                     )
                     editingNote = null
                     snackbarHostState.showSnackbar("已更新记录")
+                }
+            }
+        )
+    }
+
+    editingDraft?.let { draft ->
+        DraftEditDialog(
+            draft = draft,
+            onDismiss = { editingDraft = null },
+            onConfirm = { updatedDraft ->
+                coroutineScope.launch {
+                    repository.updateKnowledgeDraft(
+                        updatedDraft.copy(
+                            needsReview = false,
+                            updatedAt = System.currentTimeMillis()
+                        )
+                    )
+                    editingDraft = null
+                    snackbarHostState.showSnackbar("已保存草稿，可确认沉淀")
                 }
             }
         )
@@ -445,6 +468,7 @@ fun InboxScreen(
     onRetryAudioJobs: () -> Unit,
     onAiOrganizeToday: () -> Unit,
     onSubmitDraft: (KnowledgeEntryDraft) -> Unit,
+    onEditDraft: (KnowledgeEntryDraft) -> Unit,
     onSubmitAllDrafts: () -> Unit,
     onRetryIndex: () -> Unit,
     onOpenHistoricalPending: () -> Unit,
@@ -546,6 +570,7 @@ fun InboxScreen(
                 DailyFarmPreview(
                     snapshot = farmSnapshot,
                     plots = farmPlots,
+                    selectedPlotId = selectedFarmPlot?.plotId,
                     onPlotClick = { plot ->
                         selectedFarmPlot = plot
                     }
@@ -606,6 +631,9 @@ fun InboxScreen(
                         onDeleteNote = onDelete,
                         onRetryAudioJobs = onRetryAudioJobs,
                         onRetryIndex = onRetryIndex,
+                        isKnowledgeTaskRunning = isKnowledgeTaskRunning,
+                        onEditDraft = onEditDraft,
+                        onSubmitDraft = onSubmitDraft,
                         onSubmitAllDrafts = onSubmitAllDrafts,
                         onOpenKnowledge = onOpenKnowledge
                     )
@@ -692,7 +720,7 @@ fun InboxScreen(
             onOpenKnowledge = {
                 selectedFarmDraft = null
                 selectedFarmDraftSourceNotes = emptyList()
-                onOpenKnowledge()
+                onEditDraft(draft)
             },
             onDismiss = {
                 selectedFarmDraft = null
@@ -738,7 +766,7 @@ private fun FarmPlotContentDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(text = plot.stage.dialogTitle()) },
+        title = { Text(text = plot.farmDialogTitle()) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
@@ -973,7 +1001,7 @@ private fun FarmDraftDetailDialog(
         confirmButton = {
             if (draft.needsReview) {
                 Button(onClick = onOpenKnowledge) {
-                    Text(text = "去知识库编辑")
+                    Text(text = "编辑草稿")
                 }
             } else {
                 Button(
@@ -990,6 +1018,132 @@ private fun FarmDraftDetailDialog(
             }
         }
     )
+}
+
+@Composable
+private fun DraftEditDialog(
+    draft: KnowledgeEntryDraft,
+    onDismiss: () -> Unit,
+    onConfirm: (KnowledgeEntryDraft) -> Unit
+) {
+    var title by remember(draft.id) { mutableStateOf(draft.title) }
+    var summary by remember(draft.id) { mutableStateOf(draft.summary) }
+    var content by remember(draft.id) { mutableStateOf(draft.content) }
+    var tagsText by remember(draft.id) { mutableStateOf(draft.tags.joinToString("，")) }
+    var insight by remember(draft.id) { mutableStateOf(draft.insight.orEmpty()) }
+    var intentType by remember(draft.id) { mutableStateOf(draft.intentType) }
+    val canSave = title.isNotBlank() && content.isNotBlank()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(text = "编辑 AI 草稿") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(text = "标题") }
+                )
+                OutlinedTextField(
+                    value = summary,
+                    onValueChange = { summary = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    label = { Text(text = "摘要") }
+                )
+                OutlinedTextField(
+                    value = content,
+                    onValueChange = { content = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 4,
+                    label = { Text(text = "正文") }
+                )
+                IntentTypeSelector(
+                    selected = intentType,
+                    onSelect = { intentType = it }
+                )
+                OutlinedTextField(
+                    value = tagsText,
+                    onValueChange = { tagsText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(text = "标签，用逗号分隔") }
+                )
+                OutlinedTextField(
+                    value = insight,
+                    onValueChange = { insight = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    label = { Text(text = "AI 推断，可选") }
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onConfirm(
+                        draft.copy(
+                            title = title.trim(),
+                            summary = summary.trim(),
+                            content = content.trim(),
+                            intentType = intentType,
+                            tags = tagsText.toTagList(),
+                            insight = insight.trim().takeIf { it.isNotBlank() }
+                        )
+                    )
+                },
+                enabled = canSave
+            ) {
+                Text(text = "保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = "取消")
+            }
+        }
+    )
+}
+
+@Composable
+private fun IntentTypeSelector(
+    selected: IntentType,
+    onSelect: (IntentType) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            text = "类型",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            IntentType.entries.forEach { type ->
+                if (selected == type) {
+                    Button(
+                        onClick = { onSelect(type) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(text = type.label())
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = { onSelect(type) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(text = type.label())
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -1214,6 +1368,9 @@ private fun TodayPanelCard(
     onDeleteNote: (Note) -> Unit,
     onRetryAudioJobs: () -> Unit,
     onRetryIndex: () -> Unit,
+    isKnowledgeTaskRunning: Boolean,
+    onEditDraft: (KnowledgeEntryDraft) -> Unit,
+    onSubmitDraft: (KnowledgeEntryDraft) -> Unit,
     onSubmitAllDrafts: () -> Unit,
     onOpenKnowledge: () -> Unit
 ) {
@@ -1248,25 +1405,21 @@ private fun TodayPanelCard(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     } else {
-                        pendingDrafts.take(5).forEach { draft ->
-                            KnowledgeDraftSummaryCard(draft = draft)
+                        pendingDrafts.forEach { draft ->
+                            KnowledgeDraftSummaryCard(
+                                draft = draft,
+                                isSubmitting = isKnowledgeTaskRunning,
+                                onEdit = { onEditDraft(draft) },
+                                onSubmit = { onSubmitDraft(draft) }
+                            )
                         }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            OutlinedButton(
-                                onClick = onOpenKnowledge,
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Text(text = "编辑草稿")
-                            }
+                        if (pendingDrafts.size > 1 && pendingDrafts.none { it.needsReview }) {
                             Button(
                                 onClick = onSubmitAllDrafts,
-                                enabled = pendingDrafts.none { it.needsReview },
-                                modifier = Modifier.weight(1f)
+                                enabled = !isKnowledgeTaskRunning,
+                                modifier = Modifier.fillMaxWidth()
                             ) {
-                                Text(text = "确认沉淀")
+                                Text(text = "全部确认沉淀")
                             }
                         }
                     }
@@ -1328,7 +1481,12 @@ private fun TodayPanelCard(
 }
 
 @Composable
-private fun KnowledgeDraftSummaryCard(draft: KnowledgeEntryDraft) {
+private fun KnowledgeDraftSummaryCard(
+    draft: KnowledgeEntryDraft,
+    isSubmitting: Boolean,
+    onEdit: () -> Unit,
+    onSubmit: () -> Unit
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -1357,6 +1515,21 @@ private fun KnowledgeDraftSummaryCard(draft: KnowledgeEntryDraft) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            HorizontalDivider()
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                TextButton(onClick = onEdit) {
+                    Text(text = "编辑")
+                }
+                TextButton(
+                    onClick = onSubmit,
+                    enabled = !isSubmitting
+                ) {
+                    Text(text = if (isSubmitting) "沉淀中" else "确认沉淀")
+                }
+            }
         }
     }
 }
@@ -1855,6 +2028,7 @@ fun InboxPreview() {
             onRetryAudioJobs = {},
             onAiOrganizeToday = {},
             onSubmitDraft = {},
+            onEditDraft = {},
             onSubmitAllDrafts = {},
             onRetryIndex = {},
             onOpenHistoricalPending = {},
@@ -1989,6 +2163,10 @@ private fun FarmStage.dialogTitle(): String {
     }
 }
 
+private fun FarmPlotUiModel.farmDialogTitle(): String {
+    return "这块农田：${stage.dialogTitle()}"
+}
+
 private fun FarmOwnerType.dialogLabel(): String {
     return when (this) {
         FarmOwnerType.NOTE -> "待整理"
@@ -2008,6 +2186,13 @@ private fun FarmOwnerType.panelActionLabel(): String {
 private fun KnowledgeEntry.toReferenceText(): String {
     val title = userTitle?.takeIf { it.isNotBlank() } ?: "未命名知识"
     return "“$title”\n$content\n—— 纳知 $confirmedDate"
+}
+
+private fun String.toTagList(): List<String> {
+    return split(',', '，', '、')
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .distinct()
 }
 
 private fun Throwable.toUserFacingMessage(): String {

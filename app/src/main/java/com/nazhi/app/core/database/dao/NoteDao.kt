@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Query
 import androidx.room.Upsert
 import com.nazhi.app.core.database.entity.NoteEntity
+import com.nazhi.app.core.model.CalendarNoteFarmSummary
 import com.nazhi.app.core.model.DaySummary
 import com.nazhi.app.core.model.NoteStatus
 import kotlinx.coroutines.flow.Flow
@@ -101,6 +102,27 @@ interface NoteDao {
         endDate: String,
         deletedStatus: NoteStatus = NoteStatus.DELETED
     ): Flow<List<DaySummary>>
+
+    @Query(
+        """
+        SELECT createdDate AS date,
+               CAST(SUM(CASE WHEN status = 'INBOX' THEN 1 ELSE 0 END) AS INTEGER) AS pendingNoteCount,
+               CAST(SUM(CASE WHEN status = 'REVIEWED' THEN 1 ELSE 0 END) AS INTEGER) AS reviewedNoteCount,
+               CAST(SUM(CASE WHEN status = 'INBOX' THEN MIN(CAST((LENGTH(TRIM(content)) + 499) / 500 AS INTEGER), 6) ELSE 0 END) AS INTEGER) AS saplingUnits,
+               CAST(SUM(LENGTH(content)) AS INTEGER) AS wordScore
+        FROM notes
+        WHERE createdDate >= :startDate
+          AND createdDate < :endDate
+          AND status != :deletedStatus
+        GROUP BY createdDate
+        ORDER BY createdDate DESC
+        """
+    )
+    fun observeCalendarFarmNoteSummaries(
+        startDate: String,
+        endDate: String,
+        deletedStatus: NoteStatus = NoteStatus.DELETED
+    ): Flow<List<CalendarNoteFarmSummary>>
 
     @Query("SELECT * FROM notes WHERE id = :id LIMIT 1")
     suspend fun getNote(id: String): NoteEntity?
