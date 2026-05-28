@@ -3,9 +3,13 @@ package com.nazhi.app.feature.home
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -13,7 +17,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import com.nazhi.app.core.chat.KnowledgeChatCoordinator
 import com.nazhi.app.core.knowledge.KnowledgeIngestionCoordinator
 import com.nazhi.app.core.network.NazhiBackendClient
@@ -79,12 +88,6 @@ fun NazhiHomeRoute(
                     icon = { Text(text = "知") },
                     label = { Text(text = "知识库") }
                 )
-                NavigationBarItem(
-                    selected = selectedTab == MainTab.SETTINGS,
-                    onClick = { selectedTab = MainTab.SETTINGS },
-                    icon = { Text(text = "设") },
-                    label = { Text(text = "设置") }
-                )
             }
         }
     ) { innerPadding ->
@@ -125,6 +128,40 @@ fun NazhiHomeRoute(
                     backendClient = backendClient
                 )
             }
+
+            if (selectedTab != MainTab.SETTINGS) {
+                SettingsGearButton(
+                    onClick = { selectedTab = MainTab.SETTINGS },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 8.dp, end = 8.dp)
+                        .zIndex(1f)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsGearButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier
+            .clip(CircleShape)
+            .alpha(0.94f),
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.primary,
+        tonalElevation = 4.dp,
+        shadowElevation = 2.dp
+    ) {
+        IconButton(onClick = onClick) {
+            Text(
+                text = "⚙",
+                style = MaterialTheme.typography.titleMedium
+            )
         }
     }
 }

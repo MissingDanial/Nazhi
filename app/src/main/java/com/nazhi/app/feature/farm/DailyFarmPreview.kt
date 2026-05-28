@@ -20,6 +20,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -29,6 +30,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
@@ -142,6 +144,7 @@ private fun DailyFarmCanvas(
 
     Canvas(
         modifier = modifier
+            .clipToBounds()
             .onSizeChanged { canvasSize = it }
             .pointerInput(displayPlots, zoomScale, pan, canvasSize, onPlotClick) {
                 detectTapGestures { tapOffset ->
@@ -189,53 +192,55 @@ private fun DailyFarmCanvas(
             .firstOrNull { it.plotId == selectedPlotId }
             ?.let { PlotKey(it.row, it.col) }
 
-        withTransform({
-            translate(left = pan.x, top = pan.y)
-            scale(
-                scaleX = zoomScale,
-                scaleY = zoomScale,
-                pivot = Offset(size.width / 2f, size.height / 2f)
-            )
-        }) {
-            drawRoundRect(
-                color = Color(0xFFEAF3F0),
-                cornerRadius = CornerRadius(layout.tileWidth * 0.22f, layout.tileWidth * 0.22f)
-            )
-
-            layout.tiles.forEach { tile ->
-                val baseColor = if ((tile.key.row + tile.key.col) % 2 == 0) {
-                    Color(0xFFDDEDDC)
-                } else {
-                    Color(0xFFD2E4D2)
-                }
-                drawIsoTile(
-                    center = tile.center,
-                    tileWidth = layout.tileWidth,
-                    tileHeight = layout.tileHeight,
-                    fill = baseColor,
-                    border = Color(0xFFB4CBB4)
+        clipRect {
+            withTransform({
+                translate(left = pan.x, top = pan.y)
+                scale(
+                    scaleX = zoomScale,
+                    scaleY = zoomScale,
+                    pivot = Offset(size.width / 2f, size.height / 2f)
                 )
-            }
+            }) {
+                drawRoundRect(
+                    color = Color(0xFFEAF3F0),
+                    cornerRadius = CornerRadius(layout.tileWidth * 0.22f, layout.tileWidth * 0.22f)
+                )
 
-            if (selectedPlotKey != null) {
-                layout.tiles.firstOrNull { it.key == selectedPlotKey }?.let { tile ->
-                    drawSelectedIsoTile(
-                        center = tile.center,
-                        tileWidth = layout.tileWidth,
-                        tileHeight = layout.tileHeight
-                    )
-                }
-            }
-
-            layout.tiles.forEach { tile ->
-                plotByKey[tile.key]?.let { plot ->
-                    drawFarmCrop(
-                        plot = plot,
+                layout.tiles.forEach { tile ->
+                    val baseColor = if ((tile.key.row + tile.key.col) % 2 == 0) {
+                        Color(0xFFDDEDDC)
+                    } else {
+                        Color(0xFFD2E4D2)
+                    }
+                    drawIsoTile(
                         center = tile.center,
                         tileWidth = layout.tileWidth,
                         tileHeight = layout.tileHeight,
-                        dateSeed = snapshot.dateId
+                        fill = baseColor,
+                        border = Color(0xFFB4CBB4)
                     )
+                }
+
+                if (selectedPlotKey != null) {
+                    layout.tiles.firstOrNull { it.key == selectedPlotKey }?.let { tile ->
+                        drawSelectedIsoTile(
+                            center = tile.center,
+                            tileWidth = layout.tileWidth,
+                            tileHeight = layout.tileHeight
+                        )
+                    }
+                }
+
+                layout.tiles.forEach { tile ->
+                    plotByKey[tile.key]?.let { plot ->
+                        drawFarmCrop(
+                            plot = plot,
+                            center = tile.center,
+                            tileWidth = layout.tileWidth,
+                            tileHeight = layout.tileHeight,
+                            dateSeed = snapshot.dateId
+                        )
+                    }
                 }
             }
         }

@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -77,7 +76,7 @@ fun CalendarRoute(
             repository = repository,
             knowledgeIngestionCoordinator = knowledgeIngestionCoordinator,
             dateId = date,
-            screenTitle = "日历",
+            screenTitle = "这一天的知识农场",
             screenSubtitle = displayDateLabel(date),
             showQuickInput = false,
             onNavigateBack = { selectedDate = null }
@@ -153,12 +152,10 @@ private fun CalendarScreen(
                     onDateClick = onDateClick
                 )
             }
-            item {
-                MonthSummary(
-                    daySummaries = daySummaries,
-                    markerByDate = markerByDate,
-                    onDateClick = onDateClick
-                )
+            if (daySummaries.isEmpty() && markerByDate.isEmpty()) {
+                item {
+                    EmptyMonthCard()
+                }
             }
         }
     }
@@ -249,6 +246,7 @@ private fun MonthGrid(
                     }
                 }
             }
+            CalendarFarmLegend()
         }
     }
 }
@@ -450,92 +448,59 @@ private enum class MiniCropStage {
     MATURE
 }
 
-private fun Int?.orZero(): Int = this ?: 0
-
 @Composable
-private fun MonthSummary(
-    daySummaries: List<DaySummary>,
-    markerByDate: Map<String, CalendarFarmMarker>,
-    onDateClick: (String) -> Unit
-) {
-    if (daySummaries.isEmpty() && markerByDate.isEmpty()) {
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text(
-                    text = "本月暂无记录",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = "保存内容后，日历会标记对应日期。",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            }
-        }
-    } else {
-        val summaryByDate = daySummaries.associateBy { it.date }
-        val visibleDates = (summaryByDate.keys + markerByDate.keys).sortedDescending()
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(
-                text = "本月记录",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
-            visibleDates.forEach { date ->
-                DaySummaryCard(
-                    date = date,
-                    summary = summaryByDate[date],
-                    marker = markerByDate[date],
-                    onClick = { onDateClick(date) }
-                )
-            }
-        }
+private fun CalendarFarmLegend() {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        CalendarFarmLegendItem(stage = MiniCropStage.SAPLING, text = "待整理")
+        CalendarFarmLegendItem(stage = MiniCropStage.PLANT, text = "待确认")
+        CalendarFarmLegendItem(stage = MiniCropStage.MATURE, text = "已沉淀")
     }
 }
 
 @Composable
-private fun DaySummaryCard(
-    date: String,
-    summary: DaySummary?,
-    marker: CalendarFarmMarker?,
-    onClick: () -> Unit
+private fun CalendarFarmLegendItem(
+    stage: MiniCropStage,
+    text: String
 ) {
-    val totalCount = summary?.totalCount ?: 0
-    val pendingCount = summary?.pendingCount ?: 0
-    val reviewedCount = summary?.reviewedCount ?: 0
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        MiniCropMarker(stage = stage, count = 1)
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1
+        )
+    }
+}
+
+private fun Int?.orZero(): Int = this ?: 0
+
+@Composable
+private fun EmptyMonthCard() {
     Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
+        modifier = Modifier.fillMaxWidth()
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
-                text = displayDateLabel(date),
+                text = "本月暂无记录",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "保存 $totalCount 条 · 待整理 $pendingCount 条 · 已沉淀 $reviewedCount 条",
+                text = "保存内容后，日历会标记对应日期。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            if (marker?.hasFarmData == true) {
-                CalendarFarmMarkerStrip(marker = marker)
-            }
-            if (pendingCount > 0) {
-                Button(
-                    onClick = onClick,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(text = "继续回顾这一天")
-                }
-            }
         }
     }
 }

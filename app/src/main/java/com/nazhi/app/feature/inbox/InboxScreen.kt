@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -60,7 +61,6 @@ import com.nazhi.app.core.model.AudioTranscriptionJob
 import com.nazhi.app.core.model.AudioTranscriptionJobStatus
 import com.nazhi.app.core.model.DailyFarmSnapshot
 import com.nazhi.app.core.model.DayKnowledgeStatus
-import com.nazhi.app.core.model.IntentType
 import com.nazhi.app.core.model.KnowledgeIndexStatus
 import com.nazhi.app.core.model.KnowledgeDraftStatus
 import com.nazhi.app.core.model.KnowledgeEntry
@@ -635,7 +635,11 @@ fun InboxScreen(
                         onEditDraft = onEditDraft,
                         onSubmitDraft = onSubmitDraft,
                         onSubmitAllDrafts = onSubmitAllDrafts,
-                        onOpenKnowledge = onOpenKnowledge
+                        onOpenKnowledge = onOpenKnowledge,
+                        onOpenKnowledgeEntry = { entry ->
+                            selectedFarmEntry = entry
+                            selectedFarmEntrySourceNotes = notes.filter { note -> note.id in entry.sourceNoteIds }
+                        }
                     )
                 }
             }
@@ -770,11 +774,7 @@ private fun FarmPlotContentDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    text = if (plot.items.size == 1) {
-                        "这个地块对应 1 条内容"
-                    } else {
-                        "这个地块聚合了 ${plot.items.size} 条内容"
-                    },
+                    text = plot.contentSummaryText(),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -816,6 +816,18 @@ private fun FarmPlotContentRow(
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             Text(
+                text = item.ownerType.dialogLabel(),
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = when (item.ownerType) {
+                    FarmOwnerType.NOTE -> MaterialTheme.colorScheme.tertiary
+                    FarmOwnerType.DRAFT -> MaterialTheme.colorScheme.primary
+                    FarmOwnerType.KNOWLEDGE_ENTRY -> MaterialTheme.colorScheme.secondary
+                },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
                 text = item.title,
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
@@ -829,7 +841,7 @@ private fun FarmPlotContentRow(
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                text = "${item.ownerType.dialogLabel()} · ${item.charCount} 字 · ${item.ownerType.panelActionLabel()}",
+                text = "${item.charCount} 字 · ${item.ownerType.panelActionLabel()}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -935,7 +947,7 @@ private fun FarmDraftDetailDialog(
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = "来源 ${draft.sourceNoteIds.size} 条 · ${draft.intentType.label()} · ${draft.reviewLabel()} · 置信度 ${"%.2f".format(draft.confidence)}",
+                    text = "来源 ${draft.sourceNoteIds.size} 条 · ${draft.reviewLabel()} · 置信度 ${"%.2f".format(draft.confidence)}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1031,7 +1043,7 @@ private fun DraftEditDialog(
     var content by remember(draft.id) { mutableStateOf(draft.content) }
     var tagsText by remember(draft.id) { mutableStateOf(draft.tags.joinToString("，")) }
     var insight by remember(draft.id) { mutableStateOf(draft.insight.orEmpty()) }
-    var intentType by remember(draft.id) { mutableStateOf(draft.intentType) }
+    val intentType = draft.intentType
     val canSave = title.isNotBlank() && content.isNotBlank()
 
     AlertDialog(
@@ -1063,10 +1075,6 @@ private fun DraftEditDialog(
                     modifier = Modifier.fillMaxWidth(),
                     minLines = 4,
                     label = { Text(text = "正文") }
-                )
-                IntentTypeSelector(
-                    selected = intentType,
-                    onSelect = { intentType = it }
                 )
                 OutlinedTextField(
                     value = tagsText,
@@ -1108,42 +1116,6 @@ private fun DraftEditDialog(
             }
         }
     )
-}
-
-@Composable
-private fun IntentTypeSelector(
-    selected: IntentType,
-    onSelect: (IntentType) -> Unit
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(
-            text = "类型",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            IntentType.entries.forEach { type ->
-                if (selected == type) {
-                    Button(
-                        onClick = { onSelect(type) },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text(text = type.label())
-                    }
-                } else {
-                    OutlinedButton(
-                        onClick = { onSelect(type) },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text(text = type.label())
-                    }
-                }
-            }
-        }
-    }
 }
 
 @Composable
@@ -1372,7 +1344,8 @@ private fun TodayPanelCard(
     onEditDraft: (KnowledgeEntryDraft) -> Unit,
     onSubmitDraft: (KnowledgeEntryDraft) -> Unit,
     onSubmitAllDrafts: () -> Unit,
-    onOpenKnowledge: () -> Unit
+    onOpenKnowledge: () -> Unit,
+    onOpenKnowledgeEntry: (KnowledgeEntry) -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -1433,7 +1406,10 @@ private fun TodayPanelCard(
                         )
                     } else {
                         knowledgeEntries.take(5).forEach { entry ->
-                            KnowledgeEntrySummaryCard(entry = entry)
+                            KnowledgeEntrySummaryCard(
+                                entry = entry,
+                                onOpen = { onOpenKnowledgeEntry(entry) }
+                            )
                         }
                     }
                 }
@@ -1511,7 +1487,7 @@ private fun KnowledgeDraftSummaryCard(
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                text = "来源 ${draft.sourceNoteIds.size} 条 · ${draft.intentType.label()} · ${draft.reviewLabel()}",
+                text = "来源 ${draft.sourceNoteIds.size} 条 · ${draft.reviewLabel()}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1535,9 +1511,14 @@ private fun KnowledgeDraftSummaryCard(
 }
 
 @Composable
-private fun KnowledgeEntrySummaryCard(entry: KnowledgeEntry) {
+private fun KnowledgeEntrySummaryCard(
+    entry: KnowledgeEntry,
+    onOpen: () -> Unit
+) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpen),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainer
         )
@@ -1560,7 +1541,7 @@ private fun KnowledgeEntrySummaryCard(entry: KnowledgeEntry) {
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                text = "${entry.intentType.label()} · ${entry.indexStatus.label()} · 来源 ${entry.sourceNoteIds.size} 条",
+                text = "${entry.indexStatus.label()} · 来源 ${entry.sourceNoteIds.size} 条",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1736,7 +1717,7 @@ private fun QuickInputCard(
                 onValueChange = onInputChange,
                 modifier = Modifier.fillMaxWidth(),
                 minLines = 4,
-                label = { Text("保存文章摘录、链接或灵感") }
+                label = { Text("保存文章摘录、链接或临时想法") }
             )
             OutlinedButton(
                 onClick = onPasteClipboard,
@@ -1768,7 +1749,7 @@ private fun EmptyInboxCard(showQuickInput: Boolean) {
             )
             Text(
                 text = if (showQuickInput) {
-                    "先保存一段文章摘录、链接或灵感。"
+                    "先保存一段文章摘录、链接或临时想法。"
                 } else {
                     "可以回到日历选择其他日期查看。"
                 },
@@ -2134,14 +2115,6 @@ private fun NoteStatus.label(): String {
     }
 }
 
-private fun IntentType.label(): String {
-    return when (this) {
-        IntentType.READ_LATER -> "稍后看"
-        IntentType.QUOTABLE -> "可引用"
-        IntentType.INSPIRATION -> "灵感"
-    }
-}
-
 private fun KnowledgeEntryDraft.reviewLabel(): String {
     return if (needsReview) "需确认" else "可沉淀"
 }
@@ -2165,6 +2138,27 @@ private fun FarmStage.dialogTitle(): String {
 
 private fun FarmPlotUiModel.farmDialogTitle(): String {
     return "这块农田：${stage.dialogTitle()}"
+}
+
+private fun FarmPlotUiModel.contentSummaryText(): String {
+    val prefix = if (items.size == 1) {
+        "这个地块对应 1 条内容"
+    } else {
+        "这个地块聚合了 ${items.size} 条内容"
+    }
+    val statusParts = listOf(
+        FarmOwnerType.NOTE to "待整理",
+        FarmOwnerType.DRAFT to "待确认",
+        FarmOwnerType.KNOWLEDGE_ENTRY to "已沉淀"
+    ).mapNotNull { (ownerType, label) ->
+        val count = items.count { it.ownerType == ownerType }
+        if (count > 0) "$label $count" else null
+    }
+    return if (statusParts.isEmpty()) {
+        prefix
+    } else {
+        "$prefix：${statusParts.joinToString(" · ")}"
+    }
 }
 
 private fun FarmOwnerType.dialogLabel(): String {

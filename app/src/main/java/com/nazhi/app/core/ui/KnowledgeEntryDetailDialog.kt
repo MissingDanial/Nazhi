@@ -19,7 +19,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.nazhi.app.core.model.IntentType
 import com.nazhi.app.core.model.KnowledgeEntry
 import com.nazhi.app.core.model.KnowledgeIndexStatus
 import com.nazhi.app.core.model.Note
@@ -95,7 +94,7 @@ fun KnowledgeEntryDetailDialog(
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = "${entry.intentType.label()} · ${entry.confirmedDate} · ${entry.indexStatus.label()}",
+                    text = "${entry.confirmedDate} · ${entry.indexStatus.label()}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -198,14 +197,6 @@ fun KnowledgeEntryDetailDialog(
             }
         }
     )
-}
-
-private fun IntentType.label(): String {
-    return when (this) {
-        IntentType.READ_LATER -> "稍后看"
-        IntentType.QUOTABLE -> "可引用"
-        IntentType.INSPIRATION -> "灵感"
-    }
 }
 
 private fun SourceType.label(): String {
