@@ -46,7 +46,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.nazhi.app.core.model.AiTaskProgress
 import com.nazhi.app.core.model.DayKnowledgeStatus
-import com.nazhi.app.core.model.IntentType
 import com.nazhi.app.core.model.KnowledgeDraftStatus
 import com.nazhi.app.core.model.KnowledgeEntry
 import com.nazhi.app.core.model.KnowledgeEntryDraft
@@ -59,8 +58,12 @@ import com.nazhi.app.core.knowledge.KnowledgeIngestionState
 import com.nazhi.app.core.knowledge.KnowledgeTaskKind
 import com.nazhi.app.core.network.NazhiBackendException
 import com.nazhi.app.core.repository.NazhiRepository
+import com.nazhi.app.core.ui.EditableKnowledgeEntryDialog
+import com.nazhi.app.core.ui.EditableSourceNoteDialog
 import com.nazhi.app.core.ui.KnowledgeEntryDetailDialog
+import com.nazhi.app.core.util.extractFirstUrl
 import com.nazhi.app.core.util.todayDateId
+import com.nazhi.app.core.util.toNazhiTitle
 import kotlinx.coroutines.launch
 
 @Composable
@@ -93,11 +96,11 @@ fun KnowledgeRoute(
     var results by remember { mutableStateOf<List<SemanticSearchResult>>(emptyList()) }
     var hasSearched by remember { mutableStateOf(false) }
     var entrySearchQuery by remember { mutableStateOf("") }
-    var entryIndexFilter by remember { mutableStateOf(KnowledgeEntryIndexFilter.ALL) }
     var isSubmitting by remember { mutableStateOf(false) }
     var isUpdatingEntry by remember { mutableStateOf(false) }
     var editingDraft by remember { mutableStateOf<KnowledgeEntryDraft?>(null) }
     var editingEntry by remember { mutableStateOf<KnowledgeEntry?>(null) }
+    var editingSourceNote by remember { mutableStateOf<Note?>(null) }
     var sourceDialogTitle by remember { mutableStateOf<String?>(null) }
     var sourceDialogNotes by remember { mutableStateOf<List<Note>>(emptyList()) }
     var detailEntry by remember { mutableStateOf<KnowledgeEntry?>(null) }
@@ -146,7 +149,6 @@ fun KnowledgeRoute(
         results = results,
         hasSearched = hasSearched,
         entrySearchQuery = entrySearchQuery,
-        entryIndexFilter = entryIndexFilter,
         isOrganizing = knowledgeIngestionState.isRunning &&
             knowledgeIngestionState.taskKind == KnowledgeTaskKind.ORGANIZE,
         organizeProgress = knowledgeIngestionState.progress,
@@ -163,7 +165,6 @@ fun KnowledgeRoute(
             }
         },
         onEntrySearchQueryChange = { entrySearchQuery = it },
-        onEntryFilterChange = { entryIndexFilter = it },
         onOrganizeToday = {
             knowledgeIngestionCoordinator.organizeToday(today)
         },
@@ -236,12 +237,12 @@ fun KnowledgeRoute(
                 isUpdatingEntry = true
                 val message = runCatching {
                     if (repository.indexKnowledgeEntry(entry.id)) {
-                        "问答索引已更新"
+                        "问答能力已更新"
                     } else {
-                        "索引更新失败，请检查网络或 API 配置后重试"
+                        "问答能力更新失败，请检查网络或 API 配置后重试"
                     }
                 }.getOrElse { error ->
-                    "索引更新失败：${error.toUserFacingMessage()}"
+                    "问答能力更新失败：${error.toUserFacingMessage()}"
                 }
                 isUpdatingEntry = false
                 snackbarHostState.showSnackbar(message)
@@ -264,7 +265,7 @@ fun KnowledgeRoute(
     }
 
     editingEntry?.let { entry ->
-        KnowledgeEntryEditDialog(
+        EditableKnowledgeEntryDialog(
             entry = entry,
             isSaving = isUpdatingEntry,
             onDismiss = {
@@ -282,11 +283,14 @@ fun KnowledgeRoute(
                     result.fold(
                         onSuccess = { indexed ->
                             editingEntry = null
+                            if (detailEntry?.id == updatedEntry.id) {
+                                detailEntry = repository.getKnowledgeEntry(updatedEntry.id) ?: updatedEntry
+                            }
                             snackbarHostState.showSnackbar(
                                 if (indexed) {
-                                    "已保存并更新问答索引"
+                                    "已保存并更新问答能力"
                                 } else {
-                                    "已保存，索引更新失败，可稍后重试"
+                                    "已保存，问答能力更新失败，可稍后重试"
                                 }
                             )
                         },
@@ -294,6 +298,29 @@ fun KnowledgeRoute(
                             snackbarHostState.showSnackbar("保存失败：${error.toUserFacingMessage()}")
                         }
                     )
+                }
+            }
+        )
+    }
+
+    editingSourceNote?.let { note ->
+        EditableSourceNoteDialog(
+            note = note,
+            onDismiss = { editingSourceNote = null },
+            onConfirm = { content, remark ->
+                coroutineScope.launch {
+                    val now = System.currentTimeMillis()
+                    repository.updateNoteContent(
+                        id = note.id,
+                        content = content,
+                        title = content.toNazhiTitle(),
+                        sourceUrl = content.extractFirstUrl(),
+                        userRemark = remark.takeIf { it.isNotBlank() },
+                        updatedAt = now
+                    )
+                    editingSourceNote = null
+                    detailSourceNotes = repository.getNotesByIds(detailEntry?.sourceNoteIds.orEmpty())
+                    snackbarHostState.showSnackbar("原始 Note 已更新")
                 }
             }
         )
@@ -323,6 +350,16 @@ fun KnowledgeRoute(
             onCopyNote = { note ->
                 context.copyToClipboard(label = "纳知原始 Note", text = note.content)
             },
+            onEditEntry = {
+                detailEntry = null
+                detailSourceNotes = emptyList()
+                editingEntry = entry
+            },
+            onEditNote = { note ->
+                detailEntry = null
+                detailSourceNotes = emptyList()
+                editingSourceNote = note
+            },
             onDismiss = {
                 detailEntry = null
                 detailSourceNotes = emptyList()
@@ -346,7 +383,6 @@ private fun KnowledgeScreen(
     results: List<SemanticSearchResult>,
     hasSearched: Boolean,
     entrySearchQuery: String,
-    entryIndexFilter: KnowledgeEntryIndexFilter,
     isOrganizing: Boolean,
     organizeProgress: AiTaskProgress?,
     isSubmitting: Boolean,
@@ -356,7 +392,6 @@ private fun KnowledgeScreen(
     snackbarHostState: SnackbarHostState,
     onQueryChange: (String) -> Unit,
     onEntrySearchQueryChange: (String) -> Unit,
-    onEntryFilterChange: (KnowledgeEntryIndexFilter) -> Unit,
     onOrganizeToday: () -> Unit,
     onSubmitDraft: (KnowledgeEntryDraft) -> Unit,
     onEditDraft: (KnowledgeEntryDraft) -> Unit,
@@ -370,9 +405,9 @@ private fun KnowledgeScreen(
     onEditEntry: (KnowledgeEntry) -> Unit,
     onReindexEntry: (KnowledgeEntry) -> Unit
 ) {
-    val visibleEntries = remember(entries, entrySearchQuery, entryIndexFilter) {
+    val visibleEntries = remember(entries, entrySearchQuery) {
         entries.filter { entry ->
-            entry.matchesKeyword(entrySearchQuery) && entry.matchesIndexFilter(entryIndexFilter)
+            entry.matchesKeyword(entrySearchQuery)
         }
     }
 
@@ -383,7 +418,7 @@ private fun KnowledgeScreen(
                     Column {
                         Text(text = "知识库")
                         Text(
-                            text = "AI 整理、提交入库与本地向量检索",
+                            text = "检索与查看已沉淀知识",
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
@@ -399,46 +434,6 @@ private fun KnowledgeScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            item {
-                DayKnowledgeStatusCard(
-                    today = today,
-                    status = dayStatus,
-                    hasReviewRequiredDrafts = drafts.any {
-                        it.status == KnowledgeDraftStatus.PENDING && it.needsReview
-                    },
-                    hasDuplicateDrafts = hasDuplicateDrafts,
-                    isOrganizing = isOrganizing,
-                    organizeProgress = organizeProgress,
-                    isSubmitting = isSubmitting,
-                    knowledgeIngestionState = knowledgeIngestionState,
-                    pendingIndexCount = pendingIndexCount,
-                    failedIndexCount = failedIndexCount,
-                    onOrganizeToday = onOrganizeToday,
-                    onSubmitAll = onSubmitAll,
-                    onRetryIndex = onRetryIndex
-                )
-            }
-
-            if (drafts.any { it.status == KnowledgeDraftStatus.PENDING }) {
-                item {
-                    SectionTitle(text = "待确认 AI 草稿")
-                }
-                items(
-                    items = drafts.filter { it.status == KnowledgeDraftStatus.PENDING },
-                    key = { draft -> draft.id }
-                ) { draft ->
-                    KnowledgeDraftCard(
-                        draft = draft,
-                        duplicateEntry = draft.findDuplicateEntry(entries),
-                        isSubmitting = isSubmitting,
-                        onSubmit = { onSubmitDraft(draft) },
-                        onEdit = { onEditDraft(draft) },
-                        onViewSources = { onViewSources(draft) },
-                        onSkip = { onSkipDraft(draft) }
-                    )
-                }
-            }
-
             item {
                 KnowledgeSearchCard(
                     entryCount = entries.size,
@@ -458,7 +453,7 @@ private fun KnowledgeScreen(
                 }
                 if (results.isEmpty()) {
                     item {
-                        EmptyKnowledgeCard(text = "没有找到相近内容。可先完成今日入库，或换一个问题。")
+                        EmptyKnowledgeCard(text = "没有找到相近内容。可先完成今日沉淀，或换一个问题。")
                     }
                 } else {
                     items(
@@ -474,16 +469,14 @@ private fun KnowledgeScreen(
                 }
             } else {
                 item {
-                    SectionTitle(text = "已入库内容")
+                    SectionTitle(text = "已沉淀内容")
                 }
                 item {
                     KnowledgeEntryManagementCard(
                         query = entrySearchQuery,
-                        selectedFilter = entryIndexFilter,
                         totalCount = entries.size,
                         visibleCount = visibleEntries.size,
-                        onQueryChange = onEntrySearchQueryChange,
-                        onFilterChange = onEntryFilterChange
+                        onQueryChange = onEntrySearchQueryChange
                     )
                 }
                 if (entries.isEmpty()) {
@@ -502,10 +495,7 @@ private fun KnowledgeScreen(
                         KnowledgeEntryCard(
                             entry = entry,
                             onViewEntry = { onViewEntry(entry) },
-                            onCopy = { onCopy(entry) },
-                            onEdit = { onEditEntry(entry) },
-                            onReindex = { onReindexEntry(entry) },
-                            actionsEnabled = !isUpdatingEntry
+                            onCopy = { onCopy(entry) }
                         )
                     }
                 }
@@ -537,7 +527,7 @@ private fun DayKnowledgeStatusCard(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
-                text = "今日入库状态 · $today",
+                text = "今日沉淀状态 · $today",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
             )
@@ -547,7 +537,7 @@ private fun DayKnowledgeStatusCard(
                 color = MaterialTheme.colorScheme.primary
             )
             Text(
-                text = "笔记 ${status.noteCount} 条 · 待回顾 ${status.pendingNoteCount} 条 · 草稿 ${status.pendingDraftCount}/${status.draftCount} 条 · 已入库 ${status.knowledgeEntryCount} 条 · 已索引 ${status.indexedEntryCount} 条",
+                text = "笔记 ${status.noteCount} 条 · 待整理 ${status.pendingNoteCount} 条 · 待确认 ${status.pendingDraftCount} 条 · 已沉淀 ${status.indexedEntryCount} 条",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -599,25 +589,25 @@ private fun DayKnowledgeStatusCard(
                 ) {
                     Text(
                         text = when {
-                            knowledgeIngestionState.isRunning -> "入库中"
+                            knowledgeIngestionState.isRunning -> "沉淀中"
                             isSubmitting -> "提交中"
                             hasDuplicateDrafts -> "先处理重复"
                             hasReviewRequiredDrafts -> "先确认草稿"
-                            else -> "提交入库"
+                            else -> "确认沉淀"
                         }
                     )
                 }
             }
             if (hasReviewRequiredDrafts) {
                 Text(
-                    text = "存在需确认草稿，需逐条查看后再入库。",
+                    text = "存在待确认草稿，需逐条查看后再沉淀。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             if (hasDuplicateDrafts) {
                 Text(
-                    text = "存在疑似重复草稿，请先跳过或编辑后再入库。",
+                    text = "存在疑似重复草稿，请先跳过或编辑后再沉淀。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -640,10 +630,10 @@ private fun DayKnowledgeStatusCard(
             ) {
                 Text(
                     text = when {
-                        knowledgeIngestionState.isRunning -> knowledgeIngestionState.runningLabel ?: "向量入库中"
-                        failedIndexCount > 0 -> "重试失败索引"
-                        pendingIndexCount > 0 -> "重建待索引知识"
-                        else -> "索引已完成"
+                        knowledgeIngestionState.isRunning -> knowledgeIngestionState.runningLabel ?: "沉淀中"
+                        failedIndexCount > 0 -> "重试沉淀"
+                        pendingIndexCount > 0 -> "完成已沉淀知识"
+                        else -> "已沉淀"
                     }
                 )
             }
@@ -680,7 +670,7 @@ private fun KnowledgeDraftCard(
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                text = "来源 ${draft.sourceNoteIds.size} 条 · ${draft.intentType.label()} · ${draft.reviewLabel()} · 置信度 ${"%.2f".format(draft.confidence)}",
+                text = "来源 ${draft.sourceNoteIds.size} 条 · ${draft.reviewLabel()} · 置信度 ${"%.2f".format(draft.confidence)}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -740,7 +730,7 @@ private fun KnowledgeDraftCard(
                         onClick = onSubmit,
                         enabled = !isSubmitting && duplicateEntry == null
                     ) {
-                        Text(text = if (duplicateEntry == null) "确认入库" else "重复不可入库")
+                        Text(text = if (duplicateEntry == null) "确认沉淀" else "重复，需处理")
                     }
                 }
             }
@@ -790,10 +780,6 @@ private fun DraftEditDialog(
                     minLines = 4,
                     label = { Text(text = "正文") }
                 )
-                IntentTypeSelector(
-                    selected = intentType,
-                    onSelect = { intentType = it }
-                )
                 OutlinedTextField(
                     value = tagsText,
                     onValueChange = { tagsText = it },
@@ -834,144 +820,6 @@ private fun DraftEditDialog(
             }
         }
     )
-}
-
-@Composable
-private fun KnowledgeEntryEditDialog(
-    entry: KnowledgeEntry,
-    isSaving: Boolean,
-    onDismiss: () -> Unit,
-    onConfirm: (KnowledgeEntry) -> Unit
-) {
-    var title by remember(entry.id) { mutableStateOf(entry.userTitle.orEmpty()) }
-    var summary by remember(entry.id) { mutableStateOf(entry.summary) }
-    var content by remember(entry.id) { mutableStateOf(entry.content) }
-    var tagsText by remember(entry.id) { mutableStateOf(entry.tags.joinToString("，")) }
-    var remark by remember(entry.id) { mutableStateOf(entry.userRemark.orEmpty()) }
-    var intentType by remember(entry.id) { mutableStateOf(entry.intentType) }
-    val canSave = content.isNotBlank() && !isSaving
-
-    AlertDialog(
-        onDismissRequest = {
-            if (!isSaving) {
-                onDismiss()
-            }
-        },
-        title = { Text(text = "编辑知识条目") },
-        text = {
-            Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                OutlinedTextField(
-                    value = title,
-                    onValueChange = { title = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text(text = "标题") }
-                )
-                OutlinedTextField(
-                    value = summary,
-                    onValueChange = { summary = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 2,
-                    label = { Text(text = "摘要") }
-                )
-                OutlinedTextField(
-                    value = content,
-                    onValueChange = { content = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 5,
-                    label = { Text(text = "正文") }
-                )
-                IntentTypeSelector(
-                    selected = intentType,
-                    onSelect = { intentType = it }
-                )
-                OutlinedTextField(
-                    value = tagsText,
-                    onValueChange = { tagsText = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text(text = "标签，用逗号分隔") }
-                )
-                OutlinedTextField(
-                    value = remark,
-                    onValueChange = { remark = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 2,
-                    label = { Text(text = "备注，可选") }
-                )
-                Text(
-                    text = if (isSaving) "正在保存并更新问答索引" else "保存后会更新该条目的问答索引。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = {
-                    onConfirm(
-                        entry.copy(
-                            userTitle = title.trim().takeIf { it.isNotBlank() },
-                            summary = summary.trim(),
-                            content = content.trim(),
-                            intentType = intentType,
-                            tags = tagsText.toTagList(),
-                            userRemark = remark.trim().takeIf { it.isNotBlank() },
-                            indexStatus = KnowledgeIndexStatus.PENDING
-                        )
-                    )
-                },
-                enabled = canSave
-            ) {
-                Text(text = if (isSaving) "保存中" else "保存")
-            }
-        },
-        dismissButton = {
-            TextButton(
-                onClick = onDismiss,
-                enabled = !isSaving
-            ) {
-                Text(text = "取消")
-            }
-        }
-    )
-}
-
-@Composable
-private fun IntentTypeSelector(
-    selected: IntentType,
-    onSelect: (IntentType) -> Unit
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(
-            text = "类型",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            IntentType.entries.forEach { type ->
-                if (selected == type) {
-                    Button(
-                        onClick = { onSelect(type) },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text(text = type.label())
-                    }
-                } else {
-                    OutlinedButton(
-                        onClick = { onSelect(type) },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text(text = type.label())
-                    }
-                }
-            }
-        }
-    }
 }
 
 @Composable
@@ -1047,20 +895,14 @@ private fun KnowledgeSearchCard(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
-                text = "本地向量检索",
+                text = "本地知识检索",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "知识条目 $entryCount 条 · 已索引 $indexedEntryCount 条 · 本地向量 $embeddingCount 条",
+                text = "已沉淀知识 $indexedEntryCount 条",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            KnowledgeIndexStatusHint(
-                entryCount = entryCount,
-                indexedEntryCount = indexedEntryCount,
-                pendingIndexCount = pendingIndexCount,
-                failedIndexCount = failedIndexCount
             )
             OutlinedTextField(
                 value = query,
@@ -1076,8 +918,7 @@ private fun KnowledgeSearchCard(
             ) {
                 Text(
                     text = when {
-                        entryCount == 0 -> "先完成知识入库"
-                        indexedEntryCount == 0 -> "先重建索引"
+                        entryCount == 0 || indexedEntryCount == 0 -> "暂无可检索内容"
                         else -> "语义检索"
                     }
                 )
@@ -1089,11 +930,9 @@ private fun KnowledgeSearchCard(
 @Composable
 private fun KnowledgeEntryManagementCard(
     query: String,
-    selectedFilter: KnowledgeEntryIndexFilter,
     totalCount: Int,
     visibleCount: Int,
-    onQueryChange: (String) -> Unit,
-    onFilterChange: (KnowledgeEntryIndexFilter) -> Unit
+    onQueryChange: (String) -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -1112,44 +951,11 @@ private fun KnowledgeEntryManagementCard(
                 label = { Text(text = "搜索标题、摘要、正文或标签") },
                 singleLine = true
             )
-            KnowledgeEntryIndexFilterSelector(
-                selected = selectedFilter,
-                onSelect = onFilterChange
-            )
             Text(
                 text = "显示 $visibleCount / $totalCount 条",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-        }
-    }
-}
-
-@Composable
-private fun KnowledgeEntryIndexFilterSelector(
-    selected: KnowledgeEntryIndexFilter,
-    onSelect: (KnowledgeEntryIndexFilter) -> Unit
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        KnowledgeEntryIndexFilter.entries.forEach { filter ->
-            if (selected == filter) {
-                Button(
-                    onClick = { onSelect(filter) },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(text = filter.label)
-                }
-            } else {
-                OutlinedButton(
-                    onClick = { onSelect(filter) },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(text = filter.label)
-                }
-            }
         }
     }
 }
@@ -1164,13 +970,13 @@ private fun KnowledgeIndexStatusHint(
     val text = when {
         entryCount == 0 -> "当前还没有知识条目。"
         indexedEntryCount == 0 && pendingIndexCount > 0 -> {
-            "知识库已有内容但尚未完成索引，请点击上方“重试向量入库”后再检索或问答。"
+            "知识库已有内容但尚未完成沉淀，请点击上方“重试沉淀”后再检索或问答。"
         }
         indexedEntryCount == 0 && failedIndexCount > 0 -> {
-            "知识索引失败，请检查网络或 API 配置后重试向量入库。"
+            "知识处理失败，请检查网络或 API 配置后重试。"
         }
         pendingIndexCount > 0 || failedIndexCount > 0 -> {
-            "部分知识尚未索引，当前检索和问答只会使用已索引内容。"
+            "部分知识尚未完成沉淀，当前检索和问答只会使用已沉淀内容。"
         }
         else -> null
     }
@@ -1237,7 +1043,7 @@ private fun KnowledgeEntryCard(
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                text = "${entry.intentType.label()} · ${entry.confirmedDate} · ${entry.indexStatus.label()}",
+                text = "${entry.confirmedDate} · ${entry.indexStatus.label()}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1343,44 +1149,26 @@ private fun com.nazhi.app.core.model.AiTaskStage.label(): String {
         com.nazhi.app.core.model.AiTaskStage.SAVING_RESULT -> "写入本地"
         com.nazhi.app.core.model.AiTaskStage.FALLBACK_DRAFTS -> "兜底草稿"
         com.nazhi.app.core.model.AiTaskStage.DONE -> "完成"
-        com.nazhi.app.core.model.AiTaskStage.FAILED -> "失败"
+        com.nazhi.app.core.model.AiTaskStage.FAILED -> "处理失败"
         com.nazhi.app.core.model.AiTaskStage.UNKNOWN -> "处理中"
     }
 }
 
 private fun DayKnowledgeStatus.statusText(): String {
     return when {
-        noteCount == 0 -> "未收纳"
-        pendingDraftCount > 0 -> "草稿待确认"
-        failedIndexCount > 0 -> "部分失败，可重试"
-        isComplete -> "已完成入库"
-        knowledgeEntryCount > indexedEntryCount -> "向量入库中或待重试"
-        draftCount > 0 -> "草稿已处理"
-        pendingNoteCount > 0 -> "已保存，待整理"
-        else -> "未整理"
+        noteCount == 0 -> "待整理"
+        pendingDraftCount > 0 -> "待确认"
+        failedIndexCount > 0 -> "处理失败"
+        isComplete -> "已沉淀"
+        knowledgeEntryCount > indexedEntryCount -> "已沉淀"
+        draftCount > 0 -> "已沉淀"
+        pendingNoteCount > 0 -> "待整理"
+        else -> "待整理"
     }
 }
 
 private fun KnowledgeEntryDraft.reviewLabel(): String {
-    return if (needsReview) "需确认" else "可确认"
-}
-
-private enum class KnowledgeEntryIndexFilter(val label: String) {
-    ALL("全部"),
-    INDEXED("已索引"),
-    PENDING("待更新"),
-    FAILED("失败")
-}
-
-private fun KnowledgeEntry.matchesIndexFilter(filter: KnowledgeEntryIndexFilter): Boolean {
-    return when (filter) {
-        KnowledgeEntryIndexFilter.ALL -> true
-        KnowledgeEntryIndexFilter.INDEXED -> indexStatus == KnowledgeIndexStatus.INDEXED
-        KnowledgeEntryIndexFilter.PENDING -> {
-            indexStatus == KnowledgeIndexStatus.PENDING || indexStatus == KnowledgeIndexStatus.INDEXING
-        }
-        KnowledgeEntryIndexFilter.FAILED -> indexStatus == KnowledgeIndexStatus.FAILED
-    }
+    return "待确认"
 }
 
 private fun KnowledgeEntry.matchesKeyword(query: String): Boolean {
@@ -1392,7 +1180,6 @@ private fun KnowledgeEntry.matchesKeyword(query: String): Boolean {
         summary,
         content,
         userRemark.orEmpty(),
-        intentType.label(),
         createdDate,
         confirmedDate,
         indexStatus.label()
@@ -1402,9 +1189,9 @@ private fun KnowledgeEntry.matchesKeyword(query: String): Boolean {
 
 private fun KnowledgeEntry.indexActionText(): String {
     return when (indexStatus) {
-        KnowledgeIndexStatus.FAILED -> "重试索引"
-        KnowledgeIndexStatus.INDEXING -> "索引中"
-        else -> "更新索引"
+        KnowledgeIndexStatus.FAILED -> "重试沉淀"
+        KnowledgeIndexStatus.INDEXING -> "沉淀中"
+        else -> "更新沉淀"
     }
 }
 
@@ -1414,14 +1201,6 @@ private fun String.toTagList(): List<String> {
         .filter { it.isNotBlank() }
         .distinct()
         .take(8)
-}
-
-private fun IntentType.label(): String {
-    return when (this) {
-        IntentType.READ_LATER -> "稍后看"
-        IntentType.QUOTABLE -> "可引用"
-        IntentType.INSPIRATION -> "灵感"
-    }
 }
 
 private fun com.nazhi.app.core.model.SourceType.label(): String {
@@ -1438,7 +1217,7 @@ private fun Throwable.toUserFacingMessage(): String {
     return when (this) {
         is NazhiBackendException -> when {
             statusCode == 401 || code == "UNAUTHORIZED" -> "鉴权失败，请检查设置页中的 NAZHI_DEV_TOKEN。"
-            code == "MINIMAX_CHAT_FAILED" -> "模型生成失败，请稍后重试或检查服务器日志。"
+            code == "MINIMAX_CHAT_FAILED" -> "模型处理失败，请稍后重试或检查服务器日志。"
             code == "MINIMAX_NOT_CONFIGURED" -> "服务器模型配置缺失，请检查 .env。"
             code == "MINIMAX_EMBEDDING_FAILED" -> "Embedding 模型调用失败，请稍后重试或检查服务器日志。"
             else -> publicMessage
@@ -1460,10 +1239,10 @@ private fun Throwable.toUserFacingMessage(): String {
 
 private fun com.nazhi.app.core.model.KnowledgeIndexStatus.label(): String {
     return when (this) {
-        com.nazhi.app.core.model.KnowledgeIndexStatus.PENDING -> "待索引"
-        com.nazhi.app.core.model.KnowledgeIndexStatus.INDEXING -> "索引中"
-        com.nazhi.app.core.model.KnowledgeIndexStatus.INDEXED -> "已索引"
-        com.nazhi.app.core.model.KnowledgeIndexStatus.FAILED -> "索引失败"
+        com.nazhi.app.core.model.KnowledgeIndexStatus.PENDING -> "已沉淀"
+        com.nazhi.app.core.model.KnowledgeIndexStatus.INDEXING -> "已沉淀"
+        com.nazhi.app.core.model.KnowledgeIndexStatus.INDEXED -> "已沉淀"
+        com.nazhi.app.core.model.KnowledgeIndexStatus.FAILED -> "处理失败"
     }
 }
 

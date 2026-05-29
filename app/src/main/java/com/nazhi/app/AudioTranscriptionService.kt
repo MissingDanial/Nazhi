@@ -257,7 +257,7 @@ class AudioTranscriptionService : Service() {
             val resultMessage = if (failed == 0) {
                 "已完成 $succeeded 条音频转写"
             } else {
-                "完成 $succeeded 条，失败 $failed 条"
+                "完成 $succeeded 条，处理失败 $failed 条"
             }
             updateState(
                 if (failed == 0) AudioFloatingState.SAVED else AudioFloatingState.FAILED,
@@ -382,7 +382,7 @@ class AudioTranscriptionService : Service() {
             if (currentTask.status == "FAILED") {
                 failTranscription(
                     localJobId,
-                    currentTask.error?.message ?: currentTask.message.ifBlank { "转写失败" },
+                    currentTask.error?.message ?: currentTask.message.ifBlank { "处理失败" },
                     stopWhenFinished
                 )
                 return false
@@ -746,7 +746,7 @@ private fun Throwable.toAudioUserMessage(): String {
         }
         raw.contains("401", ignoreCase = true) -> "后端鉴权失败，请检查服务 Token。"
         raw.isNotBlank() -> raw
-        else -> "转写失败，请稍后重试。"
+        else -> "处理失败，请稍后重试。"
     }
 }
 
@@ -760,6 +760,6 @@ private fun AudioFloatingState.defaultStatusText(): String {
         AudioFloatingState.TRANSCRIBING -> "音频转写中"
         AudioFloatingState.SAVING -> "正在加入今日收件箱"
         AudioFloatingState.SAVED -> "音频已加入今日收件箱"
-        AudioFloatingState.FAILED -> "转写失败"
+        AudioFloatingState.FAILED -> "处理失败"
     }
 }

@@ -40,6 +40,10 @@ import com.nazhi.app.core.model.AiTaskStage
 import com.nazhi.app.core.model.AiTaskStatus
 import com.nazhi.app.core.model.AudioTranscriptionJob
 import com.nazhi.app.core.model.AudioTranscriptionJobStatus
+import com.nazhi.app.core.model.CalendarDraftFarmSummary
+import com.nazhi.app.core.model.CalendarFarmMarker
+import com.nazhi.app.core.model.CalendarKnowledgeFarmSummary
+import com.nazhi.app.core.model.CalendarNoteFarmSummary
 import com.nazhi.app.core.model.ChatCitation
 import com.nazhi.app.core.model.ChatMessage
 import com.nazhi.app.core.model.ChatMessageStatus
@@ -136,6 +140,20 @@ class LocalNazhiRepository(
 
     override fun observeDaySummaries(startDate: String, endDate: String): Flow<List<DaySummary>> {
         return noteDao.observeDaySummaries(startDate, endDate)
+    }
+
+    override fun observeCalendarFarmMarkers(startDate: String, endDate: String): Flow<List<CalendarFarmMarker>> {
+        return combine(
+            noteDao.observeCalendarFarmNoteSummaries(startDate, endDate),
+            knowledgeEntryDraftDao.observeCalendarFarmDraftSummaries(startDate, endDate),
+            knowledgeEntryDao.observeCalendarFarmKnowledgeSummaries(startDate, endDate)
+        ) { noteSummaries, draftSummaries, knowledgeSummaries ->
+            buildCalendarFarmMarkers(
+                noteSummaries = noteSummaries,
+                draftSummaries = draftSummaries,
+                knowledgeSummaries = knowledgeSummaries
+            )
+        }
     }
 
     override suspend fun getNote(id: String): Note? {
@@ -688,7 +706,7 @@ class LocalNazhiRepository(
                 add("导入流程不会恢复 API Key、服务 Token 或后端配置。")
             }
             if (!payload.safety.excludesEmbeddingVectors || payload.knowledgeEntries.isNotEmpty()) {
-                add("导入不会恢复本地向量，知识条目会重新标记为待索引。")
+                add("导入后需要重新生成问答能力。")
             }
             add("同 ID 数据会跳过，不覆盖当前手机已有内容。")
         }
@@ -912,7 +930,7 @@ class LocalNazhiRepository(
                 status = AiTaskStatus.RUNNING,
                 stage = AiTaskStage.LOCAL_RETRIEVAL,
                 progress = 20,
-                message = "正在理解问题并生成检索向量"
+                message = "正在理解问题并检索知识"
             )
         )
         val retrievalContext = buildChatRetrievalContext(
@@ -966,7 +984,7 @@ class LocalNazhiRepository(
             return saveAssistantMessage(
                 sessionId = questionMessage.sessionId,
                 parentMessageId = questionMessage.id,
-                content = "当前知识库中没有足够信息回答这个问题。请先完成知识入库和向量索引，或换一个更具体的问题。",
+                content = "当前知识库中没有足够信息回答这个问题。请先完成知识沉淀，或换一个更具体的问题。",
                 status = ChatMessageStatus.DONE,
                 errorMessage = null,
                 attempt = attempt,
@@ -1061,7 +1079,7 @@ class LocalNazhiRepository(
             saveAssistantMessage(
                 sessionId = questionMessage.sessionId,
                 parentMessageId = questionMessage.id,
-                content = "回答生成失败。",
+                content = "回答处理失败。",
                 status = ChatMessageStatus.FAILED,
                 errorMessage = message,
                 attempt = attempt,
@@ -1089,7 +1107,7 @@ class LocalNazhiRepository(
                 )
             )
         )
-        val item = response.items.firstOrNull() ?: throw IOException("查询向量生成失败：后端返回为空。")
+        val item = response.items.firstOrNull() ?: throw IOException("查询处理失败：后端返回为空。")
         onProgress(
             AiTaskProgress(
                 status = AiTaskStatus.RUNNING,
@@ -1527,10 +1545,10 @@ class LocalNazhiRepository(
     private suspend fun ensureKnowledgeChatReady() {
         val entries = knowledgeEntryDao.getEntries()
         if (entries.isEmpty()) {
-            throw IllegalStateException("当前还没有知识条目，请先完成知识入库后再提问。")
+            throw IllegalStateException("当前还没有知识条目，请先完成知识沉淀后再提问。")
         }
         if (entries.none { it.indexStatus == KnowledgeIndexStatus.INDEXED }) {
-            throw IllegalStateException("知识库尚未完成索引，请先在知识库页重建索引后再提问。")
+            throw IllegalStateException("知识库尚未完成沉淀，请先在知识库页完成沉淀后再提问。")
         }
     }
 
@@ -1701,7 +1719,7 @@ class LocalNazhiRepository(
                 code == "DIRECT_API_EMBEDDING_FAILED" -> "Embedding API 调用失败，请检查模型名、Key 和服务额度。"
                 code == "DIRECT_API_EMBEDDING_SHAPE_UNSUPPORTED" -> publicMessage
                 statusCode == 401 || code == "UNAUTHORIZED" -> "后端鉴权失败，请检查设置页中的 NAZHI_DEV_TOKEN。"
-                code == "MINIMAX_CHAT_FAILED" -> "模型回答生成失败，请稍后重试或检查后端日志。"
+                code == "MINIMAX_CHAT_FAILED" -> "模型回答处理失败，请稍后重试或检查后端日志。"
                 code == "MINIMAX_NOT_CONFIGURED" -> "后端 Chat 模型未配置，请检查服务器 .env。"
                 else -> publicMessage
             }
@@ -1760,3 +1778,34 @@ class LocalNazhiRepository(
             ?: "未命名知识"
     }
 }
+
+private fun buildCalendarFarmMarkers(
+    noteSummaries: List<CalendarNoteFarmSummary>,
+    draftSummaries: List<CalendarDraftFarmSummary>,
+    knowledgeSummaries: List<CalendarKnowledgeFarmSummary>
+): List<CalendarFarmMarker> {
+    val notesByDate = noteSummaries.associateBy { it.date }
+    val draftsByDate = draftSummaries.associateBy { it.date }
+    val knowledgeByDate = knowledgeSummaries.associateBy { it.date }
+    val dates = notesByDate.keys + draftsByDate.keys + knowledgeByDate.keys
+
+    return dates
+        .map { date ->
+            val saplingCount = notesByDate[date].orZero { it.saplingUnits }.coerceAtMost(36)
+            val plantCount = draftsByDate[date].orZero { it.plantUnits }.coerceAtMost(36)
+            val matureCount = knowledgeByDate[date].orZero { it.matureUnits }.coerceAtMost(36)
+            val issueCount = knowledgeByDate[date].orZero { it.failedIndexCount }
+            CalendarFarmMarker(
+                date = date,
+                saplingCount = saplingCount,
+                plantCount = plantCount,
+                matureCount = matureCount,
+                issueCount = issueCount,
+                maturityScore = (saplingCount * 8 + plantCount * 18 + matureCount * 28).coerceIn(0, 100)
+            )
+        }
+        .filter { it.hasFarmData }
+        .sortedByDescending { it.date }
+}
+
+private inline fun <T> T?.orZero(selector: (T) -> Int): Int = this?.let(selector) ?: 0

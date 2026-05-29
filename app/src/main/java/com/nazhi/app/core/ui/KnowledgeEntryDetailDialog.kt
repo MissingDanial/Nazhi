@@ -3,6 +3,7 @@ package com.nazhi.app.core.ui
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -19,7 +20,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.nazhi.app.core.model.IntentType
 import com.nazhi.app.core.model.KnowledgeEntry
 import com.nazhi.app.core.model.KnowledgeIndexStatus
 import com.nazhi.app.core.model.Note
@@ -34,6 +34,8 @@ fun KnowledgeEntryDetailDialog(
     citationReason: String? = null,
     onCopyEntry: () -> Unit,
     onCopyNote: (Note) -> Unit,
+    onEditEntry: (() -> Unit)? = null,
+    onEditNote: ((Note) -> Unit)? = null,
     onCopyCitation: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
@@ -95,7 +97,7 @@ fun KnowledgeEntryDetailDialog(
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = "${entry.intentType.label()} · ${entry.confirmedDate} · ${entry.indexStatus.label()}",
+                    text = "${entry.confirmedDate} · ${entry.indexStatus.label()}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -104,14 +106,23 @@ fun KnowledgeEntryDetailDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                OutlinedButton(
-                    onClick = {
-                        onCopyEntry()
-                        copyFeedback = "已复制知识条目"
-                    },
-                    modifier = Modifier.fillMaxWidth()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
                 ) {
-                    Text(text = "复制知识条目")
+                    onEditEntry?.let { editEntry ->
+                        TextButton(onClick = editEntry) {
+                            Text(text = "编辑知识")
+                        }
+                    }
+                    TextButton(
+                        onClick = {
+                            onCopyEntry()
+                            copyFeedback = "已复制知识条目"
+                        }
+                    ) {
+                        Text(text = "复制知识")
+                    }
                 }
                 copyFeedback?.let { feedback ->
                     Text(
@@ -176,13 +187,23 @@ fun KnowledgeEntryDetailDialog(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
-                            TextButton(
-                                onClick = {
-                                    onCopyNote(note)
-                                    copyFeedback = "已复制第 ${index + 1} 条原始 Note"
-                                }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End
                             ) {
-                                Text(text = "复制这条 Note")
+                                onEditNote?.let { editNote ->
+                                    TextButton(onClick = { editNote(note) }) {
+                                        Text(text = "编辑 Note")
+                                    }
+                                }
+                                TextButton(
+                                    onClick = {
+                                        onCopyNote(note)
+                                        copyFeedback = "已复制第 ${index + 1} 条原始 Note"
+                                    }
+                                ) {
+                                    Text(text = "复制 Note")
+                                }
                             }
                         }
                         if (index != sourceNotes.lastIndex) {
@@ -200,14 +221,6 @@ fun KnowledgeEntryDetailDialog(
     )
 }
 
-private fun IntentType.label(): String {
-    return when (this) {
-        IntentType.READ_LATER -> "稍后看"
-        IntentType.QUOTABLE -> "可引用"
-        IntentType.INSPIRATION -> "灵感"
-    }
-}
-
 private fun SourceType.label(): String {
     return when (this) {
         SourceType.SHARE -> "分享"
@@ -220,9 +233,9 @@ private fun SourceType.label(): String {
 
 private fun KnowledgeIndexStatus.label(): String {
     return when (this) {
-        KnowledgeIndexStatus.PENDING -> "待索引"
-        KnowledgeIndexStatus.INDEXING -> "索引中"
-        KnowledgeIndexStatus.INDEXED -> "已索引"
-        KnowledgeIndexStatus.FAILED -> "索引失败"
+        KnowledgeIndexStatus.PENDING -> "已沉淀"
+        KnowledgeIndexStatus.INDEXING -> "已沉淀"
+        KnowledgeIndexStatus.INDEXED -> "已沉淀"
+        KnowledgeIndexStatus.FAILED -> "处理失败"
     }
 }

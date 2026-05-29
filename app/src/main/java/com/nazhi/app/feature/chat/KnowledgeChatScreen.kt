@@ -51,8 +51,13 @@ import com.nazhi.app.core.model.ChatSession
 import com.nazhi.app.core.model.KnowledgeEntry
 import com.nazhi.app.core.model.KnowledgeIndexStatus
 import com.nazhi.app.core.model.Note
+import com.nazhi.app.core.network.NazhiBackendException
 import com.nazhi.app.core.repository.NazhiRepository
+import com.nazhi.app.core.ui.EditableKnowledgeEntryDialog
+import com.nazhi.app.core.ui.EditableSourceNoteDialog
 import com.nazhi.app.core.ui.KnowledgeEntryDetailDialog
+import com.nazhi.app.core.util.extractFirstUrl
+import com.nazhi.app.core.util.toNazhiTitle
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
@@ -102,6 +107,9 @@ fun KnowledgeChatRoute(
     var detailEntry by remember { mutableStateOf<KnowledgeEntry?>(null) }
     var detailSourceNotes by remember { mutableStateOf<List<Note>>(emptyList()) }
     var detailCitation by remember { mutableStateOf<ChatCitation?>(null) }
+    var editingEntry by remember { mutableStateOf<KnowledgeEntry?>(null) }
+    var editingSourceNote by remember { mutableStateOf<Note?>(null) }
+    var isUpdatingEntry by remember { mutableStateOf(false) }
 
     LaunchedEffect(chatTaskState.eventId) {
         val message = chatTaskState.message
@@ -200,6 +208,63 @@ fun KnowledgeChatRoute(
         }
     )
 
+    editingEntry?.let { entry ->
+        EditableKnowledgeEntryDialog(
+            entry = entry,
+            isSaving = isUpdatingEntry,
+            onDismiss = {
+                if (!isUpdatingEntry) {
+                    editingEntry = null
+                }
+            },
+            onConfirm = { updatedEntry ->
+                coroutineScope.launch {
+                    isUpdatingEntry = true
+                    val result = runCatching {
+                        repository.updateKnowledgeEntry(updatedEntry, reindex = true)
+                    }
+                    isUpdatingEntry = false
+                    result.fold(
+                        onSuccess = { indexed ->
+                            editingEntry = null
+                            snackbarHostState.showSnackbar(
+                                if (indexed) {
+                                    "已保存并更新问答能力"
+                                } else {
+                                    "已保存，问答能力更新失败，可稍后重试"
+                                }
+                            )
+                        },
+                        onFailure = { error ->
+                            snackbarHostState.showSnackbar("保存失败：${error.toUserFacingMessage()}")
+                        }
+                    )
+                }
+            }
+        )
+    }
+
+    editingSourceNote?.let { note ->
+        EditableSourceNoteDialog(
+            note = note,
+            onDismiss = { editingSourceNote = null },
+            onConfirm = { content, remark ->
+                coroutineScope.launch {
+                    repository.updateNoteContent(
+                        id = note.id,
+                        content = content,
+                        title = content.toNazhiTitle(),
+                        sourceUrl = content.extractFirstUrl(),
+                        userRemark = remark.takeIf { it.isNotBlank() },
+                        updatedAt = System.currentTimeMillis()
+                    )
+                    editingSourceNote = null
+                    snackbarHostState.showSnackbar("原始 Note 已更新")
+                }
+            }
+        )
+    }
+
     detailEntry?.let { entry ->
         KnowledgeEntryDetailDialog(
             entry = entry,
@@ -215,6 +280,18 @@ fun KnowledgeChatRoute(
             },
             onCopyNote = { note ->
                 context.copyToClipboard(label = "纳知原始 Note", text = note.content)
+            },
+            onEditEntry = {
+                detailEntry = null
+                detailSourceNotes = emptyList()
+                detailCitation = null
+                editingEntry = entry
+            },
+            onEditNote = { note ->
+                detailEntry = null
+                detailSourceNotes = emptyList()
+                detailCitation = null
+                editingSourceNote = note
             },
             onCopyCitation = {
                 detailCitation?.toReferenceText(entry)?.let { text ->
@@ -672,8 +749,8 @@ private fun ChatQuestionInputBlock(
             Text(
                 text = when {
                     isAsking -> "回答中"
-                    entryCount == 0 -> "先完成知识入库"
-                    indexedEntryCount == 0 -> "先重建索引"
+                    entryCount == 0 -> "先完成知识沉淀"
+                    indexedEntryCount == 0 -> "先完成沉淀"
                     else -> "发送"
                 }
             )
@@ -896,7 +973,7 @@ private fun KnowledgeChatIndexStatusBlock(
     embeddingCount: Int
 ) {
     Text(
-        text = "本地向量 $embeddingCount 条",
+        text = "可问答知识 $embeddingCount 条",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
@@ -1138,7 +1215,7 @@ private fun CitationEvidenceCard(
 
 private fun ChatTurnUiState.summaryMetaText(): String {
     val status = when (latestAnswer?.status) {
-        ChatMessageStatus.FAILED -> "生成失败"
+        ChatMessageStatus.FAILED -> "处理失败"
         ChatMessageStatus.PENDING -> "生成中"
         ChatMessageStatus.DONE -> "已回答"
         null -> "生成中"
@@ -1508,10 +1585,20 @@ private fun KnowledgeEntry.displayTitle(): String {
 
 private fun KnowledgeIndexStatus.label(): String {
     return when (this) {
-        KnowledgeIndexStatus.PENDING -> "待索引"
-        KnowledgeIndexStatus.INDEXING -> "索引中"
-        KnowledgeIndexStatus.INDEXED -> "已索引"
-        KnowledgeIndexStatus.FAILED -> "索引失败"
+        KnowledgeIndexStatus.PENDING -> "已沉淀"
+        KnowledgeIndexStatus.INDEXING -> "已沉淀"
+        KnowledgeIndexStatus.INDEXED -> "已沉淀"
+        KnowledgeIndexStatus.FAILED -> "处理失败"
+    }
+}
+
+private fun Throwable.toUserFacingMessage(): String {
+    return when (this) {
+        is NazhiBackendException -> when {
+            statusCode == 401 || code == "UNAUTHORIZED" -> "鉴权失败，请检查设置页中的服务 Token。"
+            else -> publicMessage
+        }
+        else -> message?.takeIf { it.isNotBlank() } ?: "请求失败，请稍后重试。"
     }
 }
 
@@ -1550,7 +1637,7 @@ private fun com.nazhi.app.core.model.AiTaskStage.label(): String {
         com.nazhi.app.core.model.AiTaskStage.SAVING_RESULT -> "写入本地"
         com.nazhi.app.core.model.AiTaskStage.FALLBACK_DRAFTS -> "兜底草稿"
         com.nazhi.app.core.model.AiTaskStage.DONE -> "完成"
-        com.nazhi.app.core.model.AiTaskStage.FAILED -> "失败"
+        com.nazhi.app.core.model.AiTaskStage.FAILED -> "处理失败"
         com.nazhi.app.core.model.AiTaskStage.UNKNOWN -> "处理中"
     }
 }

@@ -397,7 +397,7 @@ private suspend fun submitAudio(
             return
         }
         if (currentTask.status == "FAILED") {
-            onFailed(currentTask.error?.message ?: currentTask.message.ifBlank { "转写失败" })
+            onFailed(currentTask.error?.message ?: currentTask.message.ifBlank { "处理失败" })
             return
         }
         onTranscribing(
@@ -431,8 +431,8 @@ private fun AudioTranscriptionStage.label(): String {
         AudioTranscriptionStage.RECORDING -> "录音中"
         AudioTranscriptionStage.UPLOADING -> "上传中"
         AudioTranscriptionStage.TRANSCRIBING -> "转写中"
-        AudioTranscriptionStage.PREVIEW -> "等待确认"
-        AudioTranscriptionStage.FAILED -> "转写失败"
+        AudioTranscriptionStage.PREVIEW -> "待确认"
+        AudioTranscriptionStage.FAILED -> "处理失败"
         AudioTranscriptionStage.PERMISSION_DENIED -> "未授权麦克风"
     }
 }
@@ -460,10 +460,10 @@ private fun Throwable.toAudioUserMessage(): String {
     return when {
         raw.contains("Failed to connect", ignoreCase = true) -> "无法连接后端，请检查服务器地址和网络。"
         raw.contains("timeout", ignoreCase = true) || raw.contains("timed out", ignoreCase = true) -> {
-            "转写请求超时，请稍后重试。"
+            "处理请求超时，请稍后重试。"
         }
         raw.contains("401", ignoreCase = true) -> "后端鉴权失败，请检查服务 Token。"
         raw.isNotBlank() -> raw
-        else -> "转写失败，请稍后重试。"
+        else -> "处理失败，请稍后重试。"
     }
 }

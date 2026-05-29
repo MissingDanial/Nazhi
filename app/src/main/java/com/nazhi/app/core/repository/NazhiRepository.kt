@@ -6,6 +6,7 @@ import com.nazhi.app.core.export.LocalDataImportResult
 import com.nazhi.app.core.model.AiTaskProgress
 import com.nazhi.app.core.model.AudioTranscriptionJob
 import com.nazhi.app.core.model.AudioTranscriptionJobStatus
+import com.nazhi.app.core.model.CalendarFarmMarker
 import com.nazhi.app.core.model.ChatCitation
 import com.nazhi.app.core.model.ChatMessage
 import com.nazhi.app.core.model.ChatSession
@@ -32,6 +33,8 @@ interface NazhiRepository {
     fun observePendingCountBeforeDate(date: String): Flow<Int>
 
     fun observeDaySummaries(startDate: String, endDate: String): Flow<List<DaySummary>>
+
+    fun observeCalendarFarmMarkers(startDate: String, endDate: String): Flow<List<CalendarFarmMarker>>
 
     suspend fun getNote(id: String): Note?
 

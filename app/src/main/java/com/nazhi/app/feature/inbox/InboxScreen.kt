@@ -4,6 +4,8 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -12,9 +14,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -56,7 +61,6 @@ import com.nazhi.app.core.model.AudioTranscriptionJob
 import com.nazhi.app.core.model.AudioTranscriptionJobStatus
 import com.nazhi.app.core.model.DailyFarmSnapshot
 import com.nazhi.app.core.model.DayKnowledgeStatus
-import com.nazhi.app.core.model.IntentType
 import com.nazhi.app.core.model.KnowledgeIndexStatus
 import com.nazhi.app.core.model.KnowledgeDraftStatus
 import com.nazhi.app.core.model.KnowledgeEntry
@@ -69,9 +73,17 @@ import com.nazhi.app.core.model.isMeaningfulKnowledgeDuplicateKey
 import com.nazhi.app.core.model.toKnowledgeDuplicateKey
 import com.nazhi.app.core.network.NazhiBackendException
 import com.nazhi.app.core.repository.NazhiRepository
+import com.nazhi.app.core.util.displayDateLabel
 import com.nazhi.app.core.util.toLocalDateId
 import com.nazhi.app.core.util.todayDateId
 import com.nazhi.app.feature.farm.DailyFarmPreview
+import com.nazhi.app.feature.farm.FarmContentItem
+import com.nazhi.app.feature.farm.FarmOwnerType
+import com.nazhi.app.feature.farm.FarmPlotUiModel
+import com.nazhi.app.feature.farm.FarmStage
+import com.nazhi.app.feature.farm.buildFarmPlotModels
+import com.nazhi.app.core.ui.EditableKnowledgeEntryDialog
+import com.nazhi.app.core.ui.KnowledgeEntryDetailDialog
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -150,19 +162,21 @@ fun DateNotesRoute(
     val pendingReviewNotes = notes.filter { it.status == NoteStatus.INBOX }
     val visibleAudioJobs = audioJobs.filter { it.shouldShowInInbox() }
     val pendingDrafts = drafts.filter { it.status == KnowledgeDraftStatus.PENDING }
+    val settledKnowledgeEntries = knowledgeEntries.filter { it.indexStatus == KnowledgeIndexStatus.INDEXED }
     val hasDuplicateDrafts = pendingDrafts.any { draft ->
         draft.findDuplicateEntry(knowledgeEntries) != null
     }
     val hasReviewRequiredDrafts = pendingDrafts.any { it.needsReview }
-    val farmSnapshot = remember(dateId, notes, dayKnowledgeStatus, visibleAudioJobs) {
+    val farmSnapshot = remember(dateId, notes, drafts, knowledgeEntries, dayKnowledgeStatus, visibleAudioJobs) {
         DailyFarmRuleEngine.buildSnapshot(
             dateId = dateId,
             notes = notes,
+            drafts = drafts,
+            knowledgeEntries = knowledgeEntries,
             knowledgeStatus = dayKnowledgeStatus,
             audioJobs = visibleAudioJobs
         )
     }
-    val reviewedCount = notes.count { it.status == NoteStatus.REVIEWED }
     var input by remember(initialShareText) { mutableStateOf(initialShareText.orEmpty()) }
     var inputSourceType by remember(initialShareText) {
         mutableStateOf(if (initialShareText.isNullOrBlank()) SourceType.MANUAL else SourceType.SHARE)
@@ -171,16 +185,28 @@ fun DateNotesRoute(
         mutableStateOf(initialShareSource)
     }
     var editingNote by remember { mutableStateOf<Note?>(null) }
+    var editingDraft by remember { mutableStateOf<KnowledgeEntryDraft?>(null) }
+    var editingKnowledgeEntry by remember { mutableStateOf<KnowledgeEntry?>(null) }
     var deletingNote by remember { mutableStateOf<Note?>(null) }
+    var isUpdatingKnowledgeEntry by remember { mutableStateOf(false) }
     var handledKnowledgeTaskEventId by remember { mutableStateOf(knowledgeIngestionState.eventId) }
+    val isToday = dateId == todayDateId()
+    val activeTaskDateId = knowledgeIngestionState.activeDateId
+    val isCurrentDateTask = activeTaskDateId == null || activeTaskDateId == dateId
+    val activeOtherDateLabel = activeTaskDateId
+        ?.takeIf { knowledgeIngestionState.isRunning && it != dateId }
+        ?.let { displayDateLabel(it) }
     val isAiOrganizing = knowledgeIngestionState.isRunning &&
-        knowledgeIngestionState.taskKind == KnowledgeTaskKind.ORGANIZE
+        knowledgeIngestionState.taskKind == KnowledgeTaskKind.ORGANIZE &&
+        isCurrentDateTask
     val isKnowledgeTaskRunning = knowledgeIngestionState.isRunning
     val aiOrganizeProgress = if (isAiOrganizing) knowledgeIngestionState.progress else null
-    val aiOrganizeMessage = knowledgeIngestionState.message.takeIf {
+    val aiOrganizeMessage = when {
+        activeOtherDateLabel != null -> "正在处理 $activeOtherDateLabel，完成后可处理当前日期。"
         knowledgeIngestionState.isRunning &&
-            knowledgeIngestionState.taskKind == KnowledgeTaskKind.ORGANIZE &&
-            knowledgeIngestionState.progress == null
+            isCurrentDateTask &&
+            knowledgeIngestionState.progress == null -> knowledgeIngestionState.message
+        else -> null
     }
     LaunchedEffect(knowledgeIngestionState.eventId) {
         val message = knowledgeIngestionState.message
@@ -190,22 +216,70 @@ fun DateNotesRoute(
         }
     }
 
+    fun saveNoteContent(
+        rawContent: String?,
+        sourceType: SourceType,
+        sourceApp: String?,
+        emptyMessage: String,
+        successMessage: String,
+        afterSaved: () -> Unit = {}
+    ) {
+        val content = rawContent?.trim().orEmpty()
+        if (content.isEmpty()) {
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar(emptyMessage)
+            }
+            return
+        }
+
+        val duplicateKey = content.toKnowledgeDuplicateKey()
+        val hasDuplicateToday = duplicateKey.isMeaningfulKnowledgeDuplicateKey() &&
+            notes.any { note -> note.content.toKnowledgeDuplicateKey() == duplicateKey }
+        if (hasDuplicateToday) {
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar("今日已存在相同内容，未重复保存")
+            }
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        val note = Note(
+            id = UUID.randomUUID().toString(),
+            content = content,
+            title = content.toTitle(),
+            sourceType = sourceType,
+            sourceApp = sourceApp,
+            sourceUrl = content.extractFirstUrl(),
+            createdAt = now,
+            createdDate = now.toLocalDateId(),
+            updatedAt = now,
+            status = NoteStatus.INBOX,
+            userRemark = null
+        )
+
+        coroutineScope.launch {
+            repository.saveNote(note)
+            afterSaved()
+            snackbarHostState.showSnackbar(successMessage)
+        }
+    }
+
     InboxScreen(
         screenTitle = screenTitle,
         screenSubtitle = screenSubtitle,
+        isToday = isToday,
         notes = notes,
         audioJobs = visibleAudioJobs,
         farmSnapshot = farmSnapshot,
         dayKnowledgeStatus = dayKnowledgeStatus,
         pendingDrafts = pendingDrafts,
-        knowledgeEntries = knowledgeEntries,
+        knowledgeEntries = settledKnowledgeEntries,
         input = input,
         inputSourceType = inputSourceType,
         showQuickInput = showQuickInput,
         historyPendingCount = historyPendingCount,
         pendingReviewCount = pendingReviewNotes.size,
         pendingDraftCount = dayKnowledgeStatus.pendingDraftCount,
-        reviewedCount = reviewedCount,
         hasDuplicateDrafts = hasDuplicateDrafts,
         hasReviewRequiredDrafts = hasReviewRequiredDrafts,
         isAiOrganizing = isAiOrganizing,
@@ -232,47 +306,28 @@ fun DateNotesRoute(
                 inputSourceApp = "系统剪贴板"
             }
         },
+        onPasteSave = {
+            val clipboardText = context.readClipboardText()
+            saveNoteContent(
+                rawContent = clipboardText,
+                sourceType = SourceType.CLIPBOARD,
+                sourceApp = "系统剪贴板",
+                emptyMessage = "剪贴板没有可收纳文本",
+                successMessage = "已收纳到今日"
+            )
+        },
         onSave = {
-            val content = input.trim()
-            if (content.isEmpty()) {
-                coroutineScope.launch {
-                    snackbarHostState.showSnackbar("请输入要保存的内容")
-                }
-                return@InboxScreen
-            }
-
-            val now = System.currentTimeMillis()
-            val duplicateKey = content.toKnowledgeDuplicateKey()
-            val hasDuplicateToday = duplicateKey.isMeaningfulKnowledgeDuplicateKey() &&
-                notes.any { note -> note.content.toKnowledgeDuplicateKey() == duplicateKey }
-            if (hasDuplicateToday) {
-                coroutineScope.launch {
-                    snackbarHostState.showSnackbar("今日已存在相同内容，未重复保存")
-                }
-                return@InboxScreen
-            }
-
-            val note = Note(
-                id = UUID.randomUUID().toString(),
-                content = content,
-                title = content.toTitle(),
+            saveNoteContent(
+                rawContent = input,
                 sourceType = inputSourceType,
                 sourceApp = inputSourceApp,
-                    sourceUrl = content.extractFirstUrl(),
-                    createdAt = now,
-                    createdDate = now.toLocalDateId(),
-                    updatedAt = now,
-                    status = NoteStatus.INBOX,
-                    userRemark = null
-            )
-
-            coroutineScope.launch {
-                repository.saveNote(note)
+                emptyMessage = "请输入要保存的内容",
+                successMessage = "已保存到今日收件箱"
+            ) {
                 input = ""
                 inputSourceType = SourceType.MANUAL
                 inputSourceApp = null
                 onShareConsumed()
-                snackbarHostState.showSnackbar("已保存到今日收件箱")
             }
         },
         onEdit = { note ->
@@ -297,6 +352,15 @@ fun DateNotesRoute(
         },
         onAiOrganizeToday = {
             knowledgeIngestionCoordinator?.organizeToday(dateId)
+        },
+        onSubmitDraft = { draft ->
+            knowledgeIngestionCoordinator?.submitDraft(draft.id)
+        },
+        onEditDraft = { draft ->
+            editingDraft = draft
+        },
+        onEditKnowledgeEntry = { entry ->
+            editingKnowledgeEntry = entry
         },
         onSubmitAllDrafts = {
             knowledgeIngestionCoordinator?.submitAll(
@@ -335,6 +399,61 @@ fun DateNotesRoute(
         )
     }
 
+    editingDraft?.let { draft ->
+        DraftEditDialog(
+            draft = draft,
+            onDismiss = { editingDraft = null },
+            onConfirm = { updatedDraft ->
+                coroutineScope.launch {
+                    repository.updateKnowledgeDraft(
+                        updatedDraft.copy(
+                            needsReview = false,
+                            updatedAt = System.currentTimeMillis()
+                        )
+                    )
+                    editingDraft = null
+                    snackbarHostState.showSnackbar("已保存草稿，待确认")
+                }
+            }
+        )
+    }
+
+    editingKnowledgeEntry?.let { entry ->
+        EditableKnowledgeEntryDialog(
+            entry = entry,
+            isSaving = isUpdatingKnowledgeEntry,
+            onDismiss = {
+                if (!isUpdatingKnowledgeEntry) {
+                    editingKnowledgeEntry = null
+                }
+            },
+            onConfirm = { updatedEntry ->
+                coroutineScope.launch {
+                    isUpdatingKnowledgeEntry = true
+                    val result = runCatching {
+                        repository.updateKnowledgeEntry(updatedEntry, reindex = true)
+                    }
+                    isUpdatingKnowledgeEntry = false
+                    result.fold(
+                        onSuccess = { indexed ->
+                            editingKnowledgeEntry = null
+                            snackbarHostState.showSnackbar(
+                                if (indexed) {
+                                    "已保存并更新问答能力"
+                                } else {
+                                    "已保存，问答能力更新失败，可稍后重试"
+                                }
+                            )
+                        },
+                        onFailure = { error ->
+                            snackbarHostState.showSnackbar("保存失败：${error.toUserFacingMessage()}")
+                        }
+                    )
+                }
+            }
+        )
+    }
+
     deletingNote?.let { note ->
         DeleteNoteDialog(
             note = note,
@@ -361,6 +480,7 @@ fun DateNotesRoute(
 fun InboxScreen(
     screenTitle: String,
     screenSubtitle: String,
+    isToday: Boolean,
     notes: List<Note>,
     audioJobs: List<AudioTranscriptionJob>,
     farmSnapshot: DailyFarmSnapshot,
@@ -373,7 +493,6 @@ fun InboxScreen(
     historyPendingCount: Int,
     pendingReviewCount: Int,
     pendingDraftCount: Int,
-    reviewedCount: Int,
     hasDuplicateDrafts: Boolean,
     hasReviewRequiredDrafts: Boolean,
     isAiOrganizing: Boolean,
@@ -383,12 +502,16 @@ fun InboxScreen(
     snackbarHostState: SnackbarHostState,
     onInputChange: (String) -> Unit,
     onPasteClipboard: () -> Unit,
+    onPasteSave: () -> Unit,
     onSave: () -> Unit,
     onEdit: (Note) -> Unit,
     onCopy: (Note) -> Unit,
     onDelete: (Note) -> Unit,
     onRetryAudioJobs: () -> Unit,
     onAiOrganizeToday: () -> Unit,
+    onSubmitDraft: (KnowledgeEntryDraft) -> Unit,
+    onEditDraft: (KnowledgeEntryDraft) -> Unit,
+    onEditKnowledgeEntry: (KnowledgeEntry) -> Unit,
     onSubmitAllDrafts: () -> Unit,
     onRetryIndex: () -> Unit,
     onOpenHistoricalPending: () -> Unit,
@@ -396,8 +519,44 @@ fun InboxScreen(
     onNavigateBack: (() -> Unit)?
 ) {
     var selectedPanel by remember { mutableStateOf<TodayPanel?>(null) }
+    var panelScrollRequest by remember { mutableStateOf(0) }
+    val listState = rememberLazyListState()
     val retryableAudioCount = audioJobs.count { it.canRetry }
     val hasIssue = retryableAudioCount > 0 || dayKnowledgeStatus.failedIndexCount > 0
+    val hasHistoryPendingCard = showQuickInput && historyPendingCount > 0
+    val pendingReviewNotesForFarm = remember(notes) {
+        notes.filter { it.status == NoteStatus.INBOX }
+    }
+    val farmPlots = remember(farmSnapshot.dateId, pendingReviewNotesForFarm, pendingDrafts, knowledgeEntries) {
+        buildFarmPlotModels(
+            dateId = farmSnapshot.dateId,
+            notes = pendingReviewNotesForFarm,
+            drafts = pendingDrafts,
+            knowledgeEntries = knowledgeEntries
+        )
+    }
+    val context = LocalContext.current
+    var selectedFarmPlot by remember(farmSnapshot.dateId) { mutableStateOf<FarmPlotUiModel?>(null) }
+    var selectedFarmNote by remember(farmSnapshot.dateId) { mutableStateOf<Note?>(null) }
+    var selectedFarmDraft by remember(farmSnapshot.dateId) { mutableStateOf<KnowledgeEntryDraft?>(null) }
+    var selectedFarmDraftSourceNotes by remember(farmSnapshot.dateId) { mutableStateOf<List<Note>>(emptyList()) }
+    var selectedFarmEntry by remember(farmSnapshot.dateId) { mutableStateOf<KnowledgeEntry?>(null) }
+    var selectedFarmEntrySourceNotes by remember(farmSnapshot.dateId) { mutableStateOf<List<Note>>(emptyList()) }
+
+    fun openPanel(panel: TodayPanel) {
+        val nextPanel = if (selectedPanel == panel) null else panel
+        selectedPanel = nextPanel
+        if (nextPanel != null) {
+            panelScrollRequest += 1
+        }
+    }
+
+    LaunchedEffect(panelScrollRequest, selectedPanel, hasHistoryPendingCard) {
+        if (panelScrollRequest > 0 && selectedPanel != null) {
+            val panelItemIndex = 3 + if (hasHistoryPendingCard) 1 else 0
+            listState.animateScrollToItem(panelItemIndex)
+        }
+    }
 
     LaunchedEffect(input, showQuickInput) {
         if (showQuickInput && input.isNotBlank() && selectedPanel == null) {
@@ -432,6 +591,7 @@ fun InboxScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding),
+            state = listState,
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
@@ -440,27 +600,34 @@ fun InboxScreen(
                     totalCount = notes.size,
                     pendingCount = pendingReviewCount,
                     pendingDraftCount = pendingDraftCount,
-                    knowledgeCount = dayKnowledgeStatus.knowledgeEntryCount,
+                    knowledgeCount = dayKnowledgeStatus.indexedEntryCount,
                     issueCount = retryableAudioCount + dayKnowledgeStatus.failedIndexCount,
                     selectedPanel = selectedPanel,
                     onSelectPanel = { panel ->
-                        selectedPanel = if (selectedPanel == panel) null else panel
+                        openPanel(panel)
                     }
                 )
             }
 
             item {
-                DailyFarmPreview(snapshot = farmSnapshot)
+                DailyFarmPreview(
+                    snapshot = farmSnapshot,
+                    plots = farmPlots,
+                    selectedPlotId = selectedFarmPlot?.plotId,
+                    onPlotClick = { plot ->
+                        selectedFarmPlot = plot
+                    }
+                )
             }
 
             item {
                 TodayPrimaryActionCard(
+                    isToday = isToday,
                     showQuickInput = showQuickInput,
                     totalCount = notes.size,
                     pendingCount = pendingReviewCount,
                     pendingDraftCount = pendingDraftCount,
-                    reviewedCount = reviewedCount,
-                    knowledgeCount = dayKnowledgeStatus.knowledgeEntryCount,
+                    knowledgeCount = dayKnowledgeStatus.indexedEntryCount,
                     hasIssue = hasIssue,
                     isAiOrganizing = isAiOrganizing,
                     isKnowledgeTaskRunning = isKnowledgeTaskRunning,
@@ -468,15 +635,16 @@ fun InboxScreen(
                     statusMessage = aiOrganizeMessage,
                     hasDuplicateDrafts = hasDuplicateDrafts,
                     hasReviewRequiredDrafts = hasReviewRequiredDrafts,
-                    onAddContent = { selectedPanel = TodayPanel.CAPTURED },
+                    onAddContent = { openPanel(TodayPanel.CAPTURED) },
+                    onPasteSave = onPasteSave,
                     onOrganize = onAiOrganizeToday,
-                    onOpenDrafts = { selectedPanel = TodayPanel.DRAFTS },
+                    onOpenDrafts = { openPanel(TodayPanel.DRAFTS) },
                     onSubmitDrafts = onSubmitAllDrafts,
-                    onOpenIssues = { selectedPanel = TodayPanel.ISSUES }
+                    onOpenIssues = { openPanel(TodayPanel.ISSUES) }
                 )
             }
 
-            if (showQuickInput && historyPendingCount > 0) {
+            if (hasHistoryPendingCard) {
                 item {
                     HistoricalPendingCard(
                         pendingCount = historyPendingCount,
@@ -489,6 +657,7 @@ fun InboxScreen(
                 item {
                     TodayPanelCard(
                         panel = panel,
+                        isToday = isToday,
                         notes = notes,
                         pendingDrafts = pendingDrafts,
                         knowledgeEntries = knowledgeEntries,
@@ -499,17 +668,143 @@ fun InboxScreen(
                         onInputChange = onInputChange,
                         onPasteClipboard = onPasteClipboard,
                         onSave = onSave,
+                        onOpenNoteDetail = { note -> selectedFarmNote = note },
                         onEditNote = onEdit,
                         onCopyNote = onCopy,
                         onDeleteNote = onDelete,
                         onRetryAudioJobs = onRetryAudioJobs,
                         onRetryIndex = onRetryIndex,
+                        isKnowledgeTaskRunning = isKnowledgeTaskRunning,
+                        onEditDraft = onEditDraft,
+                        onSubmitDraft = onSubmitDraft,
                         onSubmitAllDrafts = onSubmitAllDrafts,
-                        onOpenKnowledge = onOpenKnowledge
+                        onOpenKnowledge = onOpenKnowledge,
+                        onOpenKnowledgeEntry = { entry ->
+                            selectedFarmEntry = entry
+                            selectedFarmEntrySourceNotes = notes.filter { note -> note.id in entry.sourceNoteIds }
+                        }
                     )
                 }
             }
         }
+    }
+
+    selectedFarmPlot?.let { plot ->
+        FarmPlotContentDialog(
+            plot = plot,
+            onOpenPanel = { item ->
+                selectedFarmPlot = null
+                when (item.ownerType) {
+                    FarmOwnerType.NOTE -> {
+                        val note = notes.firstOrNull { it.id == item.ownerId }
+                        if (note != null) {
+                            selectedFarmNote = note
+                        } else {
+                            openPanel(TodayPanel.CAPTURED)
+                        }
+                    }
+                    FarmOwnerType.DRAFT -> {
+                        val draft = pendingDrafts.firstOrNull { it.id == item.ownerId }
+                        if (draft != null) {
+                            selectedFarmDraft = draft
+                            selectedFarmDraftSourceNotes = notes.filter { note -> note.id in draft.sourceNoteIds }
+                        } else {
+                            openPanel(TodayPanel.DRAFTS)
+                        }
+                    }
+                    FarmOwnerType.KNOWLEDGE_ENTRY -> {
+                        val entry = knowledgeEntries.firstOrNull { it.id == item.ownerId }
+                        if (entry != null) {
+                            selectedFarmEntry = entry
+                            selectedFarmEntrySourceNotes = notes.filter { note -> note.id in entry.sourceNoteIds }
+                        } else {
+                            openPanel(TodayPanel.INGESTED)
+                        }
+                    }
+                }
+            },
+            onDismiss = {
+                selectedFarmPlot = null
+            }
+        )
+    }
+
+    selectedFarmNote?.let { note ->
+        FarmNoteDetailDialog(
+            note = note,
+            onCopy = {
+                selectedFarmNote = null
+                onCopy(note)
+            },
+            onEdit = {
+                selectedFarmNote = null
+                onEdit(note)
+            },
+            onDelete = {
+                selectedFarmNote = null
+                onDelete(note)
+            },
+            onOpenPanel = {
+                selectedFarmNote = null
+                openPanel(TodayPanel.CAPTURED)
+            },
+            onDismiss = {
+                selectedFarmNote = null
+            }
+        )
+    }
+
+    selectedFarmDraft?.let { draft ->
+        FarmDraftDetailDialog(
+            draft = draft,
+            sourceNotes = selectedFarmDraftSourceNotes,
+            isSubmitting = isKnowledgeTaskRunning,
+            onSubmit = {
+                selectedFarmDraft = null
+                selectedFarmDraftSourceNotes = emptyList()
+                onSubmitDraft(draft)
+            },
+            onOpenKnowledge = {
+                selectedFarmDraft = null
+                selectedFarmDraftSourceNotes = emptyList()
+                onEditDraft(draft)
+            },
+            onDismiss = {
+                selectedFarmDraft = null
+                selectedFarmDraftSourceNotes = emptyList()
+            }
+        )
+    }
+
+    selectedFarmEntry?.let { entry ->
+        KnowledgeEntryDetailDialog(
+            entry = entry,
+            sourceNotes = selectedFarmEntrySourceNotes,
+            dialogTitle = "农场知识条目",
+            onCopyEntry = {
+                context.copyToClipboard(
+                    label = "纳知知识条目",
+                    text = entry.toReferenceText()
+                )
+            },
+            onCopyNote = { note ->
+                context.copyToClipboard(label = "纳知原始 Note", text = note.content)
+            },
+            onEditEntry = {
+                selectedFarmEntry = null
+                selectedFarmEntrySourceNotes = emptyList()
+                onEditKnowledgeEntry(entry)
+            },
+            onEditNote = { note ->
+                selectedFarmEntry = null
+                selectedFarmEntrySourceNotes = emptyList()
+                onEdit(note)
+            },
+            onDismiss = {
+                selectedFarmEntry = null
+                selectedFarmEntrySourceNotes = emptyList()
+            }
+        )
     }
 }
 
@@ -518,6 +813,382 @@ private enum class TodayPanel {
     DRAFTS,
     INGESTED,
     ISSUES
+}
+
+@Composable
+private fun FarmPlotContentDialog(
+    plot: FarmPlotUiModel,
+    onOpenPanel: (FarmContentItem) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(text = plot.farmDialogTitle()) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = plot.contentSummaryText(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                LazyColumn(
+                    modifier = Modifier.heightIn(max = 360.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(
+                        items = plot.items,
+                        key = { item -> "${item.ownerType}:${item.ownerId}" }
+                    ) { item ->
+                        FarmPlotContentRow(
+                            item = item,
+                            onOpenPanel = { onOpenPanel(item) }
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = "关闭")
+            }
+        }
+    )
+}
+
+@Composable
+private fun FarmPlotContentRow(
+    item: FarmContentItem,
+    onOpenPanel: () -> Unit
+) {
+    OutlinedButton(
+        onClick = onOpenPanel,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                text = item.ownerType.dialogLabel(),
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = when (item.ownerType) {
+                    FarmOwnerType.NOTE -> MaterialTheme.colorScheme.tertiary
+                    FarmOwnerType.DRAFT -> MaterialTheme.colorScheme.primary
+                    FarmOwnerType.KNOWLEDGE_ENTRY -> MaterialTheme.colorScheme.secondary
+                },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = item.title,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = item.preview.ifBlank { "暂无摘要" },
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = "${item.charCount} 字 · ${item.ownerType.panelActionLabel()}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun FarmNoteDetailDialog(
+    note: Note,
+    onCopy: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    onOpenPanel: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(text = "收纳内容") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = note.title ?: "未命名记录",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "${note.sourceType.label()} · ${note.status.label()} · ${note.createdAt.formatTime()}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = note.content,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                note.userRemark?.takeIf { it.isNotBlank() }?.let { remark ->
+                    Text(
+                        text = "备注：$remark",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                HorizontalDivider()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(onClick = onCopy) {
+                        Text(text = "复制")
+                    }
+                    TextButton(onClick = onEdit) {
+                        Text(text = "编辑")
+                    }
+                    TextButton(onClick = onDelete) {
+                        Text(text = "删除")
+                    }
+                }
+                OutlinedButton(
+                    onClick = onOpenPanel,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(text = "打开收纳栏目")
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = "关闭")
+            }
+        }
+    )
+}
+
+@Composable
+private fun FarmDraftDetailDialog(
+    draft: KnowledgeEntryDraft,
+    sourceNotes: List<Note>,
+    isSubmitting: Boolean,
+    onSubmit: () -> Unit,
+    onOpenKnowledge: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(text = "待确认内容") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = draft.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "来源 ${draft.sourceNoteIds.size} 条 · ${draft.reviewLabel()} · 置信度 ${"%.2f".format(draft.confidence)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (draft.needsReview) {
+                    Text(
+                        text = "这条草稿需要人工确认，建议到知识库编辑后再沉淀。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                if (draft.summary.isNotBlank()) {
+                    Text(
+                        text = draft.summary,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                Text(
+                    text = draft.content,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                if (draft.tags.isNotEmpty()) {
+                    Text(
+                        text = draft.tags.joinToString(prefix = "标签："),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                draft.insight?.takeIf { it.isNotBlank() }?.let { insight ->
+                    Text(
+                        text = "AI 推断：$insight",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (draft.evidenceQuotes.isNotEmpty()) {
+                    HorizontalDivider()
+                    Text(
+                        text = "依据摘录",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    draft.evidenceQuotes.take(3).forEachIndexed { index, quote ->
+                        Text(
+                            text = "${index + 1}. $quote",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                if (sourceNotes.isNotEmpty()) {
+                    HorizontalDivider()
+                    Text(
+                        text = "来源 Note",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    sourceNotes.take(3).forEach { note ->
+                        FarmSourceNoteSnippet(note = note)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (draft.needsReview) {
+                Button(onClick = onOpenKnowledge) {
+                    Text(text = "编辑草稿")
+                }
+            } else {
+                Button(
+                    onClick = onSubmit,
+                    enabled = !isSubmitting
+                ) {
+                    Text(text = if (isSubmitting) "沉淀中" else "确认沉淀")
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = "关闭")
+            }
+        }
+    )
+}
+
+@Composable
+private fun DraftEditDialog(
+    draft: KnowledgeEntryDraft,
+    onDismiss: () -> Unit,
+    onConfirm: (KnowledgeEntryDraft) -> Unit
+) {
+    var title by remember(draft.id) { mutableStateOf(draft.title) }
+    var summary by remember(draft.id) { mutableStateOf(draft.summary) }
+    var content by remember(draft.id) { mutableStateOf(draft.content) }
+    var tagsText by remember(draft.id) { mutableStateOf(draft.tags.joinToString("，")) }
+    var insight by remember(draft.id) { mutableStateOf(draft.insight.orEmpty()) }
+    val intentType = draft.intentType
+    val canSave = title.isNotBlank() && content.isNotBlank()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(text = "编辑 AI 草稿") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(text = "标题") }
+                )
+                OutlinedTextField(
+                    value = summary,
+                    onValueChange = { summary = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    label = { Text(text = "摘要") }
+                )
+                OutlinedTextField(
+                    value = content,
+                    onValueChange = { content = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 4,
+                    label = { Text(text = "正文") }
+                )
+                OutlinedTextField(
+                    value = tagsText,
+                    onValueChange = { tagsText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(text = "标签，用逗号分隔") }
+                )
+                OutlinedTextField(
+                    value = insight,
+                    onValueChange = { insight = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    label = { Text(text = "AI 推断，可选") }
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onConfirm(
+                        draft.copy(
+                            title = title.trim(),
+                            summary = summary.trim(),
+                            content = content.trim(),
+                            intentType = intentType,
+                            tags = tagsText.toTagList(),
+                            insight = insight.trim().takeIf { it.isNotBlank() }
+                        )
+                    )
+                },
+                enabled = canSave
+            ) {
+                Text(text = "保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = "取消")
+            }
+        }
+    )
+}
+
+@Composable
+private fun FarmSourceNoteSnippet(note: Note) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            text = note.title ?: "未命名记录",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            text = note.content,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
 }
 
 @Composable
@@ -562,7 +1233,7 @@ private fun TodayStatusChips(
                 onClick = { onSelectPanel(TodayPanel.DRAFTS) }
             )
             TodayStatusChip(
-                label = "已入库",
+                label = "已沉淀",
                 count = knowledgeCount,
                 selected = selectedPanel == TodayPanel.INGESTED,
                 modifier = Modifier.weight(1f),
@@ -602,11 +1273,11 @@ private fun TodayStatusChip(
 
 @Composable
 private fun TodayPrimaryActionCard(
+    isToday: Boolean,
     showQuickInput: Boolean,
     totalCount: Int,
     pendingCount: Int,
     pendingDraftCount: Int,
-    reviewedCount: Int,
     knowledgeCount: Int,
     hasIssue: Boolean,
     isAiOrganizing: Boolean,
@@ -616,25 +1287,30 @@ private fun TodayPrimaryActionCard(
     hasDuplicateDrafts: Boolean,
     hasReviewRequiredDrafts: Boolean,
     onAddContent: () -> Unit,
+    onPasteSave: () -> Unit,
     onOrganize: () -> Unit,
     onOpenDrafts: () -> Unit,
     onSubmitDrafts: () -> Unit,
     onOpenIssues: () -> Unit
 ) {
+    val periodLabel = if (isToday) "今日" else "这一天"
+    val completeLabel = "$periodLabel 已完成"
+    val emptyHistoryLabel = "这一天无内容"
     val label = when {
         isAiOrganizing -> "AI 整理中"
         isKnowledgeTaskRunning -> "知识处理中"
         hasIssue -> "处理异常"
         pendingDraftCount > 0 && (hasDuplicateDrafts || hasReviewRequiredDrafts) -> "查看待确认"
-        pendingDraftCount > 0 -> "确认入库"
-        pendingCount > 0 -> "AI 整理今日"
+        pendingDraftCount > 0 -> "确认沉淀"
+        pendingCount > 0 -> if (isToday) "AI 整理今日" else "整理这一天"
         totalCount == 0 && showQuickInput -> "添加内容"
-        else -> "今日已完成"
+        totalCount == 0 -> emptyHistoryLabel
+        else -> completeLabel
     }
     val enabled = when {
         isAiOrganizing || isKnowledgeTaskRunning -> false
         totalCount == 0 && !showQuickInput -> false
-        label == "今日已完成" -> false
+        label == completeLabel || label == emptyHistoryLabel -> false
         else -> true
     }
     Card(
@@ -648,12 +1324,12 @@ private fun TodayPrimaryActionCard(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text(
-                text = "今日进度",
+                text = "${periodLabel}进度",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "收纳 $totalCount · 待整理 $pendingCount · 待确认 $pendingDraftCount · 已入库 $knowledgeCount · 已处理 $reviewedCount",
+                text = "收纳 $totalCount · 待整理 $pendingCount · 待确认 $pendingDraftCount · 已沉淀 $knowledgeCount",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onPrimaryContainer
             )
@@ -685,6 +1361,14 @@ private fun TodayPrimaryActionCard(
             ) {
                 Text(text = label)
             }
+            if (showQuickInput) {
+                OutlinedButton(
+                    onClick = onPasteSave,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(text = "粘贴收纳")
+                }
+            }
         }
     }
 }
@@ -692,6 +1376,7 @@ private fun TodayPrimaryActionCard(
 @Composable
 private fun TodayPanelCard(
     panel: TodayPanel,
+    isToday: Boolean,
     notes: List<Note>,
     pendingDrafts: List<KnowledgeEntryDraft>,
     knowledgeEntries: List<KnowledgeEntry>,
@@ -702,13 +1387,18 @@ private fun TodayPanelCard(
     onInputChange: (String) -> Unit,
     onPasteClipboard: () -> Unit,
     onSave: () -> Unit,
+    onOpenNoteDetail: (Note) -> Unit,
     onEditNote: (Note) -> Unit,
     onCopyNote: (Note) -> Unit,
     onDeleteNote: (Note) -> Unit,
     onRetryAudioJobs: () -> Unit,
     onRetryIndex: () -> Unit,
+    isKnowledgeTaskRunning: Boolean,
+    onEditDraft: (KnowledgeEntryDraft) -> Unit,
+    onSubmitDraft: (KnowledgeEntryDraft) -> Unit,
     onSubmitAllDrafts: () -> Unit,
-    onOpenKnowledge: () -> Unit
+    onOpenKnowledge: () -> Unit,
+    onOpenKnowledgeEntry: (KnowledgeEntry) -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -716,37 +1406,19 @@ private fun TodayPanelCard(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
-                text = panel.title(),
+                text = panel.title(isToday),
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
             )
             when (panel) {
                 TodayPanel.CAPTURED -> {
-                    if (showQuickInput) {
-                        QuickInputCard(
-                            input = input,
-                            sourceType = inputSourceType,
-                            onInputChange = onInputChange,
-                            onPasteClipboard = onPasteClipboard,
-                            onSave = onSave
-                        )
-                    }
                     if (notes.isEmpty()) {
                         EmptyInboxCard(showQuickInput = showQuickInput)
                     } else {
-                        notes.take(5).forEach { note ->
-                            NoteCard(
+                        notes.forEach { note ->
+                            NoteSummaryListItem(
                                 note = note,
-                                onEdit = { onEditNote(note) },
-                                onCopy = { onCopyNote(note) },
-                                onDelete = { onDeleteNote(note) }
-                            )
-                        }
-                        if (notes.size > 5) {
-                            Text(
-                                text = "还有 ${notes.size - 5} 条记录未展开。",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                onOpen = { onOpenNoteDetail(note) }
                             )
                         }
                     }
@@ -759,25 +1431,21 @@ private fun TodayPanelCard(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     } else {
-                        pendingDrafts.take(5).forEach { draft ->
-                            KnowledgeDraftSummaryCard(draft = draft)
+                        pendingDrafts.forEach { draft ->
+                            KnowledgeDraftSummaryCard(
+                                draft = draft,
+                                isSubmitting = isKnowledgeTaskRunning,
+                                onEdit = { onEditDraft(draft) },
+                                onSubmit = { onSubmitDraft(draft) }
+                            )
                         }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            OutlinedButton(
-                                onClick = onOpenKnowledge,
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Text(text = "编辑草稿")
-                            }
+                        if (pendingDrafts.size > 1 && pendingDrafts.none { it.needsReview }) {
                             Button(
                                 onClick = onSubmitAllDrafts,
-                                enabled = pendingDrafts.none { it.needsReview },
-                                modifier = Modifier.weight(1f)
+                                enabled = !isKnowledgeTaskRunning,
+                                modifier = Modifier.fillMaxWidth()
                             ) {
-                                Text(text = "确认入库")
+                                Text(text = "全部确认沉淀")
                             }
                         }
                     }
@@ -785,13 +1453,16 @@ private fun TodayPanelCard(
                 TodayPanel.INGESTED -> {
                     if (knowledgeEntries.isEmpty()) {
                         Text(
-                            text = "今天还没有入库知识。",
+                            text = if (isToday) "今天还没有沉淀知识。" else "这一天还没有沉淀知识。",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     } else {
                         knowledgeEntries.take(5).forEach { entry ->
-                            KnowledgeEntrySummaryCard(entry = entry)
+                            KnowledgeEntrySummaryCard(
+                                entry = entry,
+                                onOpen = { onOpenKnowledgeEntry(entry) }
+                            )
                         }
                     }
                 }
@@ -822,7 +1493,7 @@ private fun TodayPanelCard(
                             onClick = onRetryIndex,
                             modifier = Modifier.weight(1f)
                         ) {
-                            Text(text = "重试索引")
+                            Text(text = "重试沉淀")
                         }
                         Button(
                             onClick = onRetryAudioJobs,
@@ -839,7 +1510,12 @@ private fun TodayPanelCard(
 }
 
 @Composable
-private fun KnowledgeDraftSummaryCard(draft: KnowledgeEntryDraft) {
+private fun KnowledgeDraftSummaryCard(
+    draft: KnowledgeEntryDraft,
+    isSubmitting: Boolean,
+    onEdit: () -> Unit,
+    onSubmit: () -> Unit
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -864,18 +1540,38 @@ private fun KnowledgeDraftSummaryCard(draft: KnowledgeEntryDraft) {
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                text = "来源 ${draft.sourceNoteIds.size} 条 · ${draft.intentType.label()} · ${draft.reviewLabel()}",
+                text = "来源 ${draft.sourceNoteIds.size} 条 · ${draft.reviewLabel()}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            HorizontalDivider()
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                TextButton(onClick = onEdit) {
+                    Text(text = "编辑")
+                }
+                TextButton(
+                    onClick = onSubmit,
+                    enabled = !isSubmitting
+                ) {
+                    Text(text = if (isSubmitting) "沉淀中" else "确认沉淀")
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun KnowledgeEntrySummaryCard(entry: KnowledgeEntry) {
+private fun KnowledgeEntrySummaryCard(
+    entry: KnowledgeEntry,
+    onOpen: () -> Unit
+) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpen),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainer
         )
@@ -898,7 +1594,7 @@ private fun KnowledgeEntrySummaryCard(entry: KnowledgeEntry) {
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                text = "${entry.intentType.label()} · ${entry.indexStatus.label()} · 来源 ${entry.sourceNoteIds.size} 条",
+                text = "${entry.indexStatus.label()} · 来源 ${entry.sourceNoteIds.size} 条",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -906,11 +1602,12 @@ private fun KnowledgeEntrySummaryCard(entry: KnowledgeEntry) {
     }
 }
 
-private fun TodayPanel.title(): String {
+private fun TodayPanel.title(isToday: Boolean): String {
+    val periodLabel = if (isToday) "今日" else "这一天"
     return when (this) {
-        TodayPanel.CAPTURED -> "今日收纳内容"
+        TodayPanel.CAPTURED -> "${periodLabel}收纳内容"
         TodayPanel.DRAFTS -> "待确认草稿"
-        TodayPanel.INGESTED -> "今日入库结果"
+        TodayPanel.INGESTED -> "${periodLabel}沉淀结果"
         TodayPanel.ISSUES -> "待处理异常"
     }
 }
@@ -956,7 +1653,7 @@ private fun AudioTranscriptionJobsCard(
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "$retryableCount 条可重试 · 失败音频已暂存",
+                text = "$retryableCount 条可重试 · 处理失败音频已暂存",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onErrorContainer
             )
@@ -991,7 +1688,7 @@ private fun com.nazhi.app.core.model.AiTaskStage.label(): String {
         com.nazhi.app.core.model.AiTaskStage.SAVING_RESULT -> "写入本地"
         com.nazhi.app.core.model.AiTaskStage.FALLBACK_DRAFTS -> "兜底草稿"
         com.nazhi.app.core.model.AiTaskStage.DONE -> "完成"
-        com.nazhi.app.core.model.AiTaskStage.FAILED -> "失败"
+        com.nazhi.app.core.model.AiTaskStage.FAILED -> "处理失败"
         com.nazhi.app.core.model.AiTaskStage.UNKNOWN -> "处理中"
     }
 }
@@ -1012,7 +1709,7 @@ private fun HistoricalPendingCard(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text(
-                text = "历史待回顾",
+                text = "历史待整理",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
             )
@@ -1073,7 +1770,7 @@ private fun QuickInputCard(
                 onValueChange = onInputChange,
                 modifier = Modifier.fillMaxWidth(),
                 minLines = 4,
-                label = { Text("保存文章摘录、链接或灵感") }
+                label = { Text("保存文章摘录、链接或临时想法") }
             )
             OutlinedButton(
                 onClick = onPasteClipboard,
@@ -1105,11 +1802,48 @@ private fun EmptyInboxCard(showQuickInput: Boolean) {
             )
             Text(
                 text = if (showQuickInput) {
-                    "先保存一段文章摘录、链接或灵感。"
+                    "先保存一段文章摘录、链接或临时想法。"
                 } else {
                     "可以回到日历选择其他日期查看。"
                 },
                 style = MaterialTheme.typography.bodyMedium
+            )
+        }
+    }
+}
+
+@Composable
+private fun NoteSummaryListItem(
+    note: Note,
+    onOpen: () -> Unit
+) {
+    OutlinedButton(
+        onClick = onOpen,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                text = note.title ?: "未命名记录",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = note.content,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = "${note.sourceType.label()} · ${note.createdAt.formatTime()}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
     }
@@ -1277,6 +2011,7 @@ fun InboxPreview() {
         InboxScreen(
             screenTitle = "纳知",
             screenSubtitle = "今日",
+            isToday = true,
             notes = listOf(
                 Note(
                     id = "1",
@@ -1296,6 +2031,8 @@ fun InboxPreview() {
             farmSnapshot = DailyFarmRuleEngine.buildSnapshot(
                 dateId = now.toLocalDateId(),
                 notes = emptyList(),
+                drafts = emptyList(),
+                knowledgeEntries = emptyList(),
                 knowledgeStatus = DayKnowledgeStatus(now.toLocalDateId(), 1, 1, 0, 0, 0, 0, 0, 0),
                 audioJobs = emptyList()
             ),
@@ -1309,7 +2046,6 @@ fun InboxPreview() {
             snackbarHostState = SnackbarHostState(),
             pendingReviewCount = 1,
             pendingDraftCount = 0,
-            reviewedCount = 0,
             hasDuplicateDrafts = false,
             hasReviewRequiredDrafts = false,
             isAiOrganizing = false,
@@ -1318,12 +2054,16 @@ fun InboxPreview() {
             aiOrganizeMessage = null,
             onInputChange = {},
             onPasteClipboard = {},
+            onPasteSave = {},
             onSave = {},
             onEdit = {},
             onCopy = {},
             onDelete = {},
             onRetryAudioJobs = {},
             onAiOrganizeToday = {},
+            onSubmitDraft = {},
+            onEditDraft = {},
+            onEditKnowledgeEntry = {},
             onSubmitAllDrafts = {},
             onRetryIndex = {},
             onOpenHistoricalPending = {},
@@ -1403,8 +2143,8 @@ private fun AudioTranscriptionJobStatus.label(): String {
         AudioTranscriptionJobStatus.PENDING -> "待转写"
         AudioTranscriptionJobStatus.UPLOADING -> "上传中"
         AudioTranscriptionJobStatus.TRANSCRIBING -> "转写中"
-        AudioTranscriptionJobStatus.FAILED -> "失败"
-        AudioTranscriptionJobStatus.SAVED -> "已生成文本"
+        AudioTranscriptionJobStatus.FAILED -> "处理失败"
+        AudioTranscriptionJobStatus.SAVED -> "已沉淀"
         AudioTranscriptionJobStatus.AUDIO_CLEANED -> "原音频已清理"
     }
 }
@@ -1422,32 +2162,85 @@ private fun Long.formatDuration(): String {
 
 private fun NoteStatus.label(): String {
     return when (this) {
-        NoteStatus.INBOX -> "待回顾"
+        NoteStatus.INBOX -> "待整理"
         NoteStatus.REVIEWED -> "已沉淀"
-        NoteStatus.ARCHIVED -> "已归档"
-        NoteStatus.DELETED -> "已删除"
-    }
-}
-
-private fun IntentType.label(): String {
-    return when (this) {
-        IntentType.READ_LATER -> "稍后看"
-        IntentType.QUOTABLE -> "可引用"
-        IntentType.INSPIRATION -> "灵感"
+        NoteStatus.ARCHIVED -> "已沉淀"
+        NoteStatus.DELETED -> "处理失败"
     }
 }
 
 private fun KnowledgeEntryDraft.reviewLabel(): String {
-    return if (needsReview) "需确认" else "可入库"
+    return "待确认"
 }
 
 private fun KnowledgeIndexStatus.label(): String {
     return when (this) {
-        KnowledgeIndexStatus.PENDING -> "待索引"
-        KnowledgeIndexStatus.INDEXING -> "索引中"
-        KnowledgeIndexStatus.INDEXED -> "已索引"
-        KnowledgeIndexStatus.FAILED -> "索引失败"
+        KnowledgeIndexStatus.PENDING -> "已沉淀"
+        KnowledgeIndexStatus.INDEXING -> "已沉淀"
+        KnowledgeIndexStatus.INDEXED -> "已沉淀"
+        KnowledgeIndexStatus.FAILED -> "处理失败"
     }
+}
+
+private fun FarmStage.dialogTitle(): String {
+    return when (this) {
+        FarmStage.SAPLING -> "待整理内容"
+        FarmStage.PLANT -> "待确认内容"
+        FarmStage.MATURE -> "已沉淀内容"
+    }
+}
+
+private fun FarmPlotUiModel.farmDialogTitle(): String {
+    return "这块农田：${stage.dialogTitle()}"
+}
+
+private fun FarmPlotUiModel.contentSummaryText(): String {
+    val prefix = if (items.size == 1) {
+        "这个地块对应 1 条内容"
+    } else {
+        "这个地块聚合了 ${items.size} 条内容"
+    }
+    val statusParts = listOf(
+        FarmOwnerType.NOTE to "待整理",
+        FarmOwnerType.DRAFT to "待确认",
+        FarmOwnerType.KNOWLEDGE_ENTRY to "已沉淀"
+    ).mapNotNull { (ownerType, label) ->
+        val count = items.count { it.ownerType == ownerType }
+        if (count > 0) "$label $count" else null
+    }
+    return if (statusParts.isEmpty()) {
+        prefix
+    } else {
+        "$prefix：${statusParts.joinToString(" · ")}"
+    }
+}
+
+private fun FarmOwnerType.dialogLabel(): String {
+    return when (this) {
+        FarmOwnerType.NOTE -> "待整理"
+        FarmOwnerType.DRAFT -> "待确认"
+        FarmOwnerType.KNOWLEDGE_ENTRY -> "已沉淀"
+    }
+}
+
+private fun FarmOwnerType.panelActionLabel(): String {
+    return when (this) {
+        FarmOwnerType.NOTE -> "打开收纳"
+        FarmOwnerType.DRAFT -> "打开确认"
+        FarmOwnerType.KNOWLEDGE_ENTRY -> "打开沉淀"
+    }
+}
+
+private fun KnowledgeEntry.toReferenceText(): String {
+    val title = userTitle?.takeIf { it.isNotBlank() } ?: "未命名知识"
+    return "“$title”\n$content\n—— 纳知 $confirmedDate"
+}
+
+private fun String.toTagList(): List<String> {
+    return split(',', '，', '、')
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .distinct()
 }
 
 private fun Throwable.toUserFacingMessage(): String {

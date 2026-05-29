@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Query
 import androidx.room.Upsert
 import com.nazhi.app.core.database.entity.KnowledgeEntryDraftEntity
+import com.nazhi.app.core.model.CalendarDraftFarmSummary
 import com.nazhi.app.core.model.KnowledgeDraftStatus
 import kotlinx.coroutines.flow.Flow
 
@@ -17,6 +18,23 @@ interface KnowledgeEntryDraftDao {
 
     @Query("SELECT * FROM knowledge_entry_drafts ORDER BY updatedAt DESC")
     suspend fun getDrafts(): List<KnowledgeEntryDraftEntity>
+
+    @Query(
+        """
+        SELECT date AS date,
+               CAST(SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) AS INTEGER) AS pendingDraftCount,
+               CAST(SUM(CASE WHEN status = 'PENDING' THEN MIN(CAST((LENGTH(TRIM(content)) + 499) / 500 AS INTEGER), 6) ELSE 0 END) AS INTEGER) AS plantUnits
+        FROM knowledge_entry_drafts
+        WHERE date >= :startDate
+          AND date < :endDate
+        GROUP BY date
+        ORDER BY date DESC
+        """
+    )
+    fun observeCalendarFarmDraftSummaries(
+        startDate: String,
+        endDate: String
+    ): Flow<List<CalendarDraftFarmSummary>>
 
     @Query("SELECT * FROM knowledge_entry_drafts WHERE id = :id LIMIT 1")
     suspend fun getDraft(id: String): KnowledgeEntryDraftEntity?
