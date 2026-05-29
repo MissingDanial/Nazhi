@@ -47,25 +47,31 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.nazhi.app.AudioTranscriptionService
-import com.nazhi.app.core.model.AiTaskProgress
-import com.nazhi.app.core.model.AudioTranscriptionJob
-import com.nazhi.app.core.model.AudioTranscriptionJobStatus
-import com.nazhi.app.core.model.DayKnowledgeStatus
-import com.nazhi.app.core.model.IntentType
-import com.nazhi.app.core.model.KnowledgeEntry
-import com.nazhi.app.core.model.Note
-import com.nazhi.app.core.model.NoteStatus
-import com.nazhi.app.core.model.ReviewSession
-import com.nazhi.app.core.model.SourceType
-import com.nazhi.app.core.model.isMeaningfulKnowledgeDuplicateKey
-import com.nazhi.app.core.model.toKnowledgeDuplicateKey
+import com.nazhi.app.core.farm.DailyFarmRuleEngine
 import com.nazhi.app.core.knowledge.KnowledgeIngestionCoordinator
 import com.nazhi.app.core.knowledge.KnowledgeIngestionState
 import com.nazhi.app.core.knowledge.KnowledgeTaskKind
+import com.nazhi.app.core.model.AiTaskProgress
+import com.nazhi.app.core.model.AudioTranscriptionJob
+import com.nazhi.app.core.model.AudioTranscriptionJobStatus
+import com.nazhi.app.core.model.DailyFarmSnapshot
+import com.nazhi.app.core.model.DayKnowledgeStatus
+import com.nazhi.app.core.model.IntentType
+import com.nazhi.app.core.model.KnowledgeIndexStatus
+import com.nazhi.app.core.model.KnowledgeDraftStatus
+import com.nazhi.app.core.model.KnowledgeEntry
+import com.nazhi.app.core.model.KnowledgeEntryDraft
+import com.nazhi.app.core.model.Note
+import com.nazhi.app.core.model.NoteStatus
+import com.nazhi.app.core.model.SourceType
+import com.nazhi.app.core.model.findDuplicateEntry
+import com.nazhi.app.core.model.isMeaningfulKnowledgeDuplicateKey
+import com.nazhi.app.core.model.toKnowledgeDuplicateKey
 import com.nazhi.app.core.network.NazhiBackendException
 import com.nazhi.app.core.repository.NazhiRepository
 import com.nazhi.app.core.util.toLocalDateId
 import com.nazhi.app.core.util.todayDateId
+import com.nazhi.app.feature.farm.DailyFarmPreview
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -94,8 +100,6 @@ fun InboxRoute(
         dateId = dateId,
         screenTitle = "纳知",
         screenSubtitle = "今日",
-        summaryLabel = "今日保存",
-        reviewTitle = "今日回顾",
         showQuickInput = true,
         initialShareText = initialShareText,
         initialShareSource = initialShareSource,
@@ -113,8 +117,6 @@ fun DateNotesRoute(
     dateId: String,
     screenTitle: String,
     screenSubtitle: String,
-    summaryLabel: String,
-    reviewTitle: String,
     showQuickInput: Boolean,
     initialShareText: String? = null,
     initialShareSource: String? = null,
@@ -133,6 +135,12 @@ fun DateNotesRoute(
     val dayKnowledgeStatus by remember(repository, dateId) {
         repository.observeDayKnowledgeStatus(dateId)
     }.collectAsState(initial = DayKnowledgeStatus(dateId, 0, 0, 0, 0, 0, 0, 0, 0))
+    val drafts by remember(repository, dateId) {
+        repository.observeKnowledgeDraftsForDate(dateId)
+    }.collectAsState(initial = emptyList())
+    val knowledgeEntries by remember(repository, dateId) {
+        repository.observeKnowledgeEntriesForDate(dateId)
+    }.collectAsState(initial = emptyList())
     val knowledgeIngestionState by remember(knowledgeIngestionCoordinator) {
         knowledgeIngestionCoordinator?.state ?: flowOf(KnowledgeIngestionState())
     }.collectAsState(initial = KnowledgeIngestionState())
@@ -141,9 +149,20 @@ fun DateNotesRoute(
     val context = LocalContext.current
     val pendingReviewNotes = notes.filter { it.status == NoteStatus.INBOX }
     val visibleAudioJobs = audioJobs.filter { it.shouldShowInInbox() }
+    val pendingDrafts = drafts.filter { it.status == KnowledgeDraftStatus.PENDING }
+    val hasDuplicateDrafts = pendingDrafts.any { draft ->
+        draft.findDuplicateEntry(knowledgeEntries) != null
+    }
+    val hasReviewRequiredDrafts = pendingDrafts.any { it.needsReview }
+    val farmSnapshot = remember(dateId, notes, dayKnowledgeStatus, visibleAudioJobs) {
+        DailyFarmRuleEngine.buildSnapshot(
+            dateId = dateId,
+            notes = notes,
+            knowledgeStatus = dayKnowledgeStatus,
+            audioJobs = visibleAudioJobs
+        )
+    }
     val reviewedCount = notes.count { it.status == NoteStatus.REVIEWED }
-    var isReviewMode by remember { mutableStateOf(false) }
-    var reviewIndex by remember { mutableStateOf(0) }
     var input by remember(initialShareText) { mutableStateOf(initialShareText.orEmpty()) }
     var inputSourceType by remember(initialShareText) {
         mutableStateOf(if (initialShareText.isNullOrBlank()) SourceType.MANUAL else SourceType.SHARE)
@@ -153,7 +172,6 @@ fun DateNotesRoute(
     }
     var editingNote by remember { mutableStateOf<Note?>(null) }
     var deletingNote by remember { mutableStateOf<Note?>(null) }
-    var deleteUpdatesReviewSession by remember { mutableStateOf(false) }
     var handledKnowledgeTaskEventId by remember { mutableStateOf(knowledgeIngestionState.eventId) }
     val isAiOrganizing = knowledgeIngestionState.isRunning &&
         knowledgeIngestionState.taskKind == KnowledgeTaskKind.ORGANIZE
@@ -164,40 +182,23 @@ fun DateNotesRoute(
             knowledgeIngestionState.taskKind == KnowledgeTaskKind.ORGANIZE &&
             knowledgeIngestionState.progress == null
     }
-    val currentReviewNote = pendingReviewNotes.getOrNull(
-        reviewIndex.coerceAtMost((pendingReviewNotes.size - 1).coerceAtLeast(0))
-    )
-
-    LaunchedEffect(pendingReviewNotes.size) {
-        if (pendingReviewNotes.isEmpty()) {
-            isReviewMode = false
-            reviewIndex = 0
-        } else if (reviewIndex > pendingReviewNotes.lastIndex) {
-            reviewIndex = pendingReviewNotes.lastIndex
-        }
-    }
-
     LaunchedEffect(knowledgeIngestionState.eventId) {
         val message = knowledgeIngestionState.message
         if (knowledgeIngestionState.eventId != handledKnowledgeTaskEventId && !message.isNullOrBlank()) {
             handledKnowledgeTaskEventId = knowledgeIngestionState.eventId
             snackbarHostState.showSnackbar(message)
-            if (
-                knowledgeIngestionState.completedTaskKind == KnowledgeTaskKind.ORGANIZE &&
-                message.startsWith("已生成")
-            ) {
-                onOpenKnowledge()
-            }
         }
     }
 
     InboxScreen(
         screenTitle = screenTitle,
         screenSubtitle = screenSubtitle,
-        summaryLabel = summaryLabel,
-        reviewTitle = reviewTitle,
         notes = notes,
         audioJobs = visibleAudioJobs,
+        farmSnapshot = farmSnapshot,
+        dayKnowledgeStatus = dayKnowledgeStatus,
+        pendingDrafts = pendingDrafts,
+        knowledgeEntries = knowledgeEntries,
         input = input,
         inputSourceType = inputSourceType,
         showQuickInput = showQuickInput,
@@ -205,13 +206,12 @@ fun DateNotesRoute(
         pendingReviewCount = pendingReviewNotes.size,
         pendingDraftCount = dayKnowledgeStatus.pendingDraftCount,
         reviewedCount = reviewedCount,
+        hasDuplicateDrafts = hasDuplicateDrafts,
+        hasReviewRequiredDrafts = hasReviewRequiredDrafts,
         isAiOrganizing = isAiOrganizing,
         isKnowledgeTaskRunning = isKnowledgeTaskRunning,
         aiOrganizeProgress = aiOrganizeProgress,
         aiOrganizeMessage = aiOrganizeMessage,
-        isReviewMode = isReviewMode,
-        currentReviewNote = currentReviewNote,
-        reviewIndex = reviewIndex,
         snackbarHostState = snackbarHostState,
         onInputChange = {
             input = it
@@ -286,7 +286,6 @@ fun DateNotesRoute(
         },
         onDelete = { note ->
             deletingNote = note
-            deleteUpdatesReviewSession = false
         },
         onRetryAudioJobs = {
             val intent = Intent(context, AudioTranscriptionService::class.java)
@@ -299,72 +298,18 @@ fun DateNotesRoute(
         onAiOrganizeToday = {
             knowledgeIngestionCoordinator?.organizeToday(dateId)
         },
-        onStartReview = {
-            if (pendingReviewNotes.isEmpty()) {
-                coroutineScope.launch {
-                    snackbarHostState.showSnackbar("没有待回顾内容")
-                }
-            } else {
-                reviewIndex = 0
-                isReviewMode = true
-            }
+        onSubmitAllDrafts = {
+            knowledgeIngestionCoordinator?.submitAll(
+                date = dateId,
+                hasDuplicateDrafts = hasDuplicateDrafts,
+                hasReviewRequiredDrafts = hasReviewRequiredDrafts
+            )
         },
-        onStopReview = {
-            isReviewMode = false
-        },
-        onSkipReview = {
-            if (pendingReviewNotes.isNotEmpty()) {
-                reviewIndex = (reviewIndex + 1) % pendingReviewNotes.size
-            }
-        },
-        onConfirmIntent = { intentType ->
-            val note = currentReviewNote
-            if (note != null) {
-                val now = System.currentTimeMillis()
-                val confirmedDate = now.toLocalDateId()
-                val reviewDateId = note.createdDate
-                val entry = KnowledgeEntry(
-                    id = UUID.randomUUID().toString(),
-                    noteId = note.id,
-                    content = note.content,
-                    intentType = intentType,
-                    userTitle = note.title,
-                    userRemark = note.userRemark,
-                    createdAt = note.createdAt,
-                    createdDate = note.createdDate,
-                    confirmedAt = now,
-                    confirmedDate = confirmedDate
-                )
-
-                coroutineScope.launch {
-                    repository.saveKnowledgeEntry(entry)
-                    repository.updateNoteStatus(note.id, NoteStatus.REVIEWED, now)
-                    val previousSession = repository.getReviewSession(reviewDateId)
-                    val remainingCount = (pendingReviewNotes.size - 1).coerceAtLeast(0)
-                    repository.saveReviewSession(
-                        previousSession.toConfirmedReviewSession(
-                            dateId = reviewDateId,
-                            currentNotes = notes,
-                            remainingCount = remainingCount,
-                            now = now
-                        )
-                    )
-
-                    if (remainingCount == 0) {
-                        isReviewMode = false
-                        reviewIndex = 0
-                        snackbarHostState.showSnackbar("今日回顾完成")
-                    } else {
-                        snackbarHostState.showSnackbar("已沉淀为${intentType.label()}")
-                    }
-                }
-            }
-        },
-        onDeleteFromReview = { note ->
-            deletingNote = note
-            deleteUpdatesReviewSession = true
+        onRetryIndex = {
+            knowledgeIngestionCoordinator?.indexPending()
         },
         onOpenHistoricalPending = onOpenHistoricalPending,
+        onOpenKnowledge = onOpenKnowledge,
         onNavigateBack = onNavigateBack
     )
 
@@ -395,40 +340,16 @@ fun DateNotesRoute(
             note = note,
             onDismiss = {
                 deletingNote = null
-                deleteUpdatesReviewSession = false
             },
             onConfirm = {
-                val shouldUpdateReviewSession = deleteUpdatesReviewSession && note.status == NoteStatus.INBOX
                 deletingNote = null
-                deleteUpdatesReviewSession = false
                 coroutineScope.launch {
                     val now = System.currentTimeMillis()
                     repository.softDeleteNote(
                         id = note.id,
                         updatedAt = now
                     )
-                    if (shouldUpdateReviewSession) {
-                        val reviewDateId = note.createdDate
-                        val previousSession = repository.getReviewSession(reviewDateId)
-                        val remainingCount = (pendingReviewNotes.size - 1).coerceAtLeast(0)
-                        repository.saveReviewSession(
-                            previousSession.toDeletedReviewSession(
-                                dateId = reviewDateId,
-                                currentNotes = notes,
-                                remainingCount = remainingCount,
-                                now = now
-                            )
-                        )
-                        if (remainingCount == 0) {
-                            isReviewMode = false
-                            reviewIndex = 0
-                            snackbarHostState.showSnackbar("今日回顾完成")
-                        } else {
-                            snackbarHostState.showSnackbar("已删除记录")
-                        }
-                    } else {
-                        snackbarHostState.showSnackbar("已删除记录")
-                    }
+                    snackbarHostState.showSnackbar("已删除记录")
                 }
             }
         )
@@ -440,10 +361,12 @@ fun DateNotesRoute(
 fun InboxScreen(
     screenTitle: String,
     screenSubtitle: String,
-    summaryLabel: String,
-    reviewTitle: String,
     notes: List<Note>,
     audioJobs: List<AudioTranscriptionJob>,
+    farmSnapshot: DailyFarmSnapshot,
+    dayKnowledgeStatus: DayKnowledgeStatus,
+    pendingDrafts: List<KnowledgeEntryDraft>,
+    knowledgeEntries: List<KnowledgeEntry>,
     input: String,
     inputSourceType: SourceType,
     showQuickInput: Boolean,
@@ -451,13 +374,12 @@ fun InboxScreen(
     pendingReviewCount: Int,
     pendingDraftCount: Int,
     reviewedCount: Int,
+    hasDuplicateDrafts: Boolean,
+    hasReviewRequiredDrafts: Boolean,
     isAiOrganizing: Boolean,
     isKnowledgeTaskRunning: Boolean,
     aiOrganizeProgress: AiTaskProgress?,
     aiOrganizeMessage: String?,
-    isReviewMode: Boolean,
-    currentReviewNote: Note?,
-    reviewIndex: Int,
     snackbarHostState: SnackbarHostState,
     onInputChange: (String) -> Unit,
     onPasteClipboard: () -> Unit,
@@ -467,14 +389,22 @@ fun InboxScreen(
     onDelete: (Note) -> Unit,
     onRetryAudioJobs: () -> Unit,
     onAiOrganizeToday: () -> Unit,
-    onStartReview: () -> Unit,
-    onStopReview: () -> Unit,
-    onSkipReview: () -> Unit,
-    onConfirmIntent: (IntentType) -> Unit,
-    onDeleteFromReview: (Note) -> Unit,
+    onSubmitAllDrafts: () -> Unit,
+    onRetryIndex: () -> Unit,
     onOpenHistoricalPending: () -> Unit,
+    onOpenKnowledge: () -> Unit,
     onNavigateBack: (() -> Unit)?
 ) {
+    var selectedPanel by remember { mutableStateOf<TodayPanel?>(null) }
+    val retryableAudioCount = audioJobs.count { it.canRetry }
+    val hasIssue = retryableAudioCount > 0 || dayKnowledgeStatus.failedIndexCount > 0
+
+    LaunchedEffect(input, showQuickInput) {
+        if (showQuickInput && input.isNotBlank() && selectedPanel == null) {
+            selectedPanel = TodayPanel.CAPTURED
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -505,45 +435,45 @@ fun InboxScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            if (showQuickInput) {
-                item {
-                    QuickInputCard(
-                        input = input,
-                        sourceType = inputSourceType,
-                        onInputChange = onInputChange,
-                        onPasteClipboard = onPasteClipboard,
-                        onSave = onSave
-                    )
-                }
-            }
-
-            if (showQuickInput) {
-                item {
-                    AiOrganizeTodayCard(
-                        totalCount = notes.size,
-                        pendingCount = pendingReviewCount,
-                        pendingDraftCount = pendingDraftCount,
-                        reviewedCount = reviewedCount,
-                        isOrganizing = isAiOrganizing,
-                        isKnowledgeTaskRunning = isKnowledgeTaskRunning,
-                        progress = aiOrganizeProgress,
-                        statusMessage = aiOrganizeMessage,
-                        onOrganize = onAiOrganizeToday
-                    )
-                }
-            }
-
-            if (audioJobs.isNotEmpty()) {
-                item {
-                    AudioTranscriptionJobsCard(
-                        jobs = audioJobs,
-                        onRetry = onRetryAudioJobs
-                    )
-                }
+            item {
+                TodayStatusChips(
+                    totalCount = notes.size,
+                    pendingCount = pendingReviewCount,
+                    pendingDraftCount = pendingDraftCount,
+                    knowledgeCount = dayKnowledgeStatus.knowledgeEntryCount,
+                    issueCount = retryableAudioCount + dayKnowledgeStatus.failedIndexCount,
+                    selectedPanel = selectedPanel,
+                    onSelectPanel = { panel ->
+                        selectedPanel = if (selectedPanel == panel) null else panel
+                    }
+                )
             }
 
             item {
-                InboxSummary(label = summaryLabel, notes = notes)
+                DailyFarmPreview(snapshot = farmSnapshot)
+            }
+
+            item {
+                TodayPrimaryActionCard(
+                    showQuickInput = showQuickInput,
+                    totalCount = notes.size,
+                    pendingCount = pendingReviewCount,
+                    pendingDraftCount = pendingDraftCount,
+                    reviewedCount = reviewedCount,
+                    knowledgeCount = dayKnowledgeStatus.knowledgeEntryCount,
+                    hasIssue = hasIssue,
+                    isAiOrganizing = isAiOrganizing,
+                    isKnowledgeTaskRunning = isKnowledgeTaskRunning,
+                    progress = aiOrganizeProgress,
+                    statusMessage = aiOrganizeMessage,
+                    hasDuplicateDrafts = hasDuplicateDrafts,
+                    hasReviewRequiredDrafts = hasReviewRequiredDrafts,
+                    onAddContent = { selectedPanel = TodayPanel.CAPTURED },
+                    onOrganize = onAiOrganizeToday,
+                    onOpenDrafts = { selectedPanel = TodayPanel.DRAFTS },
+                    onSubmitDrafts = onSubmitAllDrafts,
+                    onOpenIssues = { selectedPanel = TodayPanel.ISSUES }
+                )
             }
 
             if (showQuickInput && historyPendingCount > 0) {
@@ -555,39 +485,27 @@ fun InboxScreen(
                 }
             }
 
-            item {
-                DailyReviewCard(
-                    title = reviewTitle,
-                    totalCount = notes.size,
-                    pendingCount = pendingReviewCount,
-                    reviewedCount = reviewedCount,
-                    isReviewMode = isReviewMode,
-                    currentNote = currentReviewNote,
-                    reviewIndex = reviewIndex,
-                    onStartReview = onStartReview,
-                    onStopReview = onStopReview,
-                    onSkip = onSkipReview,
-                    onConfirmIntent = onConfirmIntent,
-                    onDelete = {
-                        currentReviewNote?.let(onDeleteFromReview)
-                    }
-                )
-            }
-
-            if (notes.isEmpty()) {
+            selectedPanel?.let { panel ->
                 item {
-                    EmptyInboxCard(showQuickInput = showQuickInput)
-                }
-            } else {
-                items(
-                    items = notes,
-                    key = { note -> note.id }
-                ) { note ->
-                    NoteCard(
-                        note = note,
-                        onEdit = { onEdit(note) },
-                        onCopy = { onCopy(note) },
-                        onDelete = { onDelete(note) }
+                    TodayPanelCard(
+                        panel = panel,
+                        notes = notes,
+                        pendingDrafts = pendingDrafts,
+                        knowledgeEntries = knowledgeEntries,
+                        audioJobs = audioJobs,
+                        showQuickInput = showQuickInput,
+                        input = input,
+                        inputSourceType = inputSourceType,
+                        onInputChange = onInputChange,
+                        onPasteClipboard = onPasteClipboard,
+                        onSave = onSave,
+                        onEditNote = onEdit,
+                        onCopyNote = onCopy,
+                        onDeleteNote = onDelete,
+                        onRetryAudioJobs = onRetryAudioJobs,
+                        onRetryIndex = onRetryIndex,
+                        onSubmitAllDrafts = onSubmitAllDrafts,
+                        onOpenKnowledge = onOpenKnowledge
                     )
                 }
             }
@@ -595,19 +513,130 @@ fun InboxScreen(
     }
 }
 
+private enum class TodayPanel {
+    CAPTURED,
+    DRAFTS,
+    INGESTED,
+    ISSUES
+}
+
 @Composable
-private fun AiOrganizeTodayCard(
+private fun TodayStatusChips(
+    totalCount: Int,
+    pendingCount: Int,
+    pendingDraftCount: Int,
+    knowledgeCount: Int,
+    issueCount: Int,
+    selectedPanel: TodayPanel?,
+    onSelectPanel: (TodayPanel) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            TodayStatusChip(
+                label = "收纳",
+                count = totalCount,
+                selected = selectedPanel == TodayPanel.CAPTURED,
+                modifier = Modifier.weight(1f),
+                onClick = { onSelectPanel(TodayPanel.CAPTURED) }
+            )
+            TodayStatusChip(
+                label = "待整理",
+                count = pendingCount,
+                selected = selectedPanel == TodayPanel.CAPTURED && pendingCount > 0,
+                modifier = Modifier.weight(1f),
+                onClick = { onSelectPanel(TodayPanel.CAPTURED) }
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            TodayStatusChip(
+                label = "待确认",
+                count = pendingDraftCount,
+                selected = selectedPanel == TodayPanel.DRAFTS,
+                modifier = Modifier.weight(1f),
+                onClick = { onSelectPanel(TodayPanel.DRAFTS) }
+            )
+            TodayStatusChip(
+                label = "已入库",
+                count = knowledgeCount,
+                selected = selectedPanel == TodayPanel.INGESTED,
+                modifier = Modifier.weight(1f),
+                onClick = { onSelectPanel(TodayPanel.INGESTED) }
+            )
+            TodayStatusChip(
+                label = "异常",
+                count = issueCount,
+                selected = selectedPanel == TodayPanel.ISSUES,
+                modifier = Modifier.weight(1f),
+                onClick = { onSelectPanel(TodayPanel.ISSUES) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun TodayStatusChip(
+    label: String,
+    count: Int,
+    selected: Boolean,
+    modifier: Modifier,
+    onClick: () -> Unit
+) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier
+    ) {
+        Text(
+            text = "$label $count",
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+        )
+    }
+}
+
+@Composable
+private fun TodayPrimaryActionCard(
+    showQuickInput: Boolean,
     totalCount: Int,
     pendingCount: Int,
     pendingDraftCount: Int,
     reviewedCount: Int,
-    isOrganizing: Boolean,
+    knowledgeCount: Int,
+    hasIssue: Boolean,
+    isAiOrganizing: Boolean,
     isKnowledgeTaskRunning: Boolean,
     progress: AiTaskProgress?,
     statusMessage: String?,
-    onOrganize: () -> Unit
+    hasDuplicateDrafts: Boolean,
+    hasReviewRequiredDrafts: Boolean,
+    onAddContent: () -> Unit,
+    onOrganize: () -> Unit,
+    onOpenDrafts: () -> Unit,
+    onSubmitDrafts: () -> Unit,
+    onOpenIssues: () -> Unit
 ) {
-    val canOrganize = pendingCount > 0 && pendingDraftCount == 0
+    val label = when {
+        isAiOrganizing -> "AI 整理中"
+        isKnowledgeTaskRunning -> "知识处理中"
+        hasIssue -> "处理异常"
+        pendingDraftCount > 0 && (hasDuplicateDrafts || hasReviewRequiredDrafts) -> "查看待确认"
+        pendingDraftCount > 0 -> "确认入库"
+        pendingCount > 0 -> "AI 整理今日"
+        totalCount == 0 && showQuickInput -> "添加内容"
+        else -> "今日已完成"
+    }
+    val enabled = when {
+        isAiOrganizing || isKnowledgeTaskRunning -> false
+        totalCount == 0 && !showQuickInput -> false
+        label == "今日已完成" -> false
+        else -> true
+    }
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -616,61 +645,273 @@ private fun AiOrganizeTodayCard(
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text(
-                text = "AI 整理今日收件箱",
+                text = "今日进度",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "跳过逐条整理，让 AI 先合并、分类和打标签，你只需要确认草稿。",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onPrimaryContainer
-            )
-            Text(
-                text = "今日 $totalCount 条 · 未处理 $pendingCount 条 · 待确认草稿 $pendingDraftCount 条 · 已处理 $reviewedCount 条",
+                text = "收纳 $totalCount · 待整理 $pendingCount · 待确认 $pendingDraftCount · 已入库 $knowledgeCount · 已处理 $reviewedCount",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onPrimaryContainer
             )
             progress?.let { taskProgress ->
                 RequestProgressBlock(progress = taskProgress)
             }
-            if (progress == null && isOrganizing && !statusMessage.isNullOrBlank()) {
+            if (progress == null && !statusMessage.isNullOrBlank()) {
                 Text(
                     text = statusMessage,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onPrimaryContainer
                 )
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            }
-            if (!canOrganize) {
-                Text(
-                    text = when {
-                        pendingDraftCount > 0 -> "已有待确认草稿，先到知识库确认后再整理。"
-                        pendingCount == 0 -> "当前没有待整理内容。"
-                        else -> "当前不可整理。"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                )
+                if (isAiOrganizing || isKnowledgeTaskRunning) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
             }
             Button(
-                onClick = onOrganize,
-                enabled = canOrganize && !isKnowledgeTaskRunning,
+                onClick = {
+                    when {
+                        hasIssue -> onOpenIssues()
+                        pendingDraftCount > 0 && (hasDuplicateDrafts || hasReviewRequiredDrafts) -> onOpenDrafts()
+                        pendingDraftCount > 0 -> onSubmitDrafts()
+                        pendingCount > 0 -> onOrganize()
+                        totalCount == 0 && showQuickInput -> onAddContent()
+                    }
+                },
+                enabled = enabled,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text(
-                    text = when {
-                        isOrganizing -> "AI 整理中"
-                        isKnowledgeTaskRunning -> "知识处理中"
-                        pendingDraftCount > 0 -> "先确认草稿"
-                        pendingCount == 0 -> "暂无可整理"
-                        else -> "AI 整理今日"
-                    }
-                )
+                Text(text = label)
             }
         }
+    }
+}
+
+@Composable
+private fun TodayPanelCard(
+    panel: TodayPanel,
+    notes: List<Note>,
+    pendingDrafts: List<KnowledgeEntryDraft>,
+    knowledgeEntries: List<KnowledgeEntry>,
+    audioJobs: List<AudioTranscriptionJob>,
+    showQuickInput: Boolean,
+    input: String,
+    inputSourceType: SourceType,
+    onInputChange: (String) -> Unit,
+    onPasteClipboard: () -> Unit,
+    onSave: () -> Unit,
+    onEditNote: (Note) -> Unit,
+    onCopyNote: (Note) -> Unit,
+    onDeleteNote: (Note) -> Unit,
+    onRetryAudioJobs: () -> Unit,
+    onRetryIndex: () -> Unit,
+    onSubmitAllDrafts: () -> Unit,
+    onOpenKnowledge: () -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                text = panel.title(),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            when (panel) {
+                TodayPanel.CAPTURED -> {
+                    if (showQuickInput) {
+                        QuickInputCard(
+                            input = input,
+                            sourceType = inputSourceType,
+                            onInputChange = onInputChange,
+                            onPasteClipboard = onPasteClipboard,
+                            onSave = onSave
+                        )
+                    }
+                    if (notes.isEmpty()) {
+                        EmptyInboxCard(showQuickInput = showQuickInput)
+                    } else {
+                        notes.take(5).forEach { note ->
+                            NoteCard(
+                                note = note,
+                                onEdit = { onEditNote(note) },
+                                onCopy = { onCopyNote(note) },
+                                onDelete = { onDeleteNote(note) }
+                            )
+                        }
+                        if (notes.size > 5) {
+                            Text(
+                                text = "还有 ${notes.size - 5} 条记录未展开。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+                TodayPanel.DRAFTS -> {
+                    if (pendingDrafts.isEmpty()) {
+                        Text(
+                            text = "当前没有待确认草稿。",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        pendingDrafts.take(5).forEach { draft ->
+                            KnowledgeDraftSummaryCard(draft = draft)
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = onOpenKnowledge,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(text = "编辑草稿")
+                            }
+                            Button(
+                                onClick = onSubmitAllDrafts,
+                                enabled = pendingDrafts.none { it.needsReview },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(text = "确认入库")
+                            }
+                        }
+                    }
+                }
+                TodayPanel.INGESTED -> {
+                    if (knowledgeEntries.isEmpty()) {
+                        Text(
+                            text = "今天还没有入库知识。",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        knowledgeEntries.take(5).forEach { entry ->
+                            KnowledgeEntrySummaryCard(entry = entry)
+                        }
+                    }
+                }
+                TodayPanel.ISSUES -> {
+                    val failedJobs = audioJobs.filter { it.canRetry || it.status == AudioTranscriptionJobStatus.FAILED }
+                    if (failedJobs.isEmpty()) {
+                        Text(
+                            text = "当前没有待处理异常。",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        failedJobs.take(5).forEach { job ->
+                            Text(
+                                text = job.audioJobLine(),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = onRetryIndex,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(text = "重试索引")
+                        }
+                        Button(
+                            onClick = onRetryAudioJobs,
+                            enabled = failedJobs.any { it.canRetry },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(text = "重试音频")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun KnowledgeDraftSummaryCard(draft: KnowledgeEntryDraft) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = draft.title,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = draft.summary.ifBlank { draft.content },
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = "来源 ${draft.sourceNoteIds.size} 条 · ${draft.intentType.label()} · ${draft.reviewLabel()}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun KnowledgeEntrySummaryCard(entry: KnowledgeEntry) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = entry.userTitle?.takeIf { it.isNotBlank() } ?: "未命名知识",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = entry.summary.ifBlank { entry.content },
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = "${entry.intentType.label()} · ${entry.indexStatus.label()} · 来源 ${entry.sourceNoteIds.size} 条",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+private fun TodayPanel.title(): String {
+    return when (this) {
+        TodayPanel.CAPTURED -> "今日收纳内容"
+        TodayPanel.DRAFTS -> "待确认草稿"
+        TodayPanel.INGESTED -> "今日入库结果"
+        TodayPanel.ISSUES -> "待处理异常"
     }
 }
 
@@ -752,156 +993,6 @@ private fun com.nazhi.app.core.model.AiTaskStage.label(): String {
         com.nazhi.app.core.model.AiTaskStage.DONE -> "完成"
         com.nazhi.app.core.model.AiTaskStage.FAILED -> "失败"
         com.nazhi.app.core.model.AiTaskStage.UNKNOWN -> "处理中"
-    }
-}
-
-@Composable
-private fun DailyReviewCard(
-    title: String,
-    totalCount: Int,
-    pendingCount: Int,
-    reviewedCount: Int,
-    isReviewMode: Boolean,
-    currentNote: Note?,
-    reviewIndex: Int,
-    onStartReview: () -> Unit,
-    onStopReview: () -> Unit,
-    onSkip: () -> Unit,
-    onConfirmIntent: (IntentType) -> Unit,
-    onDelete: () -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer
-        )
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text(
-                text = if (title == "今日回顾") "可选人工整理" else title,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
-            Text(
-                text = "AI 整理是主流程；这里保留逐条人工整理作为补充。待处理 $pendingCount · 已处理 $reviewedCount · 总计 $totalCount",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSecondaryContainer
-            )
-
-            if (isReviewMode && currentNote != null) {
-                ReviewPanel(
-                    note = currentNote,
-                    position = reviewIndex + 1,
-                    total = pendingCount,
-                    onConfirmIntent = onConfirmIntent,
-                    onSkip = onSkip,
-                    onDelete = onDelete,
-                    onStop = onStopReview
-                )
-            } else {
-                Button(
-                    onClick = onStartReview,
-                    enabled = pendingCount > 0,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(text = if (pendingCount > 0) "逐条人工整理" else "今日已完成")
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ReviewPanel(
-    note: Note,
-    position: Int,
-    total: Int,
-    onConfirmIntent: (IntentType) -> Unit,
-    onSkip: () -> Unit,
-    onDelete: () -> Unit,
-    onStop: () -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        )
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Text(
-                text = "$position / $total",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary
-            )
-            if (note.isAudioNote()) {
-                Text(
-                    text = note.audioMetaText(includeStatus = false),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            }
-            Text(
-                text = note.title ?: "未命名记录",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                text = note.content,
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 6,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                text = if (note.isAudioNote()) {
-                    note.status.label()
-                } else {
-                    "${note.sourceType.label()} · ${note.createdAt.formatTime()}"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Button(
-                onClick = { onConfirmIntent(IntentType.QUOTABLE) },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(text = "可引用")
-            }
-            OutlinedButton(
-                onClick = { onConfirmIntent(IntentType.INSPIRATION) },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(text = "灵感")
-            }
-            OutlinedButton(
-                onClick = { onConfirmIntent(IntentType.READ_LATER) },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(text = "稍后看")
-            }
-            HorizontalDivider()
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End
-            ) {
-                TextButton(onClick = onStop) {
-                    Text(text = "退出")
-                }
-                TextButton(onClick = onSkip) {
-                    Text(text = "跳过")
-                }
-                TextButton(onClick = onDelete) {
-                    Text(text = "删除")
-                }
-            }
-        }
     }
 }
 
@@ -997,27 +1088,6 @@ private fun QuickInputCard(
                 Text(text = "保存到今日收件箱")
             }
         }
-    }
-}
-
-@Composable
-private fun InboxSummary(
-    label: String,
-    notes: List<Note>
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold
-        )
-        Text(
-            text = "${notes.size} 条",
-            style = MaterialTheme.typography.titleMedium
-        )
     }
 }
 
@@ -1207,8 +1277,6 @@ fun InboxPreview() {
         InboxScreen(
             screenTitle = "纳知",
             screenSubtitle = "今日",
-            summaryLabel = "今日保存",
-            reviewTitle = "今日回顾",
             notes = listOf(
                 Note(
                     id = "1",
@@ -1225,6 +1293,15 @@ fun InboxPreview() {
                 )
             ),
             audioJobs = emptyList(),
+            farmSnapshot = DailyFarmRuleEngine.buildSnapshot(
+                dateId = now.toLocalDateId(),
+                notes = emptyList(),
+                knowledgeStatus = DayKnowledgeStatus(now.toLocalDateId(), 1, 1, 0, 0, 0, 0, 0, 0),
+                audioJobs = emptyList()
+            ),
+            dayKnowledgeStatus = DayKnowledgeStatus(now.toLocalDateId(), 1, 1, 0, 0, 0, 0, 0, 0),
+            pendingDrafts = emptyList(),
+            knowledgeEntries = emptyList(),
             input = "",
             inputSourceType = SourceType.MANUAL,
             showQuickInput = true,
@@ -1233,13 +1310,12 @@ fun InboxPreview() {
             pendingReviewCount = 1,
             pendingDraftCount = 0,
             reviewedCount = 0,
+            hasDuplicateDrafts = false,
+            hasReviewRequiredDrafts = false,
             isAiOrganizing = false,
             isKnowledgeTaskRunning = false,
             aiOrganizeProgress = null,
             aiOrganizeMessage = null,
-            isReviewMode = false,
-            currentReviewNote = null,
-            reviewIndex = 0,
             onInputChange = {},
             onPasteClipboard = {},
             onSave = {},
@@ -1248,12 +1324,10 @@ fun InboxPreview() {
             onDelete = {},
             onRetryAudioJobs = {},
             onAiOrganizeToday = {},
-            onStartReview = {},
-            onStopReview = {},
-            onSkipReview = {},
-            onConfirmIntent = { _ -> },
-            onDeleteFromReview = {},
+            onSubmitAllDrafts = {},
+            onRetryIndex = {},
             onOpenHistoricalPending = {},
+            onOpenKnowledge = {},
             onNavigateBack = null
         )
     }
@@ -1363,6 +1437,19 @@ private fun IntentType.label(): String {
     }
 }
 
+private fun KnowledgeEntryDraft.reviewLabel(): String {
+    return if (needsReview) "需确认" else "可入库"
+}
+
+private fun KnowledgeIndexStatus.label(): String {
+    return when (this) {
+        KnowledgeIndexStatus.PENDING -> "待索引"
+        KnowledgeIndexStatus.INDEXING -> "索引中"
+        KnowledgeIndexStatus.INDEXED -> "已索引"
+        KnowledgeIndexStatus.FAILED -> "索引失败"
+    }
+}
+
 private fun Throwable.toUserFacingMessage(): String {
     return when (this) {
         is NazhiBackendException -> when {
@@ -1388,44 +1475,6 @@ private fun Throwable.toUserFacingMessage(): String {
 private fun Long.formatTime(): String {
     val formatter = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
     return formatter.format(Date(this))
-}
-
-private fun ReviewSession?.toConfirmedReviewSession(
-    dateId: String,
-    currentNotes: List<Note>,
-    remainingCount: Int,
-    now: Long
-): ReviewSession {
-    val deletedCount = this?.deletedCount ?: 0
-    val confirmedCount = currentNotes.count { it.status == NoteStatus.REVIEWED } + 1
-    val totalCount = maxOf(this?.totalCount ?: 0, confirmedCount + deletedCount + remainingCount)
-    return ReviewSession(
-        id = dateId,
-        date = dateId,
-        totalCount = totalCount,
-        confirmedCount = confirmedCount,
-        deletedCount = deletedCount,
-        completedAt = if (remainingCount == 0) now else this?.completedAt
-    )
-}
-
-private fun ReviewSession?.toDeletedReviewSession(
-    dateId: String,
-    currentNotes: List<Note>,
-    remainingCount: Int,
-    now: Long
-): ReviewSession {
-    val deletedCount = (this?.deletedCount ?: 0) + 1
-    val confirmedCount = currentNotes.count { it.status == NoteStatus.REVIEWED }
-    val totalCount = maxOf(this?.totalCount ?: 0, confirmedCount + deletedCount + remainingCount)
-    return ReviewSession(
-        id = dateId,
-        date = dateId,
-        totalCount = totalCount,
-        confirmedCount = confirmedCount,
-        deletedCount = deletedCount,
-        completedAt = if (remainingCount == 0) now else this?.completedAt
-    )
 }
 
 private fun Context.copyToClipboard(label: String, text: String) {
