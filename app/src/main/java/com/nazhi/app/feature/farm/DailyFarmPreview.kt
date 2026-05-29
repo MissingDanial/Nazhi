@@ -1,18 +1,21 @@
 package com.nazhi.app.feature.farm
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.matchParentSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
+import androidx.compose.foundation.layout.Row
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -21,13 +24,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
@@ -35,13 +36,18 @@ import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import com.nazhi.app.R
 import com.nazhi.app.core.model.DailyFarmSnapshot
 import com.nazhi.app.core.model.KnowledgeEntry
 import com.nazhi.app.core.model.KnowledgeEntryDraft
 import com.nazhi.app.core.model.Note
+import com.nazhi.app.core.ui.NazhiStatusKind
+import com.nazhi.app.core.ui.PixelStatusIcon
 import kotlin.math.abs
 import kotlin.math.min
 
@@ -91,17 +97,22 @@ fun DailyFarmPreview(
     selectedPlotId: String? = null,
     onPlotClick: (FarmPlotUiModel) -> Unit = {}
 ) {
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainer
-        )
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = 352.dp)
     ) {
+        Image(
+            painter = painterResource(id = R.drawable.farm_panel_bg),
+            contentDescription = null,
+            modifier = Modifier.matchParentSize(),
+            contentScale = ContentScale.FillBounds
+        )
         Column(
-            modifier = Modifier.padding(18.dp),
+            modifier = Modifier.padding(start = 22.dp, end = 22.dp, top = 22.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
                     text = "知识农场",
                     style = MaterialTheme.typography.titleLarge,
@@ -112,6 +123,11 @@ fun DailyFarmPreview(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    FarmMetric(label = "待整理", count = snapshot.saplingCount, kind = NazhiStatusKind.PENDING)
+                    FarmMetric(label = "待确认", count = snapshot.plantCount, kind = NazhiStatusKind.DRAFT)
+                    FarmMetric(label = "已沉淀", count = snapshot.matureCount, kind = NazhiStatusKind.SETTLED)
+                }
             }
 
             DailyFarmCanvas(
@@ -121,9 +137,25 @@ fun DailyFarmPreview(
                 onPlotClick = onPlotClick,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(230.dp)
+                    .height(244.dp)
             )
         }
+    }
+}
+
+@Composable
+private fun FarmMetric(
+    label: String,
+    count: Int,
+    kind: NazhiStatusKind
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        PixelStatusIcon(kind = kind, size = 16.dp)
+        Text(
+            text = "$label $count",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
@@ -201,23 +233,20 @@ private fun DailyFarmCanvas(
                     pivot = Offset(size.width / 2f, size.height / 2f)
                 )
             }) {
-                drawRoundRect(
-                    color = Color(0xFFEAF3F0),
-                    cornerRadius = CornerRadius(layout.tileWidth * 0.22f, layout.tileWidth * 0.22f)
-                )
+                drawPixelFarmBackdrop()
 
                 layout.tiles.forEach { tile ->
                     val baseColor = if ((tile.key.row + tile.key.col) % 2 == 0) {
-                        Color(0xFFDDEDDC)
+                        Color(0xFFE5CAA0)
                     } else {
-                        Color(0xFFD2E4D2)
+                        Color(0xFFDDBF90)
                     }
                     drawIsoTile(
                         center = tile.center,
                         tileWidth = layout.tileWidth,
                         tileHeight = layout.tileHeight,
                         fill = baseColor,
-                        border = Color(0xFFB4CBB4)
+                        border = Color(0xFF9E7956)
                     )
                 }
 
@@ -241,6 +270,10 @@ private fun DailyFarmCanvas(
                             dateSeed = snapshot.dateId
                         )
                     }
+                }
+
+                if (snapshot.issueCount > 0) {
+                    drawFarmIssueSign(layout = layout)
                 }
             }
         }
@@ -403,11 +436,17 @@ private fun DrawScope.drawIsoTile(
     border: Color
 ) {
     val path = isoTilePath(center, tileWidth, tileHeight)
-    drawPath(path = path, color = Color(0x22000000))
+    val shadowPath = isoTilePath(Offset(center.x + tileWidth * 0.035f, center.y + tileHeight * 0.08f), tileWidth, tileHeight)
+    drawPath(path = shadowPath, color = Color(0x22000000))
     drawPath(path = path, color = fill)
     drawPath(
         path = path,
-        color = border.copy(alpha = 0.62f),
+        color = border.copy(alpha = 0.82f),
+        style = Stroke(width = (tileWidth * 0.035f).coerceAtLeast(2.2f))
+    )
+    drawPath(
+        path = path,
+        color = Color(0xFFFFF4D7).copy(alpha = 0.64f),
         style = Stroke(width = (tileWidth * 0.012f).coerceAtLeast(1f))
     )
 }
@@ -418,17 +457,73 @@ private fun DrawScope.drawSelectedIsoTile(
     tileHeight: Float
 ) {
     val path = isoTilePath(center, tileWidth, tileHeight)
-    drawPath(path = path, color = Color(0x332B6B4F))
+    drawPath(path = path, color = Color(0x442F7D57))
     drawPath(
         path = path,
-        color = Color(0xFF2B6B4F),
-        style = Stroke(width = (tileWidth * 0.035f).coerceAtLeast(2.4f))
+        color = Color(0xFF1E573D),
+        style = Stroke(width = (tileWidth * 0.07f).coerceAtLeast(4.2f))
     )
     drawPath(
         path = path,
-        color = Color.White.copy(alpha = 0.82f),
-        style = Stroke(width = (tileWidth * 0.014f).coerceAtLeast(1.2f))
+        color = Color(0xFFFFF8EA).copy(alpha = 0.92f),
+        style = Stroke(width = (tileWidth * 0.026f).coerceAtLeast(1.8f))
     )
+}
+
+private fun DrawScope.drawPixelFarmBackdrop() {
+    val step = size.minDimension * 0.045f
+    val shadow = step * 0.28f
+    val border = step * 0.18f
+    drawPath(
+        path = steppedCanvasPath(Offset(shadow, shadow), size.width - shadow, size.height - shadow, step),
+        color = Color(0x2A8A6243)
+    )
+    drawPath(
+        path = steppedCanvasPath(Offset.Zero, size.width - shadow, size.height - shadow, step),
+        color = Color(0xFF8A6243)
+    )
+    drawPath(
+        path = steppedCanvasPath(
+            Offset(border, border),
+            size.width - shadow - border * 2f,
+            size.height - shadow - border * 2f,
+            (step - border).coerceAtLeast(border * 2f)
+        ),
+        color = Color(0xFFF3E7CC)
+    )
+    drawRect(
+        color = Color(0x66FFF4D7),
+        topLeft = Offset(step, border),
+        size = Size((size.width - step * 2f - shadow).coerceAtLeast(0f), border * 0.72f)
+    )
+}
+
+private fun steppedCanvasPath(
+    topLeft: Offset,
+    width: Float,
+    height: Float,
+    step: Float
+): Path {
+    val x = topLeft.x
+    val y = topLeft.y
+    val right = x + width
+    val bottom = y + height
+    val corner = step.coerceAtMost(width / 2f).coerceAtMost(height / 2f)
+    return Path().apply {
+        moveTo(x + corner, y)
+        lineTo(right - corner, y)
+        lineTo(right - corner, y + corner)
+        lineTo(right, y + corner)
+        lineTo(right, bottom - corner)
+        lineTo(right - corner, bottom - corner)
+        lineTo(right - corner, bottom)
+        lineTo(x + corner, bottom)
+        lineTo(x + corner, bottom - corner)
+        lineTo(x, bottom - corner)
+        lineTo(x, y + corner)
+        lineTo(x + corner, y + corner)
+        close()
+    }
 }
 
 private fun isoTilePath(
@@ -479,16 +574,10 @@ private fun DrawScope.drawSapling(
     val stemColor = Color(0xFF5E7F4A)
     val leafColor = Color(0xFF6EAD64)
     val top = Offset(base.x, base.y - tileHeight * (0.44f + level * 0.08f))
-    drawLine(
-        color = stemColor,
-        start = base,
-        end = top,
-        strokeWidth = (tileWidth * 0.045f).coerceAtLeast(2f),
-        cap = StrokeCap.Round
-    )
-    val leafRadius = tileWidth * (0.065f + level * 0.008f)
-    drawCircle(color = leafColor, radius = leafRadius, center = Offset(top.x - leafRadius * 0.72f, top.y + leafRadius * 0.18f))
-    drawCircle(color = Color(0xFF83C477), radius = leafRadius, center = Offset(top.x + leafRadius * 0.72f, top.y - leafRadius * 0.08f))
+    val block = (tileWidth * 0.075f).coerceAtLeast(3f)
+    drawPixelBlock(center = Offset(base.x, (base.y + top.y) / 2f), width = block, height = base.y - top.y, color = stemColor)
+    drawPixelBlock(center = Offset(top.x - block, top.y + block * 0.2f), width = block * 1.5f, height = block, color = leafColor)
+    drawPixelBlock(center = Offset(top.x + block, top.y - block * 0.2f), width = block * 1.5f, height = block, color = Color(0xFF83C477))
 }
 
 private fun DrawScope.drawPlant(
@@ -502,17 +591,11 @@ private fun DrawScope.drawPlant(
     val lightLeaf = Color(0xFF69B979)
     val height = tileHeight * (0.82f + level * 0.13f)
     val top = Offset(base.x, base.y - height)
-    drawLine(
-        color = stemColor,
-        start = base,
-        end = top,
-        strokeWidth = (tileWidth * 0.052f).coerceAtLeast(2.5f),
-        cap = StrokeCap.Round
-    )
-    val leafRadius = tileWidth * (0.105f + level * 0.012f)
-    drawCircle(color = leafColor, radius = leafRadius, center = Offset(top.x - leafRadius * 0.92f, top.y + leafRadius * 0.86f))
-    drawCircle(color = lightLeaf, radius = leafRadius * 0.92f, center = Offset(top.x + leafRadius * 0.90f, top.y + leafRadius * 0.48f))
-    drawCircle(color = Color(0xFF2F7D57), radius = leafRadius * 0.88f, center = Offset(top.x, top.y))
+    val block = (tileWidth * 0.082f).coerceAtLeast(3.2f)
+    drawPixelBlock(center = Offset(base.x, (base.y + top.y) / 2f), width = block, height = height, color = stemColor)
+    drawPixelBlock(center = Offset(top.x - block * 1.2f, top.y + block * 1.6f), width = block * 2f, height = block * 1.2f, color = leafColor)
+    drawPixelBlock(center = Offset(top.x + block * 1.2f, top.y + block), width = block * 2.1f, height = block * 1.3f, color = lightLeaf)
+    drawPixelBlock(center = Offset(top.x, top.y), width = block * 2f, height = block * 1.5f, color = Color(0xFF2F7D57))
 }
 
 private fun DrawScope.drawMaturePlant(
@@ -529,29 +612,82 @@ private fun DrawScope.drawMaturePlant(
     val lightLeaf = Color(0xFF61AD70)
     val height = tileHeight * (1.04f + level * 0.16f)
     val top = Offset(base.x, base.y - height)
-    drawLine(
-        color = trunkColor,
-        start = base,
-        end = top,
-        strokeWidth = (tileWidth * 0.070f).coerceAtLeast(3f),
-        cap = StrokeCap.Round
-    )
-    val radius = tileWidth * (0.145f + level * 0.016f)
-    drawCircle(color = darkLeaf, radius = radius, center = Offset(top.x, top.y))
-    drawCircle(color = midLeaf, radius = radius * 0.82f, center = Offset(top.x - radius * 0.76f, top.y + radius * 0.25f))
-    drawCircle(color = lightLeaf, radius = radius * 0.78f, center = Offset(top.x + radius * 0.74f, top.y + radius * 0.18f))
-    drawCircle(color = Color(0xFF2F7D57), radius = radius * 0.72f, center = Offset(top.x, top.y - radius * 0.62f))
+    val block = (tileWidth * 0.09f).coerceAtLeast(3.4f)
+    drawPixelBlock(center = Offset(base.x, (base.y + top.y) / 2f), width = block * 1.15f, height = height, color = trunkColor)
+    val crown = tileWidth * (0.20f + level * 0.018f)
+    drawPixelBlock(center = Offset(top.x, top.y), width = crown * 1.5f, height = crown * 1.1f, color = darkLeaf)
+    drawPixelBlock(center = Offset(top.x - crown * 0.62f, top.y + crown * 0.32f), width = crown * 1.1f, height = crown * 0.9f, color = midLeaf)
+    drawPixelBlock(center = Offset(top.x + crown * 0.62f, top.y + crown * 0.22f), width = crown * 1.1f, height = crown * 0.85f, color = lightLeaf)
+    drawPixelBlock(center = Offset(top.x, top.y - crown * 0.58f), width = crown * 1.05f, height = crown * 0.8f, color = Color(0xFF2F7D57))
 
     val fruitColor = Color(0xFFE16B6F)
     repeat(level) { index ->
-        val angleX = stableNoise(dateSeed, salt + 19 + index) * radius * 0.82f
-        val angleY = stableNoise(dateSeed, salt + 29 + index) * radius * 0.50f
-        drawCircle(
-            color = fruitColor,
-            radius = (tileWidth * 0.028f).coerceAtLeast(2f),
-            center = Offset(top.x + angleX, top.y + angleY)
+        val angleX = stableNoise(dateSeed, salt + 19 + index) * crown * 0.52f
+        val angleY = stableNoise(dateSeed, salt + 29 + index) * crown * 0.36f
+        drawPixelBlock(
+            center = Offset(top.x + angleX, top.y + angleY),
+            width = block * 0.8f,
+            height = block * 0.8f,
+            color = fruitColor
         )
     }
+}
+
+private fun DrawScope.drawPixelBlock(
+    center: Offset,
+    width: Float,
+    height: Float,
+    color: Color
+) {
+    drawRect(
+        color = color,
+        topLeft = Offset(center.x - width / 2f, center.y - height / 2f),
+        size = Size(width, height)
+    )
+}
+
+private fun DrawScope.drawFarmIssueSign(layout: FarmLayout) {
+    val tileWidth = layout.tileWidth
+    val tileHeight = layout.tileHeight
+    val right = layout.tiles.maxOf { it.center.x } + tileWidth * 0.26f
+    val top = layout.tiles.minOf { it.center.y } - tileHeight * 0.06f
+    val signWidth = tileWidth * 0.44f
+    val signHeight = tileHeight * 0.56f
+    drawRect(
+        color = Color(0xFF8A6243),
+        topLeft = Offset(right - signWidth * 0.08f, top + signHeight * 0.72f),
+        size = Size(signWidth * 0.16f, signHeight * 0.8f)
+    )
+    drawRect(
+        color = Color(0xFF70482F),
+        topLeft = Offset(right - signWidth * 0.58f, top - signHeight * 0.08f),
+        size = Size(signWidth * 1.16f, signHeight * 1.16f)
+    )
+    drawRect(
+        color = Color(0xFFF7D6C7),
+        topLeft = Offset(right - signWidth * 0.46f, top + signHeight * 0.04f),
+        size = Size(signWidth * 0.92f, signHeight * 0.92f)
+    )
+    drawRect(
+        color = Color(0xFFB65A37),
+        topLeft = Offset(right - signWidth * 0.46f, top + signHeight * 0.04f),
+        size = Size(signWidth * 0.92f, signHeight * 0.16f)
+    )
+    drawRect(
+        color = Color(0xFFB65A37),
+        topLeft = Offset(right - signWidth * 0.24f, top + signHeight * 0.42f),
+        size = Size(signWidth * 0.48f, signHeight * 0.14f)
+    )
+    drawRect(
+        color = Color(0xFFF7D6C7),
+        topLeft = Offset(right - signWidth * 0.58f, top - signHeight * 0.08f),
+        size = Size(signWidth * 0.18f, signHeight * 0.18f)
+    )
+    drawRect(
+        color = Color(0xFFF7D6C7),
+        topLeft = Offset(right + signWidth * 0.40f, top - signHeight * 0.08f),
+        size = Size(signWidth * 0.18f, signHeight * 0.18f)
+    )
 }
 
 private fun stableNoise(seed: String, salt: Int): Float {

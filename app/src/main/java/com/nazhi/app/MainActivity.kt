@@ -16,8 +16,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
+import com.nazhi.app.core.ui.NazhiTheme
 import com.nazhi.app.feature.inbox.InboxPreview
 import com.nazhi.app.feature.home.NazhiHomeRoute
 
@@ -130,8 +132,11 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun NazhiAppRoot(content: @Composable () -> Unit) {
-    MaterialTheme {
-        Surface {
+    NazhiTheme {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = MaterialTheme.colorScheme.background
+        ) {
             content()
         }
     }

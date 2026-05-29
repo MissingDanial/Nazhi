@@ -36,6 +36,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -45,6 +46,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -83,7 +85,12 @@ import com.nazhi.app.feature.farm.FarmPlotUiModel
 import com.nazhi.app.feature.farm.FarmStage
 import com.nazhi.app.feature.farm.buildFarmPlotModels
 import com.nazhi.app.core.ui.EditableKnowledgeEntryDialog
+import com.nazhi.app.core.ui.FarmNoticeCard
 import com.nazhi.app.core.ui.KnowledgeEntryDetailDialog
+import com.nazhi.app.core.ui.NazhiStatusChip
+import com.nazhi.app.core.ui.NazhiStatusKind
+import com.nazhi.app.core.ui.NazhiTheme
+import com.nazhi.app.core.ui.NazhiTokens
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -565,8 +572,14 @@ fun InboxScreen(
     }
 
     Scaffold(
+        containerColor = NazhiTokens.colors.background,
         topBar = {
             TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = NazhiTokens.colors.background,
+                    titleContentColor = NazhiTokens.colors.textPrimary,
+                    navigationIconContentColor = NazhiTokens.colors.grassDark
+                ),
                 navigationIcon = {
                     if (onNavigateBack != null) {
                         TextButton(onClick = onNavigateBack) {
@@ -592,12 +605,11 @@ fun InboxScreen(
                 .fillMaxSize()
                 .padding(innerPadding),
             state = listState,
-            contentPadding = PaddingValues(16.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             item {
                 TodayStatusChips(
-                    totalCount = notes.size,
                     pendingCount = pendingReviewCount,
                     pendingDraftCount = pendingDraftCount,
                     knowledgeCount = dayKnowledgeStatus.indexedEntryCount,
@@ -1193,7 +1205,6 @@ private fun FarmSourceNoteSnippet(note: Note) {
 
 @Composable
 private fun TodayStatusChips(
-    totalCount: Int,
     pendingCount: Int,
     pendingDraftCount: Int,
     knowledgeCount: Int,
@@ -1206,68 +1217,44 @@ private fun TodayStatusChips(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            TodayStatusChip(
-                label = "收纳",
-                count = totalCount,
-                selected = selectedPanel == TodayPanel.CAPTURED,
-                modifier = Modifier.weight(1f),
-                onClick = { onSelectPanel(TodayPanel.CAPTURED) }
-            )
-            TodayStatusChip(
+            NazhiStatusChip(
                 label = "待整理",
                 count = pendingCount,
+                kind = NazhiStatusKind.PENDING,
                 selected = selectedPanel == TodayPanel.CAPTURED && pendingCount > 0,
                 modifier = Modifier.weight(1f),
                 onClick = { onSelectPanel(TodayPanel.CAPTURED) }
+            )
+            NazhiStatusChip(
+                label = "待确认",
+                count = pendingDraftCount,
+                kind = NazhiStatusKind.DRAFT,
+                selected = selectedPanel == TodayPanel.DRAFTS,
+                modifier = Modifier.weight(1f),
+                onClick = { onSelectPanel(TodayPanel.DRAFTS) }
             )
         }
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            TodayStatusChip(
-                label = "待确认",
-                count = pendingDraftCount,
-                selected = selectedPanel == TodayPanel.DRAFTS,
-                modifier = Modifier.weight(1f),
-                onClick = { onSelectPanel(TodayPanel.DRAFTS) }
-            )
-            TodayStatusChip(
+            NazhiStatusChip(
                 label = "已沉淀",
                 count = knowledgeCount,
+                kind = NazhiStatusKind.SETTLED,
                 selected = selectedPanel == TodayPanel.INGESTED,
                 modifier = Modifier.weight(1f),
                 onClick = { onSelectPanel(TodayPanel.INGESTED) }
             )
-            TodayStatusChip(
-                label = "异常",
+            NazhiStatusChip(
+                label = "处理失败",
                 count = issueCount,
+                kind = NazhiStatusKind.ISSUE,
                 selected = selectedPanel == TodayPanel.ISSUES,
                 modifier = Modifier.weight(1f),
                 onClick = { onSelectPanel(TodayPanel.ISSUES) }
             )
         }
-    }
-}
-
-@Composable
-private fun TodayStatusChip(
-    label: String,
-    count: Int,
-    selected: Boolean,
-    modifier: Modifier,
-    onClick: () -> Unit
-) {
-    OutlinedButton(
-        onClick = onClick,
-        modifier = modifier
-    ) {
-        Text(
-            text = "$label $count",
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-        )
     }
 }
 
@@ -1313,64 +1300,43 @@ private fun TodayPrimaryActionCard(
         label == completeLabel || label == emptyHistoryLabel -> false
         else -> true
     }
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer
-        )
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Text(
-                text = "${periodLabel}进度",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
-            Text(
-                text = "收纳 $totalCount · 待整理 $pendingCount · 待确认 $pendingDraftCount · 已沉淀 $knowledgeCount",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onPrimaryContainer
-            )
-            progress?.let { taskProgress ->
-                RequestProgressBlock(progress = taskProgress)
-            }
-            if (progress == null && !statusMessage.isNullOrBlank()) {
-                Text(
-                    text = statusMessage,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                )
-                if (isAiOrganizing || isKnowledgeTaskRunning) {
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                }
-            }
-            Button(
-                onClick = {
-                    when {
-                        hasIssue -> onOpenIssues()
-                        pendingDraftCount > 0 && (hasDuplicateDrafts || hasReviewRequiredDrafts) -> onOpenDrafts()
-                        pendingDraftCount > 0 -> onSubmitDrafts()
-                        pendingCount > 0 -> onOrganize()
-                        totalCount == 0 && showQuickInput -> onAddContent()
-                    }
-                },
-                enabled = enabled,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(text = label)
-            }
-            if (showQuickInput) {
-                OutlinedButton(
-                    onClick = onPasteSave,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(text = "粘贴收纳")
-                }
-            }
-        }
+    val statusKind = when {
+        hasIssue -> NazhiStatusKind.ISSUE
+        pendingDraftCount > 0 -> NazhiStatusKind.DRAFT
+        pendingCount > 0 -> NazhiStatusKind.PENDING
+        totalCount == 0 -> NazhiStatusKind.CAPTURED
+        else -> NazhiStatusKind.SETTLED
     }
+    val progressContent: (@Composable () -> Unit)? = when {
+        progress != null -> {
+            { RequestProgressBlock(progress = progress, contentColor = NazhiTokens.colors.textSecondary) }
+        }
+        !statusMessage.isNullOrBlank() && (isAiOrganizing || isKnowledgeTaskRunning) -> {
+            { LinearProgressIndicator(modifier = Modifier.fillMaxWidth()) }
+        }
+        else -> null
+    }
+    FarmNoticeCard(
+        title = "${periodLabel}告示牌",
+        message = statusMessage
+            ?: "收纳 $totalCount · 待整理 $pendingCount · 待确认 $pendingDraftCount · 已沉淀 $knowledgeCount",
+        statusKind = statusKind,
+        primaryActionLabel = label,
+        primaryActionEnabled = enabled,
+        onPrimaryAction = {
+            when {
+                hasIssue -> onOpenIssues()
+                pendingDraftCount > 0 && (hasDuplicateDrafts || hasReviewRequiredDrafts) -> onOpenDrafts()
+                pendingDraftCount > 0 -> onSubmitDrafts()
+                pendingCount > 0 -> onOrganize()
+                totalCount == 0 && showQuickInput -> onAddContent()
+            }
+        },
+        modifier = Modifier.fillMaxWidth(),
+        secondaryActionLabel = if (showQuickInput) "粘贴收纳" else null,
+        onSecondaryAction = if (showQuickInput) onPasteSave else null,
+        progressContent = progressContent
+    )
 }
 
 @Composable
@@ -1613,17 +1579,20 @@ private fun TodayPanel.title(isToday: Boolean): String {
 }
 
 @Composable
-private fun RequestProgressBlock(progress: AiTaskProgress) {
+private fun RequestProgressBlock(
+    progress: AiTaskProgress,
+    contentColor: Color = MaterialTheme.colorScheme.onPrimaryContainer
+) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(
             text = "${progress.stage.label()} · ${progress.progress}%",
             style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onPrimaryContainer
+            color = contentColor
         )
         Text(
             text = progress.message,
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onPrimaryContainer
+            color = contentColor
         )
         if (progress.isRunning) {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
@@ -2007,7 +1976,7 @@ private fun DeleteNoteDialog(
 @Composable
 fun InboxPreview() {
     val now = System.currentTimeMillis()
-    MaterialTheme {
+    NazhiTheme {
         InboxScreen(
             screenTitle = "纳知",
             screenSubtitle = "今日",
