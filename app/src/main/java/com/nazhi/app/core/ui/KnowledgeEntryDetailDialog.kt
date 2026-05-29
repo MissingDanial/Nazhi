@@ -3,6 +3,7 @@ package com.nazhi.app.core.ui
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -33,6 +34,8 @@ fun KnowledgeEntryDetailDialog(
     citationReason: String? = null,
     onCopyEntry: () -> Unit,
     onCopyNote: (Note) -> Unit,
+    onEditEntry: (() -> Unit)? = null,
+    onEditNote: ((Note) -> Unit)? = null,
     onCopyCitation: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
@@ -103,14 +106,23 @@ fun KnowledgeEntryDetailDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                OutlinedButton(
-                    onClick = {
-                        onCopyEntry()
-                        copyFeedback = "已复制知识条目"
-                    },
-                    modifier = Modifier.fillMaxWidth()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
                 ) {
-                    Text(text = "复制知识条目")
+                    onEditEntry?.let { editEntry ->
+                        TextButton(onClick = editEntry) {
+                            Text(text = "编辑知识")
+                        }
+                    }
+                    TextButton(
+                        onClick = {
+                            onCopyEntry()
+                            copyFeedback = "已复制知识条目"
+                        }
+                    ) {
+                        Text(text = "复制知识")
+                    }
                 }
                 copyFeedback?.let { feedback ->
                     Text(
@@ -175,13 +187,23 @@ fun KnowledgeEntryDetailDialog(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
-                            TextButton(
-                                onClick = {
-                                    onCopyNote(note)
-                                    copyFeedback = "已复制第 ${index + 1} 条原始 Note"
-                                }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End
                             ) {
-                                Text(text = "复制这条 Note")
+                                onEditNote?.let { editNote ->
+                                    TextButton(onClick = { editNote(note) }) {
+                                        Text(text = "编辑 Note")
+                                    }
+                                }
+                                TextButton(
+                                    onClick = {
+                                        onCopyNote(note)
+                                        copyFeedback = "已复制第 ${index + 1} 条原始 Note"
+                                    }
+                                ) {
+                                    Text(text = "复制 Note")
+                                }
                             }
                         }
                         if (index != sourceNotes.lastIndex) {
@@ -211,9 +233,9 @@ private fun SourceType.label(): String {
 
 private fun KnowledgeIndexStatus.label(): String {
     return when (this) {
-        KnowledgeIndexStatus.PENDING -> "待沉淀"
-        KnowledgeIndexStatus.INDEXING -> "沉淀中"
+        KnowledgeIndexStatus.PENDING -> "已沉淀"
+        KnowledgeIndexStatus.INDEXING -> "已沉淀"
         KnowledgeIndexStatus.INDEXED -> "已沉淀"
-        KnowledgeIndexStatus.FAILED -> "沉淀失败"
+        KnowledgeIndexStatus.FAILED -> "处理失败"
     }
 }

@@ -1079,7 +1079,7 @@ class LocalNazhiRepository(
             saveAssistantMessage(
                 sessionId = questionMessage.sessionId,
                 parentMessageId = questionMessage.id,
-                content = "回答生成失败。",
+                content = "回答处理失败。",
                 status = ChatMessageStatus.FAILED,
                 errorMessage = message,
                 attempt = attempt,
@@ -1107,7 +1107,7 @@ class LocalNazhiRepository(
                 )
             )
         )
-        val item = response.items.firstOrNull() ?: throw IOException("查询向量生成失败：后端返回为空。")
+        val item = response.items.firstOrNull() ?: throw IOException("查询处理失败：后端返回为空。")
         onProgress(
             AiTaskProgress(
                 status = AiTaskStatus.RUNNING,
@@ -1719,7 +1719,7 @@ class LocalNazhiRepository(
                 code == "DIRECT_API_EMBEDDING_FAILED" -> "Embedding API 调用失败，请检查模型名、Key 和服务额度。"
                 code == "DIRECT_API_EMBEDDING_SHAPE_UNSUPPORTED" -> publicMessage
                 statusCode == 401 || code == "UNAUTHORIZED" -> "后端鉴权失败，请检查设置页中的 NAZHI_DEV_TOKEN。"
-                code == "MINIMAX_CHAT_FAILED" -> "模型回答生成失败，请稍后重试或检查后端日志。"
+                code == "MINIMAX_CHAT_FAILED" -> "模型回答处理失败，请稍后重试或检查后端日志。"
                 code == "MINIMAX_NOT_CONFIGURED" -> "后端 Chat 模型未配置，请检查服务器 .env。"
                 else -> publicMessage
             }

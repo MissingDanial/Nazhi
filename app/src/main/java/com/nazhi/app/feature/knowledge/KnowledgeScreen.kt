@@ -46,7 +46,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.nazhi.app.core.model.AiTaskProgress
 import com.nazhi.app.core.model.DayKnowledgeStatus
-import com.nazhi.app.core.model.IntentType
 import com.nazhi.app.core.model.KnowledgeDraftStatus
 import com.nazhi.app.core.model.KnowledgeEntry
 import com.nazhi.app.core.model.KnowledgeEntryDraft
@@ -59,8 +58,12 @@ import com.nazhi.app.core.knowledge.KnowledgeIngestionState
 import com.nazhi.app.core.knowledge.KnowledgeTaskKind
 import com.nazhi.app.core.network.NazhiBackendException
 import com.nazhi.app.core.repository.NazhiRepository
+import com.nazhi.app.core.ui.EditableKnowledgeEntryDialog
+import com.nazhi.app.core.ui.EditableSourceNoteDialog
 import com.nazhi.app.core.ui.KnowledgeEntryDetailDialog
+import com.nazhi.app.core.util.extractFirstUrl
 import com.nazhi.app.core.util.todayDateId
+import com.nazhi.app.core.util.toNazhiTitle
 import kotlinx.coroutines.launch
 
 @Composable
@@ -97,6 +100,7 @@ fun KnowledgeRoute(
     var isUpdatingEntry by remember { mutableStateOf(false) }
     var editingDraft by remember { mutableStateOf<KnowledgeEntryDraft?>(null) }
     var editingEntry by remember { mutableStateOf<KnowledgeEntry?>(null) }
+    var editingSourceNote by remember { mutableStateOf<Note?>(null) }
     var sourceDialogTitle by remember { mutableStateOf<String?>(null) }
     var sourceDialogNotes by remember { mutableStateOf<List<Note>>(emptyList()) }
     var detailEntry by remember { mutableStateOf<KnowledgeEntry?>(null) }
@@ -261,7 +265,7 @@ fun KnowledgeRoute(
     }
 
     editingEntry?.let { entry ->
-        KnowledgeEntryEditDialog(
+        EditableKnowledgeEntryDialog(
             entry = entry,
             isSaving = isUpdatingEntry,
             onDismiss = {
@@ -279,6 +283,9 @@ fun KnowledgeRoute(
                     result.fold(
                         onSuccess = { indexed ->
                             editingEntry = null
+                            if (detailEntry?.id == updatedEntry.id) {
+                                detailEntry = repository.getKnowledgeEntry(updatedEntry.id) ?: updatedEntry
+                            }
                             snackbarHostState.showSnackbar(
                                 if (indexed) {
                                     "已保存并更新问答能力"
@@ -291,6 +298,29 @@ fun KnowledgeRoute(
                             snackbarHostState.showSnackbar("保存失败：${error.toUserFacingMessage()}")
                         }
                     )
+                }
+            }
+        )
+    }
+
+    editingSourceNote?.let { note ->
+        EditableSourceNoteDialog(
+            note = note,
+            onDismiss = { editingSourceNote = null },
+            onConfirm = { content, remark ->
+                coroutineScope.launch {
+                    val now = System.currentTimeMillis()
+                    repository.updateNoteContent(
+                        id = note.id,
+                        content = content,
+                        title = content.toNazhiTitle(),
+                        sourceUrl = content.extractFirstUrl(),
+                        userRemark = remark.takeIf { it.isNotBlank() },
+                        updatedAt = now
+                    )
+                    editingSourceNote = null
+                    detailSourceNotes = repository.getNotesByIds(detailEntry?.sourceNoteIds.orEmpty())
+                    snackbarHostState.showSnackbar("原始 Note 已更新")
                 }
             }
         )
@@ -319,6 +349,16 @@ fun KnowledgeRoute(
             },
             onCopyNote = { note ->
                 context.copyToClipboard(label = "纳知原始 Note", text = note.content)
+            },
+            onEditEntry = {
+                detailEntry = null
+                detailSourceNotes = emptyList()
+                editingEntry = entry
+            },
+            onEditNote = { note ->
+                detailEntry = null
+                detailSourceNotes = emptyList()
+                editingSourceNote = note
             },
             onDismiss = {
                 detailEntry = null
@@ -560,7 +600,7 @@ private fun DayKnowledgeStatusCard(
             }
             if (hasReviewRequiredDrafts) {
                 Text(
-                    text = "存在需确认草稿，需逐条查看后再沉淀。",
+                    text = "存在待确认草稿，需逐条查看后再沉淀。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -592,7 +632,7 @@ private fun DayKnowledgeStatusCard(
                     text = when {
                         knowledgeIngestionState.isRunning -> knowledgeIngestionState.runningLabel ?: "沉淀中"
                         failedIndexCount > 0 -> "重试沉淀"
-                        pendingIndexCount > 0 -> "完成待沉淀知识"
+                        pendingIndexCount > 0 -> "完成已沉淀知识"
                         else -> "已沉淀"
                     }
                 )
@@ -690,7 +730,7 @@ private fun KnowledgeDraftCard(
                         onClick = onSubmit,
                         enabled = !isSubmitting && duplicateEntry == null
                     ) {
-                        Text(text = if (duplicateEntry == null) "确认沉淀" else "重复不可沉淀")
+                        Text(text = if (duplicateEntry == null) "确认沉淀" else "重复，需处理")
                     }
                 }
             }
@@ -776,104 +816,6 @@ private fun DraftEditDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text(text = "取消")
-            }
-        }
-    )
-}
-
-@Composable
-private fun KnowledgeEntryEditDialog(
-    entry: KnowledgeEntry,
-    isSaving: Boolean,
-    onDismiss: () -> Unit,
-    onConfirm: (KnowledgeEntry) -> Unit
-) {
-    var title by remember(entry.id) { mutableStateOf(entry.userTitle.orEmpty()) }
-    var summary by remember(entry.id) { mutableStateOf(entry.summary) }
-    var content by remember(entry.id) { mutableStateOf(entry.content) }
-    var tagsText by remember(entry.id) { mutableStateOf(entry.tags.joinToString("，")) }
-    var remark by remember(entry.id) { mutableStateOf(entry.userRemark.orEmpty()) }
-    var intentType by remember(entry.id) { mutableStateOf(entry.intentType) }
-    val canSave = content.isNotBlank() && !isSaving
-
-    AlertDialog(
-        onDismissRequest = {
-            if (!isSaving) {
-                onDismiss()
-            }
-        },
-        title = { Text(text = "编辑知识条目") },
-        text = {
-            Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                OutlinedTextField(
-                    value = title,
-                    onValueChange = { title = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text(text = "标题") }
-                )
-                OutlinedTextField(
-                    value = summary,
-                    onValueChange = { summary = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 2,
-                    label = { Text(text = "摘要") }
-                )
-                OutlinedTextField(
-                    value = content,
-                    onValueChange = { content = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 5,
-                    label = { Text(text = "正文") }
-                )
-                OutlinedTextField(
-                    value = tagsText,
-                    onValueChange = { tagsText = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text(text = "标签，用逗号分隔") }
-                )
-                OutlinedTextField(
-                    value = remark,
-                    onValueChange = { remark = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 2,
-                    label = { Text(text = "备注，可选") }
-                )
-                Text(
-                    text = if (isSaving) "正在保存并更新问答能力" else "保存后会更新该条目的问答能力。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = {
-                    onConfirm(
-                        entry.copy(
-                            userTitle = title.trim().takeIf { it.isNotBlank() },
-                            summary = summary.trim(),
-                            content = content.trim(),
-                            intentType = intentType,
-                            tags = tagsText.toTagList(),
-                            userRemark = remark.trim().takeIf { it.isNotBlank() },
-                            indexStatus = KnowledgeIndexStatus.PENDING
-                        )
-                    )
-                },
-                enabled = canSave
-            ) {
-                Text(text = if (isSaving) "保存中" else "保存")
-            }
-        },
-        dismissButton = {
-            TextButton(
-                onClick = onDismiss,
-                enabled = !isSaving
-            ) {
                 Text(text = "取消")
             }
         }
@@ -1031,7 +973,7 @@ private fun KnowledgeIndexStatusHint(
             "知识库已有内容但尚未完成沉淀，请点击上方“重试沉淀”后再检索或问答。"
         }
         indexedEntryCount == 0 && failedIndexCount > 0 -> {
-            "知识沉淀失败，请检查网络或 API 配置后重试。"
+            "知识处理失败，请检查网络或 API 配置后重试。"
         }
         pendingIndexCount > 0 || failedIndexCount > 0 -> {
             "部分知识尚未完成沉淀，当前检索和问答只会使用已沉淀内容。"
@@ -1207,26 +1149,26 @@ private fun com.nazhi.app.core.model.AiTaskStage.label(): String {
         com.nazhi.app.core.model.AiTaskStage.SAVING_RESULT -> "写入本地"
         com.nazhi.app.core.model.AiTaskStage.FALLBACK_DRAFTS -> "兜底草稿"
         com.nazhi.app.core.model.AiTaskStage.DONE -> "完成"
-        com.nazhi.app.core.model.AiTaskStage.FAILED -> "失败"
+        com.nazhi.app.core.model.AiTaskStage.FAILED -> "处理失败"
         com.nazhi.app.core.model.AiTaskStage.UNKNOWN -> "处理中"
     }
 }
 
 private fun DayKnowledgeStatus.statusText(): String {
     return when {
-        noteCount == 0 -> "未收纳"
-        pendingDraftCount > 0 -> "草稿待确认"
-        failedIndexCount > 0 -> "部分失败，可重试"
+        noteCount == 0 -> "待整理"
+        pendingDraftCount > 0 -> "待确认"
+        failedIndexCount > 0 -> "处理失败"
         isComplete -> "已沉淀"
-        knowledgeEntryCount > indexedEntryCount -> "沉淀中或待重试"
-        draftCount > 0 -> "草稿已处理"
-        pendingNoteCount > 0 -> "已保存，待整理"
-        else -> "未整理"
+        knowledgeEntryCount > indexedEntryCount -> "已沉淀"
+        draftCount > 0 -> "已沉淀"
+        pendingNoteCount > 0 -> "待整理"
+        else -> "待整理"
     }
 }
 
 private fun KnowledgeEntryDraft.reviewLabel(): String {
-    return if (needsReview) "需确认" else "可确认"
+    return "待确认"
 }
 
 private fun KnowledgeEntry.matchesKeyword(query: String): Boolean {
@@ -1275,7 +1217,7 @@ private fun Throwable.toUserFacingMessage(): String {
     return when (this) {
         is NazhiBackendException -> when {
             statusCode == 401 || code == "UNAUTHORIZED" -> "鉴权失败，请检查设置页中的 NAZHI_DEV_TOKEN。"
-            code == "MINIMAX_CHAT_FAILED" -> "模型生成失败，请稍后重试或检查服务器日志。"
+            code == "MINIMAX_CHAT_FAILED" -> "模型处理失败，请稍后重试或检查服务器日志。"
             code == "MINIMAX_NOT_CONFIGURED" -> "服务器模型配置缺失，请检查 .env。"
             code == "MINIMAX_EMBEDDING_FAILED" -> "Embedding 模型调用失败，请稍后重试或检查服务器日志。"
             else -> publicMessage
@@ -1297,10 +1239,10 @@ private fun Throwable.toUserFacingMessage(): String {
 
 private fun com.nazhi.app.core.model.KnowledgeIndexStatus.label(): String {
     return when (this) {
-        com.nazhi.app.core.model.KnowledgeIndexStatus.PENDING -> "待沉淀"
-        com.nazhi.app.core.model.KnowledgeIndexStatus.INDEXING -> "沉淀中"
+        com.nazhi.app.core.model.KnowledgeIndexStatus.PENDING -> "已沉淀"
+        com.nazhi.app.core.model.KnowledgeIndexStatus.INDEXING -> "已沉淀"
         com.nazhi.app.core.model.KnowledgeIndexStatus.INDEXED -> "已沉淀"
-        com.nazhi.app.core.model.KnowledgeIndexStatus.FAILED -> "沉淀失败"
+        com.nazhi.app.core.model.KnowledgeIndexStatus.FAILED -> "处理失败"
     }
 }
 

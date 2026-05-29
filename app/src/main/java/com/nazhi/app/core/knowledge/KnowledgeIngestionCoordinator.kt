@@ -67,7 +67,7 @@ class KnowledgeIngestionCoordinator(
             when {
                 entry == null -> "草稿已处理或不存在"
                 entry.indexStatus == KnowledgeIndexStatus.INDEXED -> "已沉淀，可用于知识库问答"
-                entry.indexStatus == KnowledgeIndexStatus.FAILED -> "已保存知识，沉淀失败，可稍后重试"
+                entry.indexStatus == KnowledgeIndexStatus.FAILED -> "已保存知识，处理失败，可稍后重试"
                 else -> "已保存知识，正在完成沉淀"
             }
         }
@@ -81,9 +81,9 @@ class KnowledgeIngestionCoordinator(
         ) {
             val count = repository.submitAllKnowledgeDraftsForDate(date)
             when {
-                count > 0 -> "已处理 $count 条草稿，沉淀失败项可在异常中重试"
+                count > 0 -> "已处理 $count 条草稿，处理失败项可在异常中重试"
                 hasDuplicateDrafts -> "存在重复草稿，请逐条查看后跳过或编辑"
-                hasReviewRequiredDrafts -> "存在需确认草稿，请逐条确认后提交"
+                hasReviewRequiredDrafts -> "存在待确认草稿，请逐条确认后提交"
                 else -> "没有待提交草稿"
             }
         }
@@ -132,7 +132,7 @@ class KnowledgeIngestionCoordinator(
                 if (error is DuplicateKnowledgeEntryException) {
                     error.toUserFacingMessage()
                 } else {
-                    "知识沉淀失败：${error.toUserFacingMessage()}"
+                    "知识处理失败：${error.toUserFacingMessage()}"
                 }
             }
             _state.update {

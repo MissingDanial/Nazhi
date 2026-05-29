@@ -82,6 +82,7 @@ import com.nazhi.app.feature.farm.FarmOwnerType
 import com.nazhi.app.feature.farm.FarmPlotUiModel
 import com.nazhi.app.feature.farm.FarmStage
 import com.nazhi.app.feature.farm.buildFarmPlotModels
+import com.nazhi.app.core.ui.EditableKnowledgeEntryDialog
 import com.nazhi.app.core.ui.KnowledgeEntryDetailDialog
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -185,7 +186,9 @@ fun DateNotesRoute(
     }
     var editingNote by remember { mutableStateOf<Note?>(null) }
     var editingDraft by remember { mutableStateOf<KnowledgeEntryDraft?>(null) }
+    var editingKnowledgeEntry by remember { mutableStateOf<KnowledgeEntry?>(null) }
     var deletingNote by remember { mutableStateOf<Note?>(null) }
+    var isUpdatingKnowledgeEntry by remember { mutableStateOf(false) }
     var handledKnowledgeTaskEventId by remember { mutableStateOf(knowledgeIngestionState.eventId) }
     val isToday = dateId == todayDateId()
     val activeTaskDateId = knowledgeIngestionState.activeDateId
@@ -356,6 +359,9 @@ fun DateNotesRoute(
         onEditDraft = { draft ->
             editingDraft = draft
         },
+        onEditKnowledgeEntry = { entry ->
+            editingKnowledgeEntry = entry
+        },
         onSubmitAllDrafts = {
             knowledgeIngestionCoordinator?.submitAll(
                 date = dateId,
@@ -406,7 +412,43 @@ fun DateNotesRoute(
                         )
                     )
                     editingDraft = null
-                    snackbarHostState.showSnackbar("已保存草稿，可确认沉淀")
+                    snackbarHostState.showSnackbar("已保存草稿，待确认")
+                }
+            }
+        )
+    }
+
+    editingKnowledgeEntry?.let { entry ->
+        EditableKnowledgeEntryDialog(
+            entry = entry,
+            isSaving = isUpdatingKnowledgeEntry,
+            onDismiss = {
+                if (!isUpdatingKnowledgeEntry) {
+                    editingKnowledgeEntry = null
+                }
+            },
+            onConfirm = { updatedEntry ->
+                coroutineScope.launch {
+                    isUpdatingKnowledgeEntry = true
+                    val result = runCatching {
+                        repository.updateKnowledgeEntry(updatedEntry, reindex = true)
+                    }
+                    isUpdatingKnowledgeEntry = false
+                    result.fold(
+                        onSuccess = { indexed ->
+                            editingKnowledgeEntry = null
+                            snackbarHostState.showSnackbar(
+                                if (indexed) {
+                                    "已保存并更新问答能力"
+                                } else {
+                                    "已保存，问答能力更新失败，可稍后重试"
+                                }
+                            )
+                        },
+                        onFailure = { error ->
+                            snackbarHostState.showSnackbar("保存失败：${error.toUserFacingMessage()}")
+                        }
+                    )
                 }
             }
         )
@@ -469,6 +511,7 @@ fun InboxScreen(
     onAiOrganizeToday: () -> Unit,
     onSubmitDraft: (KnowledgeEntryDraft) -> Unit,
     onEditDraft: (KnowledgeEntryDraft) -> Unit,
+    onEditKnowledgeEntry: (KnowledgeEntry) -> Unit,
     onSubmitAllDrafts: () -> Unit,
     onRetryIndex: () -> Unit,
     onOpenHistoricalPending: () -> Unit,
@@ -746,6 +789,16 @@ fun InboxScreen(
             },
             onCopyNote = { note ->
                 context.copyToClipboard(label = "纳知原始 Note", text = note.content)
+            },
+            onEditEntry = {
+                selectedFarmEntry = null
+                selectedFarmEntrySourceNotes = emptyList()
+                onEditKnowledgeEntry(entry)
+            },
+            onEditNote = { note ->
+                selectedFarmEntry = null
+                selectedFarmEntrySourceNotes = emptyList()
+                onEdit(note)
             },
             onDismiss = {
                 selectedFarmEntry = null
@@ -1600,7 +1653,7 @@ private fun AudioTranscriptionJobsCard(
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "$retryableCount 条可重试 · 失败音频已暂存",
+                text = "$retryableCount 条可重试 · 处理失败音频已暂存",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onErrorContainer
             )
@@ -1635,7 +1688,7 @@ private fun com.nazhi.app.core.model.AiTaskStage.label(): String {
         com.nazhi.app.core.model.AiTaskStage.SAVING_RESULT -> "写入本地"
         com.nazhi.app.core.model.AiTaskStage.FALLBACK_DRAFTS -> "兜底草稿"
         com.nazhi.app.core.model.AiTaskStage.DONE -> "完成"
-        com.nazhi.app.core.model.AiTaskStage.FAILED -> "失败"
+        com.nazhi.app.core.model.AiTaskStage.FAILED -> "处理失败"
         com.nazhi.app.core.model.AiTaskStage.UNKNOWN -> "处理中"
     }
 }
@@ -1656,7 +1709,7 @@ private fun HistoricalPendingCard(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text(
-                text = "历史待回顾",
+                text = "历史待整理",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
             )
@@ -2010,6 +2063,7 @@ fun InboxPreview() {
             onAiOrganizeToday = {},
             onSubmitDraft = {},
             onEditDraft = {},
+            onEditKnowledgeEntry = {},
             onSubmitAllDrafts = {},
             onRetryIndex = {},
             onOpenHistoricalPending = {},
@@ -2089,8 +2143,8 @@ private fun AudioTranscriptionJobStatus.label(): String {
         AudioTranscriptionJobStatus.PENDING -> "待转写"
         AudioTranscriptionJobStatus.UPLOADING -> "上传中"
         AudioTranscriptionJobStatus.TRANSCRIBING -> "转写中"
-        AudioTranscriptionJobStatus.FAILED -> "失败"
-        AudioTranscriptionJobStatus.SAVED -> "已生成文本"
+        AudioTranscriptionJobStatus.FAILED -> "处理失败"
+        AudioTranscriptionJobStatus.SAVED -> "已沉淀"
         AudioTranscriptionJobStatus.AUDIO_CLEANED -> "原音频已清理"
     }
 }
@@ -2108,23 +2162,23 @@ private fun Long.formatDuration(): String {
 
 private fun NoteStatus.label(): String {
     return when (this) {
-        NoteStatus.INBOX -> "待回顾"
+        NoteStatus.INBOX -> "待整理"
         NoteStatus.REVIEWED -> "已沉淀"
-        NoteStatus.ARCHIVED -> "已归档"
-        NoteStatus.DELETED -> "已删除"
+        NoteStatus.ARCHIVED -> "已沉淀"
+        NoteStatus.DELETED -> "处理失败"
     }
 }
 
 private fun KnowledgeEntryDraft.reviewLabel(): String {
-    return if (needsReview) "需确认" else "可沉淀"
+    return "待确认"
 }
 
 private fun KnowledgeIndexStatus.label(): String {
     return when (this) {
-        KnowledgeIndexStatus.PENDING -> "待沉淀"
-        KnowledgeIndexStatus.INDEXING -> "沉淀中"
+        KnowledgeIndexStatus.PENDING -> "已沉淀"
+        KnowledgeIndexStatus.INDEXING -> "已沉淀"
         KnowledgeIndexStatus.INDEXED -> "已沉淀"
-        KnowledgeIndexStatus.FAILED -> "沉淀失败"
+        KnowledgeIndexStatus.FAILED -> "处理失败"
     }
 }
 

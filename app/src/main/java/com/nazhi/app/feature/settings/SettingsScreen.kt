@@ -482,7 +482,7 @@ fun SettingsRoute(
                                     val count = repository.indexPendingKnowledgeEntries()
                                     if (count == 0) "没有完成新的沉淀，请检查网络、API 配置或知识库状态" else "已完成 $count 条知识沉淀"
                                 }.getOrElse { error ->
-                                    "重试沉淀失败：${error.toUserMessage()}"
+                                    "重试处理失败：${error.toUserMessage()}"
                                 }
                                 isReindexingAfterImport = false
                                 importResult = null
@@ -1360,14 +1360,14 @@ private fun LocalDataImportPreview.toPreviewText(): String {
 }
 
 private fun LocalDataImportResult.toImportMessage(): String {
-    return "导入完成：新增 $insertedCount，跳过 $skippedCount，失败 $failedCount"
+    return "导入完成：新增 $insertedCount，跳过 $skippedCount，处理失败 $failedCount"
 }
 
 private fun LocalDataImportResult.toResultText(): String {
     return """
         新增：$insertedCount
         跳过：$skippedCount
-        失败：$failedCount
+        处理失败：$failedCount
         新增知识条目：${knowledgeEntries.insertedCount}
     """.trimIndent()
 }
