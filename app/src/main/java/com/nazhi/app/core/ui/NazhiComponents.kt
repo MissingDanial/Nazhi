@@ -1,21 +1,22 @@
 package com.nazhi.app.core.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.matchParentSize
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -31,6 +32,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -156,7 +158,7 @@ fun NazhiStatusChip(
     val palette = kind.palette()
     Box(
         modifier = modifier
-            .heightIn(min = 64.dp)
+            .aspectRatio(StatusChipSpec.width.toFloat() / StatusChipSpec.height.toFloat())
             .clickable(onClick = onClick)
     ) {
         Image(
@@ -165,28 +167,28 @@ fun NazhiStatusChip(
             modifier = Modifier.matchParentSize(),
             contentScale = ContentScale.FillBounds
         )
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 62.dp, end = 12.dp, top = 9.dp, bottom = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.End
-        ) {
-            Column(
-                modifier = Modifier.weight(1f),
-                horizontalAlignment = Alignment.End
+        BoxWithConstraints(modifier = Modifier.matchParentSize()) {
+            val safeStart = maxWidth * (StatusChipSpec.safeX.toFloat() / StatusChipSpec.width)
+            val safeEnd = maxWidth *
+                ((StatusChipSpec.width - StatusChipSpec.safeX - StatusChipSpec.safeWidth).toFloat() / StatusChipSpec.width)
+            val safeTop = maxHeight * (StatusChipSpec.safeY.toFloat() / StatusChipSpec.height)
+            val safeBottom = maxHeight *
+                ((StatusChipSpec.height - StatusChipSpec.safeY - StatusChipSpec.safeHeight).toFloat() / StatusChipSpec.height)
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .padding(start = safeStart, end = safeEnd, top = safeTop, bottom = safeBottom),
+                contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = label,
-                    style = MaterialTheme.typography.labelMedium,
+                    text = "$label：$count",
+                    modifier = Modifier.fillMaxWidth(),
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (selected) palette.accent else NazhiTokens.colors.textPrimary,
+                    textAlign = TextAlign.Center,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = count.toString(),
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = if (selected) palette.accent else NazhiTokens.colors.textPrimary
                 )
             }
         }
@@ -207,7 +209,8 @@ fun FarmNoticeCard(
     progressContent: (@Composable () -> Unit)? = null
 ) {
     val colors = NazhiTokens.colors
-    Box(modifier = modifier.heightIn(min = 176.dp)) {
+    val noticePalette = statusKind.palette()
+    Box(modifier = modifier.heightIn(min = 260.dp)) {
         Image(
             painter = painterResource(id = R.drawable.notice_board),
             contentDescription = null,
@@ -215,57 +218,82 @@ fun FarmNoticeCard(
             contentScale = ContentScale.FillBounds
         )
         Column(
-            modifier = Modifier.padding(start = 36.dp, end = 32.dp, top = 28.dp, bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            modifier = Modifier.padding(start = 50.dp, end = 50.dp, top = 42.dp, bottom = 40.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            Text(
+                text = title,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 10.dp),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = if (statusKind == NazhiStatusKind.ISSUE) noticePalette.accent else colors.textPrimary,
+                textAlign = TextAlign.Center
+            )
+            Text(
+                text = message,
+                modifier = Modifier.fillMaxWidth(),
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.textSecondary,
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp)
             ) {
-                PixelStatusIcon(kind = statusKind, size = 30.dp)
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = title,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = colors.textPrimary
-                    )
-                    Text(
-                        text = message,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = colors.textSecondary,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
+                progressContent?.invoke()
             }
 
-            progressContent?.invoke()
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .offset(y = (-10).dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Button(
                     onClick = onPrimaryAction,
                     enabled = primaryActionEnabled,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = colors.grassDark,
+                        contentColor = colors.surfaceRaised,
+                        disabledContainerColor = colors.grassSoft,
+                        disabledContentColor = colors.textSecondary
+                    )
                 ) {
                     Text(text = primaryActionLabel, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 if (secondaryActionLabel != null && onSecondaryAction != null) {
                     OutlinedButton(
                         onClick = onSecondaryAction,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.fillMaxWidth(),
+                        border = BorderStroke(1.dp, colors.wheat),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = colors.wheatSoft.copy(alpha = 0.55f),
+                            contentColor = colors.soil
+                        )
                     ) {
                         Text(text = secondaryActionLabel, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                } else {
-                    Spacer(modifier = Modifier.width(0.dp))
                 }
             }
         }
     }
+}
+
+private object StatusChipSpec {
+    const val width = 360
+    const val height = 128
+    const val safeX = 112
+    const val safeY = 24
+    const val safeWidth = 220
+    const val safeHeight = 80
 }
 
 private fun NazhiStatusKind.chipBackgroundRes(): Int {

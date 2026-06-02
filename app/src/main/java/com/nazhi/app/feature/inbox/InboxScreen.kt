@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
@@ -22,6 +23,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -591,7 +593,7 @@ fun InboxScreen(
                     Column {
                         Text(text = screenTitle)
                         Text(
-                            text = screenSubtitle,
+                            text = "$screenSubtitle · ${displayDateLabel(farmSnapshot.dateId)}",
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
@@ -1247,7 +1249,7 @@ private fun TodayStatusChips(
                 onClick = { onSelectPanel(TodayPanel.INGESTED) }
             )
             NazhiStatusChip(
-                label = "处理失败",
+                label = "已失败",
                 count = issueCount,
                 kind = NazhiStatusKind.ISSUE,
                 selected = selectedPanel == TodayPanel.ISSUES,
@@ -1319,7 +1321,7 @@ private fun TodayPrimaryActionCard(
     FarmNoticeCard(
         title = "${periodLabel}告示牌",
         message = statusMessage
-            ?: "收纳 $totalCount · 待整理 $pendingCount · 待确认 $pendingDraftCount · 已沉淀 $knowledgeCount",
+            ?: "收纳：$totalCount · 已沉淀：$knowledgeCount",
         statusKind = statusKind,
         primaryActionLabel = label,
         primaryActionEnabled = enabled,
@@ -1484,8 +1486,9 @@ private fun KnowledgeDraftSummaryCard(
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
+        border = BorderStroke(1.dp, NazhiTokens.colors.wheat.copy(alpha = 0.58f)),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainer
+            containerColor = NazhiTokens.colors.wheatSoft.copy(alpha = 0.68f)
         )
     ) {
         Column(
@@ -1496,31 +1499,40 @@ private fun KnowledgeDraftSummaryCard(
                 text = draft.title,
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
+                color = NazhiTokens.colors.soil,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
             Text(
                 text = draft.summary.ifBlank { draft.content },
                 style = MaterialTheme.typography.bodySmall,
+                color = NazhiTokens.colors.textPrimary,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
             Text(
                 text = "来源 ${draft.sourceNoteIds.size} 条 · ${draft.reviewLabel()}",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = NazhiTokens.colors.soil.copy(alpha = 0.82f)
             )
             HorizontalDivider()
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End
             ) {
-                TextButton(onClick = onEdit) {
+                TextButton(
+                    onClick = onEdit,
+                    colors = ButtonDefaults.textButtonColors(contentColor = NazhiTokens.colors.soil)
+                ) {
                     Text(text = "编辑")
                 }
                 TextButton(
                     onClick = onSubmit,
-                    enabled = !isSubmitting
+                    enabled = !isSubmitting,
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = NazhiTokens.colors.grassDark,
+                        disabledContentColor = NazhiTokens.colors.textSecondary
+                    )
                 ) {
                     Text(text = if (isSubmitting) "沉淀中" else "确认沉淀")
                 }

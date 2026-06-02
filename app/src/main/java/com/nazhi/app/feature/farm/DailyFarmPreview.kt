@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.matchParentSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Row
 import androidx.compose.material3.MaterialTheme
@@ -23,6 +22,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -39,8 +39,10 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.nazhi.app.R
 import com.nazhi.app.core.model.DailyFarmSnapshot
 import com.nazhi.app.core.model.KnowledgeEntry
@@ -109,7 +111,7 @@ fun DailyFarmPreview(
             contentScale = ContentScale.FillBounds
         )
         Column(
-            modifier = Modifier.padding(start = 22.dp, end = 22.dp, top = 22.dp, bottom = 24.dp),
+            modifier = Modifier.padding(start = 22.dp, end = 22.dp, top = 36.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -118,15 +120,25 @@ fun DailyFarmPreview(
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.SemiBold
                 )
-                Text(
-                    text = snapshot.dateId,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    FarmMetric(label = "待整理", count = snapshot.saplingCount, kind = NazhiStatusKind.PENDING)
-                    FarmMetric(label = "待确认", count = snapshot.plantCount, kind = NazhiStatusKind.DRAFT)
-                    FarmMetric(label = "已沉淀", count = snapshot.matureCount, kind = NazhiStatusKind.SETTLED)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FarmMetric(
+                        label = "待整理",
+                        kind = NazhiStatusKind.PENDING,
+                        modifier = Modifier.weight(1f)
+                    )
+                    FarmMetric(
+                        label = "待确认",
+                        kind = NazhiStatusKind.DRAFT,
+                        modifier = Modifier.weight(1f)
+                    )
+                    FarmMetric(
+                        label = "已经沉淀",
+                        kind = NazhiStatusKind.SETTLED,
+                        modifier = Modifier.weight(1f)
+                    )
                 }
             }
 
@@ -146,15 +158,23 @@ fun DailyFarmPreview(
 @Composable
 private fun FarmMetric(
     label: String,
-    count: Int,
-    kind: NazhiStatusKind
+    kind: NazhiStatusKind,
+    modifier: Modifier = Modifier
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        PixelStatusIcon(kind = kind, size = 16.dp)
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        PixelStatusIcon(kind = kind, size = 20.dp)
         Text(
-            text = "$label $count",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            fontSize = 14.sp,
+            lineHeight = 20.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Clip
         )
     }
 }
