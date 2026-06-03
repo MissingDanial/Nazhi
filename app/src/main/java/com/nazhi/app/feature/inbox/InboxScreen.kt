@@ -49,10 +49,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.nazhi.app.AudioTranscriptionService
@@ -99,6 +101,8 @@ import java.util.Locale
 import java.util.UUID
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
+
+private val TodayNoticeLift = 32.dp
 
 @Composable
 fun InboxRoute(
@@ -654,7 +658,8 @@ fun InboxScreen(
                     onOrganize = onAiOrganizeToday,
                     onOpenDrafts = { openPanel(TodayPanel.DRAFTS) },
                     onSubmitDrafts = onSubmitAllDrafts,
-                    onOpenIssues = { openPanel(TodayPanel.ISSUES) }
+                    onOpenIssues = { openPanel(TodayPanel.ISSUES) },
+                    modifier = Modifier.liftBy(TodayNoticeLift)
                 )
             }
 
@@ -1280,7 +1285,8 @@ private fun TodayPrimaryActionCard(
     onOrganize: () -> Unit,
     onOpenDrafts: () -> Unit,
     onSubmitDrafts: () -> Unit,
-    onOpenIssues: () -> Unit
+    onOpenIssues: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val periodLabel = if (isToday) "今日" else "这一天"
     val completeLabel = "$periodLabel 已完成"
@@ -1334,11 +1340,19 @@ private fun TodayPrimaryActionCard(
                 totalCount == 0 && showQuickInput -> onAddContent()
             }
         },
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         secondaryActionLabel = if (showQuickInput) "粘贴收纳" else null,
         onSecondaryAction = if (showQuickInput) onPasteSave else null,
         progressContent = progressContent
     )
+}
+
+private fun Modifier.liftBy(offset: Dp): Modifier = this.layout { measurable, constraints ->
+    val placeable = measurable.measure(constraints)
+    val offsetPx = offset.roundToPx()
+    layout(placeable.width, (placeable.height - offsetPx).coerceAtLeast(0)) {
+        placeable.placeRelative(0, -offsetPx)
+    }
 }
 
 @Composable
