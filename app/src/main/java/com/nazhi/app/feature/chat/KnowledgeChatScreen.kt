@@ -3,17 +3,23 @@ package com.nazhi.app.feature.chat
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
@@ -35,12 +41,23 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import com.nazhi.app.R
 import com.nazhi.app.core.chat.KnowledgeChatCoordinator
 import com.nazhi.app.core.model.AiTaskProgress
 import com.nazhi.app.core.model.ChatCitation
@@ -56,10 +73,12 @@ import com.nazhi.app.core.repository.NazhiRepository
 import com.nazhi.app.core.ui.EditableKnowledgeEntryDialog
 import com.nazhi.app.core.ui.EditableSourceNoteDialog
 import com.nazhi.app.core.ui.KnowledgeEntryDetailDialog
+import com.nazhi.app.core.ui.NazhiTokens
 import com.nazhi.app.core.util.extractFirstUrl
 import com.nazhi.app.core.util.toNazhiTitle
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 @Composable
 fun KnowledgeChatRoute(
@@ -337,7 +356,21 @@ private fun KnowledgeChatScreen(
     onCopyAnswer: (String) -> Unit,
     onUseFollowUpSuggestion: (String) -> Unit
 ) {
+    val canAsk = question.isNotBlank() && !isAsking && indexedEntryCount > 0
+    val hasAssistantReply = messages.any { it.role == ChatRole.ASSISTANT }
+    var inputExpanded by remember { mutableStateOf(!hasAssistantReply) }
+
+    LaunchedEffect(question, isAsking, hasAssistantReply) {
+        inputExpanded = when {
+            question.isNotBlank() -> true
+            isAsking -> true
+            hasAssistantReply -> false
+            else -> true
+        }
+    }
+
     Scaffold(
+        containerColor = NazhiTokens.colors.background,
         topBar = {
             TopAppBar(
                 title = {
@@ -348,6 +381,24 @@ private fun KnowledgeChatScreen(
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
+                }
+            )
+        },
+        bottomBar = {
+            ChatQuestionInputDock(
+                question = question,
+                expanded = inputExpanded,
+                canAsk = canAsk,
+                isAsking = isAsking,
+                entryCount = entryCount,
+                indexedEntryCount = indexedEntryCount,
+                onQuestionChange = { value ->
+                    inputExpanded = true
+                    onQuestionChange(value)
+                },
+                onExpand = { inputExpanded = true },
+                onAsk = {
+                    onAsk()
                 }
             )
         },
@@ -362,7 +413,7 @@ private fun KnowledgeChatScreen(
         ) {
             item {
                 KnowledgeChatCard(
-                    question = question,
+                    hasDraftQuestion = question.isNotBlank(),
                     chatSessions = chatSessions,
                     activeSession = activeSession,
                     activeChatSessionId = activeChatSessionId,
@@ -370,19 +421,15 @@ private fun KnowledgeChatScreen(
                     citations = citations,
                     knowledgeEntries = knowledgeEntries,
                     embeddingCount = embeddingCount,
-                    entryCount = entryCount,
-                    indexedEntryCount = indexedEntryCount,
                     isAsking = isAsking,
                     askProgress = askProgress,
                     askStatusMessage = askStatusMessage,
-                    onQuestionChange = onQuestionChange,
                     onSelectSession = onSelectSession,
                     onCreateSession = onCreateSession,
                     onClearSessionMemory = onClearSessionMemory,
                     onDeleteSession = onDeleteSession,
                     onClearSessions = onClearSessions,
                     onCitationClick = onCitationClick,
-                    onAsk = onAsk,
                     onRetry = onRetry,
                     onRegenerate = onRegenerate,
                     onCopyAnswer = onCopyAnswer,
@@ -395,7 +442,7 @@ private fun KnowledgeChatScreen(
 
 @Composable
 private fun KnowledgeChatCard(
-    question: String,
+    hasDraftQuestion: Boolean,
     chatSessions: List<ChatSession>,
     activeSession: ChatSession?,
     activeChatSessionId: String?,
@@ -403,25 +450,20 @@ private fun KnowledgeChatCard(
     citations: List<ChatCitation>,
     knowledgeEntries: List<KnowledgeEntry>,
     embeddingCount: Int,
-    entryCount: Int,
-    indexedEntryCount: Int,
     isAsking: Boolean,
     askProgress: AiTaskProgress?,
     askStatusMessage: String?,
-    onQuestionChange: (String) -> Unit,
     onSelectSession: (String) -> Unit,
     onCreateSession: () -> Unit,
     onClearSessionMemory: (ChatSession) -> Unit,
     onDeleteSession: (ChatSession) -> Unit,
     onClearSessions: () -> Unit,
     onCitationClick: (ChatCitation) -> Unit,
-    onAsk: () -> Unit,
     onRetry: (ChatMessage) -> Unit,
     onRegenerate: (ChatMessage) -> Unit,
     onCopyAnswer: (String) -> Unit,
     onUseFollowUpSuggestion: (String) -> Unit
 ) {
-    val canAsk = question.isNotBlank() && !isAsking && indexedEntryCount > 0
     val chatTurns = remember(messages, citations, knowledgeEntries) {
         buildChatTurns(
             messages = messages,
@@ -432,58 +474,77 @@ private fun KnowledgeChatCard(
     var sessionToDelete by remember { mutableStateOf<ChatSession?>(null) }
     var showClearConfirm by remember { mutableStateOf(false) }
     var historyExpanded by remember { mutableStateOf(false) }
+    var shouldBringConversationIntoView by remember { mutableStateOf(false) }
+    val conversationBringIntoViewRequester = remember { BringIntoViewRequester() }
 
-    Card(modifier = Modifier.fillMaxWidth()) {
+    LaunchedEffect(
+        activeChatSessionId,
+        chatTurns.size,
+        historyExpanded,
+        shouldBringConversationIntoView
+    ) {
+        if (
+            shouldBringConversationIntoView &&
+            !historyExpanded &&
+            (
+                chatTurns.isNotEmpty() ||
+                    askProgress != null ||
+                    (isAsking && !askStatusMessage.isNullOrBlank())
+                )
+        ) {
+            conversationBringIntoViewRequester.bringIntoView()
+            shouldBringConversationIntoView = false
+        }
+    }
+
+    PixelChatAssetBox(
+        spec = ChatAssetSpecs.MainPanel,
+        modifier = Modifier.fillMaxWidth()
+    ) {
         Column(
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text(
-                text = "知识库问答",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
-            CurrentConversationBlock(
+            ChatStatusHeaderBlock(
                 activeSession = activeSession,
-                hasDraftQuestion = question.isNotBlank(),
+                hasDraftQuestion = hasDraftQuestion,
+                embeddingCount = embeddingCount,
+                historyCount = chatSessions.size,
+                historyExpanded = historyExpanded,
                 isBusy = isAsking,
                 onCreateSession = onCreateSession,
-                onClearSessionMemory = onClearSessionMemory
-            )
-            KnowledgeChatIndexStatusBlock(
-                embeddingCount = embeddingCount
+                onClearSessionMemory = onClearSessionMemory,
+                onToggleHistory = { historyExpanded = !historyExpanded }
             )
             HorizontalDivider()
+            if (historyExpanded) {
+                ChatHistoryBlock(
+                    sessions = chatSessions,
+                    activeChatSessionId = activeChatSessionId,
+                    expanded = historyExpanded,
+                    onToggleExpanded = { historyExpanded = !historyExpanded },
+                    onSelectSession = { sessionId ->
+                        historyExpanded = false
+                        shouldBringConversationIntoView = true
+                        onSelectSession(sessionId)
+                    },
+                    onDeleteSession = { sessionToDelete = it },
+                    onClearSessions = { showClearConfirm = true },
+                    isBusy = isAsking
+                )
+                HorizontalDivider()
+            }
             ChatConversationWindowBlock(
                 chatTurns = chatTurns,
                 isAsking = isAsking,
                 askProgress = askProgress,
                 askStatusMessage = askStatusMessage,
+                modifier = Modifier.bringIntoViewRequester(conversationBringIntoViewRequester),
                 onCitationClick = onCitationClick,
                 onRetry = onRetry,
                 onRegenerate = onRegenerate,
                 onCopyAnswer = onCopyAnswer,
                 onUseFollowUpSuggestion = onUseFollowUpSuggestion
-            )
-            ChatQuestionInputBlock(
-                question = question,
-                canAsk = canAsk,
-                isAsking = isAsking,
-                entryCount = entryCount,
-                indexedEntryCount = indexedEntryCount,
-                onQuestionChange = onQuestionChange,
-                onAsk = onAsk
-            )
-            HorizontalDivider()
-            ChatHistoryBlock(
-                sessions = chatSessions,
-                activeChatSessionId = activeChatSessionId,
-                expanded = historyExpanded,
-                onToggleExpanded = { historyExpanded = !historyExpanded },
-                onSelectSession = onSelectSession,
-                onDeleteSession = { sessionToDelete = it },
-                onClearSessions = { showClearConfirm = true },
-                isBusy = isAsking
             )
         }
     }
@@ -540,6 +601,7 @@ private fun ChatConversationWindowBlock(
     isAsking: Boolean,
     askProgress: AiTaskProgress?,
     askStatusMessage: String?,
+    modifier: Modifier = Modifier,
     onCitationClick: (ChatCitation) -> Unit,
     onRetry: (ChatMessage) -> Unit,
     onRegenerate: (ChatMessage) -> Unit,
@@ -554,7 +616,10 @@ private fun ChatConversationWindowBlock(
         return
     }
 
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
         if (chatTurns.isNotEmpty()) {
             chatTurns.takeLast(8).forEach { turn ->
                 ChatTurnConversationBlock(
@@ -569,15 +634,40 @@ private fun ChatConversationWindowBlock(
             }
         }
         askProgress?.let { progress ->
-            RequestProgressBlock(progress = progress)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Start
+            ) {
+                PixelChatAssetBox(
+                    spec = ChatAssetSpecs.AssistantBubble,
+                    modifier = Modifier.fillMaxWidth(0.98f)
+                ) {
+                    RequestProgressBlock(progress = progress)
+                }
+            }
         }
         if (askProgress == null && isAsking && !askStatusMessage.isNullOrBlank()) {
-            Text(
-                text = askStatusMessage,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.primary
-            )
-            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Start
+            ) {
+                PixelChatAssetBox(
+                    spec = ChatAssetSpecs.AssistantBubble,
+                    modifier = Modifier.fillMaxWidth(0.98f)
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = askStatusMessage,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = NazhiTokens.colors.grassDark
+                        )
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                }
+            }
         }
     }
 }
@@ -593,29 +683,29 @@ private fun ChatTurnConversationBlock(
     onUseFollowUpSuggestion: (String) -> Unit
 ) {
     val latestAnswer = turn.latestAnswer
+    val colors = NazhiTokens.colors
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.End
         ) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(0.86f),
-                color = MaterialTheme.colorScheme.tertiaryContainer,
-                shape = MaterialTheme.shapes.medium
+            PixelChatAssetBox(
+                spec = ChatAssetSpecs.UserBubble,
+                modifier = Modifier.fillMaxWidth(0.84f)
             ) {
                 Column(
-                    modifier = Modifier.padding(12.dp),
+                    modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text(
                         text = "我",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                        color = colors.grassDark
                     )
                     Text(
                         text = turn.question.content,
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                        color = colors.textPrimary
                     )
                 }
             }
@@ -624,17 +714,12 @@ private fun ChatTurnConversationBlock(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.Start
         ) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(0.92f),
-                color = if (latestAnswer?.status == ChatMessageStatus.FAILED) {
-                    MaterialTheme.colorScheme.errorContainer
-                } else {
-                    MaterialTheme.colorScheme.surfaceVariant
-                },
-                shape = MaterialTheme.shapes.medium
+            PixelChatAssetBox(
+                spec = ChatAssetSpecs.AssistantBubble,
+                modifier = Modifier.fillMaxWidth(0.98f)
             ) {
                 Column(
-                    modifier = Modifier.padding(12.dp),
+                    modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     val answerText = latestAnswer?.fullAnswerText()
@@ -650,17 +735,17 @@ private fun ChatTurnConversationBlock(
                         text = "纳知",
                         style = MaterialTheme.typography.labelSmall,
                         color = if (latestAnswer?.status == ChatMessageStatus.FAILED) {
-                            MaterialTheme.colorScheme.onErrorContainer
+                            colors.issue
                         } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
+                            colors.grassDark
                         }
                     )
                     RichAnswerBlock(
                         answer = answerText?.withoutFollowUpSuggestions() ?: "正在等待回答生成。",
                         color = if (latestAnswer?.status == ChatMessageStatus.FAILED) {
-                            MaterialTheme.colorScheme.onErrorContainer
+                            colors.issue
                         } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
+                            colors.textPrimary
                         }
                     )
                     latestAnswer?.let { answer ->
@@ -668,9 +753,9 @@ private fun ChatTurnConversationBlock(
                             text = turn.summaryMetaText(),
                             style = MaterialTheme.typography.labelSmall,
                             color = if (answer.status == ChatMessageStatus.FAILED) {
-                                MaterialTheme.colorScheme.onErrorContainer
+                                colors.issue
                             } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
+                                colors.textSecondary
                             }
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -733,29 +818,282 @@ private fun ChatQuestionInputBlock(
     onQuestionChange: (String) -> Unit,
     onAsk: () -> Unit
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedTextField(
-            value = question,
-            onValueChange = onQuestionChange,
+    PixelChatAssetBox(
+        spec = ChatAssetSpecs.InputPanel,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
             modifier = Modifier.fillMaxWidth(),
-            minLines = 2,
-            label = { Text(text = "向知识库提问") }
-        )
-        Button(
-            onClick = onAsk,
-            enabled = canAsk,
-            modifier = Modifier.fillMaxWidth()
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text(
-                text = when {
-                    isAsking -> "回答中"
-                    entryCount == 0 -> "先完成知识沉淀"
-                    indexedEntryCount == 0 -> "先完成沉淀"
-                    else -> "发送"
-                }
+            OutlinedTextField(
+                value = question,
+                onValueChange = onQuestionChange,
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 2,
+                label = { Text(text = "向知识库提问") }
             )
+            Button(
+                onClick = onAsk,
+                enabled = canAsk,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = when {
+                        isAsking -> "回答中"
+                        entryCount == 0 -> "先完成知识沉淀"
+                        indexedEntryCount == 0 -> "先完成沉淀"
+                        else -> "发送"
+                    }
+                )
+            }
         }
     }
+}
+
+@Composable
+private fun ChatQuestionInputDock(
+    question: String,
+    expanded: Boolean,
+    canAsk: Boolean,
+    isAsking: Boolean,
+    entryCount: Int,
+    indexedEntryCount: Int,
+    onQuestionChange: (String) -> Unit,
+    onExpand: () -> Unit,
+    onAsk: () -> Unit
+) {
+    Surface(
+        modifier = Modifier.imePadding(),
+        color = NazhiTokens.colors.background,
+        tonalElevation = 3.dp
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 12.dp)
+        ) {
+            if (expanded) {
+                ChatQuestionInputBlock(
+                    question = question,
+                    canAsk = canAsk,
+                    isAsking = isAsking,
+                    entryCount = entryCount,
+                    indexedEntryCount = indexedEntryCount,
+                    onQuestionChange = onQuestionChange,
+                    onAsk = onAsk
+                )
+            } else {
+                PixelChatAssetBox(
+                    spec = ChatAssetSpecs.CitationStrip,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onExpand),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    Text(
+                        text = "点击继续向知识库提问",
+                        modifier = Modifier.fillMaxWidth(),
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = NazhiTokens.colors.soil,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PixelChatAssetBox(
+    spec: ChatAssetSpec,
+    modifier: Modifier = Modifier,
+    contentAlignment: Alignment = Alignment.TopStart,
+    content: @Composable BoxScope.() -> Unit
+) {
+    val image = ImageBitmap.imageResource(id = spec.backgroundRes)
+    Box(
+        modifier = modifier
+            .heightIn(min = spec.minHeight)
+            .drawBehind {
+                drawNineSliceImage(image = image, spec = spec)
+            }
+            .padding(spec.contentPadding),
+        contentAlignment = contentAlignment,
+        propagateMinConstraints = true,
+        content = content
+    )
+}
+
+private data class ChatAssetSpec(
+    val backgroundRes: Int,
+    val sourceLeft: Int,
+    val sourceTop: Int,
+    val sourceRight: Int,
+    val sourceBottom: Int,
+    val destinationLeft: Dp,
+    val destinationTop: Dp,
+    val destinationRight: Dp,
+    val destinationBottom: Dp,
+    val minHeight: Dp,
+    val contentPadding: PaddingValues
+)
+
+private object ChatAssetSpecs {
+    val MainPanel = ChatAssetSpec(
+        backgroundRes = R.drawable.chat_panel_bg,
+        sourceLeft = 72,
+        sourceTop = 96,
+        sourceRight = 72,
+        sourceBottom = 96,
+        destinationLeft = 28.dp,
+        destinationTop = 34.dp,
+        destinationRight = 28.dp,
+        destinationBottom = 34.dp,
+        minHeight = 320.dp,
+        contentPadding = PaddingValues(start = 28.dp, top = 34.dp, end = 28.dp, bottom = 34.dp)
+    )
+
+    val UserBubble = ChatAssetSpec(
+        backgroundRes = R.drawable.chat_user_bubble_bg,
+        sourceLeft = 76,
+        sourceTop = 54,
+        sourceRight = 110,
+        sourceBottom = 54,
+        destinationLeft = 28.dp,
+        destinationTop = 18.dp,
+        destinationRight = 36.dp,
+        destinationBottom = 18.dp,
+        minHeight = 112.dp,
+        contentPadding = PaddingValues(start = 26.dp, top = 18.dp, end = 34.dp, bottom = 20.dp)
+    )
+
+    val AssistantBubble = ChatAssetSpec(
+        backgroundRes = R.drawable.chat_ai_bubble_bg,
+        sourceLeft = 104,
+        sourceTop = 70,
+        sourceRight = 104,
+        sourceBottom = 60,
+        destinationLeft = 34.dp,
+        destinationTop = 22.dp,
+        destinationRight = 34.dp,
+        destinationBottom = 20.dp,
+        minHeight = 128.dp,
+        contentPadding = PaddingValues(start = 34.dp, top = 26.dp, end = 34.dp, bottom = 28.dp)
+    )
+
+    val InputPanel = ChatAssetSpec(
+        backgroundRes = R.drawable.chat_input_panel_bg,
+        sourceLeft = 86,
+        sourceTop = 54,
+        sourceRight = 96,
+        sourceBottom = 48,
+        destinationLeft = 28.dp,
+        destinationTop = 18.dp,
+        destinationRight = 30.dp,
+        destinationBottom = 18.dp,
+        minHeight = 156.dp,
+        contentPadding = PaddingValues(start = 24.dp, top = 20.dp, end = 24.dp, bottom = 22.dp)
+    )
+
+    val CitationStrip = ChatAssetSpec(
+        backgroundRes = R.drawable.chat_citation_collapsed_bg,
+        sourceLeft = 82,
+        sourceTop = 42,
+        sourceRight = 82,
+        sourceBottom = 40,
+        destinationLeft = 28.dp,
+        destinationTop = 14.dp,
+        destinationRight = 28.dp,
+        destinationBottom = 14.dp,
+        minHeight = 58.dp,
+        contentPadding = PaddingValues(start = 28.dp, top = 14.dp, end = 28.dp, bottom = 14.dp)
+    )
+}
+
+private fun DrawScope.drawNineSliceImage(
+    image: ImageBitmap,
+    spec: ChatAssetSpec
+) {
+    val dstWidth = size.width.roundToInt()
+    val dstHeight = size.height.roundToInt()
+    if (dstWidth <= 0 || dstHeight <= 0 || image.width <= 0 || image.height <= 0) {
+        return
+    }
+
+    val srcLeft = spec.sourceLeft.coerceIn(0, image.width)
+    val srcTop = spec.sourceTop.coerceIn(0, image.height)
+    val srcRight = spec.sourceRight.coerceIn(0, image.width - srcLeft)
+    val srcBottom = spec.sourceBottom.coerceIn(0, image.height - srcTop)
+    val srcCenterWidth = (image.width - srcLeft - srcRight).coerceAtLeast(0)
+    val srcCenterHeight = (image.height - srcTop - srcBottom).coerceAtLeast(0)
+
+    val rawDstLeft = spec.destinationLeft.toPx()
+    val rawDstRight = spec.destinationRight.toPx()
+    val rawDstTop = spec.destinationTop.toPx()
+    val rawDstBottom = spec.destinationBottom.toPx()
+    val horizontalScale = if (rawDstLeft + rawDstRight > dstWidth) {
+        dstWidth / (rawDstLeft + rawDstRight)
+    } else {
+        1f
+    }
+    val verticalScale = if (rawDstTop + rawDstBottom > dstHeight) {
+        dstHeight / (rawDstTop + rawDstBottom)
+    } else {
+        1f
+    }
+    val dstLeft = (rawDstLeft * horizontalScale).roundToInt()
+    val dstRight = (rawDstRight * horizontalScale).roundToInt()
+    val dstTop = (rawDstTop * verticalScale).roundToInt()
+    val dstBottom = (rawDstBottom * verticalScale).roundToInt()
+    val dstCenterWidth = (dstWidth - dstLeft - dstRight).coerceAtLeast(0)
+    val dstCenterHeight = (dstHeight - dstTop - dstBottom).coerceAtLeast(0)
+
+    fun drawPatch(
+        sourceX: Int,
+        sourceY: Int,
+        sourceWidth: Int,
+        sourceHeight: Int,
+        targetX: Int,
+        targetY: Int,
+        targetWidth: Int,
+        targetHeight: Int
+    ) {
+        if (sourceWidth <= 0 || sourceHeight <= 0 || targetWidth <= 0 || targetHeight <= 0) {
+            return
+        }
+        drawImage(
+            image = image,
+            srcOffset = IntOffset(sourceX, sourceY),
+            srcSize = IntSize(sourceWidth, sourceHeight),
+            dstOffset = IntOffset(targetX, targetY),
+            dstSize = IntSize(targetWidth, targetHeight),
+            filterQuality = FilterQuality.None
+        )
+    }
+
+    val srcMiddleX = srcLeft
+    val srcRightX = image.width - srcRight
+    val srcMiddleY = srcTop
+    val srcBottomY = image.height - srcBottom
+    val dstMiddleX = dstLeft
+    val dstRightX = dstWidth - dstRight
+    val dstMiddleY = dstTop
+    val dstBottomY = dstHeight - dstBottom
+
+    drawPatch(0, 0, srcLeft, srcTop, 0, 0, dstLeft, dstTop)
+    drawPatch(srcMiddleX, 0, srcCenterWidth, srcTop, dstMiddleX, 0, dstCenterWidth, dstTop)
+    drawPatch(srcRightX, 0, srcRight, srcTop, dstRightX, 0, dstRight, dstTop)
+
+    drawPatch(0, srcMiddleY, srcLeft, srcCenterHeight, 0, dstMiddleY, dstLeft, dstCenterHeight)
+    drawPatch(srcMiddleX, srcMiddleY, srcCenterWidth, srcCenterHeight, dstMiddleX, dstMiddleY, dstCenterWidth, dstCenterHeight)
+    drawPatch(srcRightX, srcMiddleY, srcRight, srcCenterHeight, dstRightX, dstMiddleY, dstRight, dstCenterHeight)
+
+    drawPatch(0, srcBottomY, srcLeft, srcBottom, 0, dstBottomY, dstLeft, dstBottom)
+    drawPatch(srcMiddleX, srcBottomY, srcCenterWidth, srcBottom, dstMiddleX, dstBottomY, dstCenterWidth, dstBottom)
+    drawPatch(srcRightX, srcBottomY, srcRight, srcBottom, dstRightX, dstBottomY, dstRight, dstBottom)
 }
 
 private data class ChatTurnUiState(
@@ -823,6 +1161,78 @@ private fun buildChatTurns(
                     }
             )
         }
+}
+
+@Composable
+private fun ChatStatusHeaderBlock(
+    activeSession: ChatSession?,
+    hasDraftQuestion: Boolean,
+    embeddingCount: Int,
+    historyCount: Int,
+    historyExpanded: Boolean,
+    isBusy: Boolean,
+    onCreateSession: () -> Unit,
+    onClearSessionMemory: (ChatSession) -> Unit,
+    onToggleHistory: () -> Unit
+) {
+    val sessionWithMemory = activeSession?.takeIf { it.memoryDigest.orEmpty().isNotBlank() }
+    val sessionText = activeSession?.let { session ->
+        "${session.title.ifBlank { "未命名对话" }} · ${session.messageCount} 条"
+    } ?: "新对话"
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    text = "知识库问答",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = NazhiTokens.colors.textPrimary
+                )
+                Text(
+                    text = "$sessionText · 可问答知识 $embeddingCount 条",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            TextButton(
+                onClick = onToggleHistory,
+                enabled = historyCount > 0
+            ) {
+                Text(text = if (historyExpanded) "收起历史" else "历史 $historyCount")
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = onCreateSession,
+                enabled = !isBusy && (activeSession != null || hasDraftQuestion),
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(text = "新对话")
+            }
+            sessionWithMemory?.let { session ->
+                OutlinedButton(
+                    onClick = { onClearSessionMemory(session) },
+                    enabled = !isBusy,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(text = "清除记忆")
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -1145,10 +1555,16 @@ private fun CitationCollectionBlock(
     }
     var expanded by remember(citationKey) { mutableStateOf(false) }
 
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedButton(
-            onClick = { expanded = !expanded },
-            modifier = Modifier.fillMaxWidth()
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        PixelChatAssetBox(
+            spec = ChatAssetSpecs.CitationStrip,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded },
+            contentAlignment = Alignment.Center
         ) {
             Text(
                 text = if (expanded) {
@@ -1156,6 +1572,11 @@ private fun CitationCollectionBlock(
                 } else {
                     "引用 ${citations.size} 条 · 点击查看"
                 },
+                modifier = Modifier.fillMaxWidth(),
+                style = MaterialTheme.typography.bodyMedium,
+                color = NazhiTokens.colors.soil,
+                fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.Center,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -1178,9 +1599,11 @@ private fun CitationEvidenceCard(
     citationState: ChatCitationUiState,
     onClick: () -> Unit
 ) {
-    OutlinedButton(
-        onClick = onClick,
-        modifier = Modifier.fillMaxWidth()
+    PixelChatAssetBox(
+        spec = ChatAssetSpecs.CitationStrip,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
     ) {
         Column(
             modifier = Modifier.fillMaxWidth(),
@@ -1243,7 +1666,7 @@ private fun RichAnswerBlock(
 ) {
     val segments = remember(answer) { parseRichAnswerSegments(answer) }
     Column(
-        modifier = modifier,
+        modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         segments.forEach { segment ->
@@ -1310,7 +1733,10 @@ private fun FollowUpSuggestionsBlock(
     if (suggestions.isEmpty()) {
         return
     }
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
         Text(
             text = "可以继续追问",
             style = MaterialTheme.typography.labelMedium,
@@ -1609,7 +2035,10 @@ private fun Context.copyToClipboard(label: String, text: String) {
 
 @Composable
 private fun RequestProgressBlock(progress: AiTaskProgress) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
         Text(
             text = "${progress.stage.label()} · ${progress.progress}%",
             style = MaterialTheme.typography.labelMedium,
