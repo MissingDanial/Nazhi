@@ -5,6 +5,8 @@ import android.content.ClipboardManager
 import android.content.Context
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -12,7 +14,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.verticalScroll
@@ -39,11 +43,21 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import com.nazhi.app.R
 import com.nazhi.app.core.model.AiTaskProgress
 import com.nazhi.app.core.model.DayKnowledgeStatus
 import com.nazhi.app.core.model.KnowledgeDraftStatus
@@ -65,6 +79,7 @@ import com.nazhi.app.core.util.extractFirstUrl
 import com.nazhi.app.core.util.todayDateId
 import com.nazhi.app.core.util.toNazhiTitle
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 @Composable
 fun KnowledgeRoute(
@@ -83,9 +98,6 @@ fun KnowledgeRoute(
     val dayStatus by remember(repository, today) {
         repository.observeDayKnowledgeStatus(today)
     }.collectAsState(initial = DayKnowledgeStatus(today, 0, 0, 0, 0, 0, 0, 0, 0))
-    val embeddingCount by remember(repository) {
-        repository.observeEmbeddingCount()
-    }.collectAsState(initial = 0)
     val knowledgeIngestionState by remember(knowledgeIngestionCoordinator) {
         knowledgeIngestionCoordinator.state
     }.collectAsState(initial = KnowledgeIngestionState())
@@ -141,7 +153,6 @@ fun KnowledgeRoute(
         entries = entries,
         drafts = drafts,
         dayStatus = dayStatus,
-        embeddingCount = embeddingCount,
         indexedEntryCount = indexedEntryCount,
         pendingIndexCount = pendingIndexCount,
         failedIndexCount = failedIndexCount,
@@ -375,7 +386,6 @@ private fun KnowledgeScreen(
     entries: List<KnowledgeEntry>,
     drafts: List<KnowledgeEntryDraft>,
     dayStatus: DayKnowledgeStatus,
-    embeddingCount: Int,
     indexedEntryCount: Int,
     pendingIndexCount: Int,
     failedIndexCount: Int,
@@ -405,9 +415,18 @@ private fun KnowledgeScreen(
     onEditEntry: (KnowledgeEntry) -> Unit,
     onReindexEntry: (KnowledgeEntry) -> Unit
 ) {
+    var selectedEntryFilter by remember { mutableStateOf(KnowledgeEntryStatusFilter.ALL) }
     val visibleEntries = remember(entries, entrySearchQuery) {
         entries.filter { entry ->
             entry.matchesKeyword(entrySearchQuery)
+        }
+    }
+    val filteredEntries = remember(visibleEntries, selectedEntryFilter) {
+        visibleEntries.filter { entry -> selectedEntryFilter.matches(entry) }
+    }
+    val statusFilterCounts = remember(entries) {
+        KnowledgeEntryStatusFilter.values().associateWith { filter ->
+            entries.count { entry -> filter.matches(entry) }
         }
     }
 
@@ -437,7 +456,6 @@ private fun KnowledgeScreen(
             item {
                 KnowledgeSearchCard(
                     entryCount = entries.size,
-                    embeddingCount = embeddingCount,
                     indexedEntryCount = indexedEntryCount,
                     pendingIndexCount = pendingIndexCount,
                     failedIndexCount = failedIndexCount,
@@ -475,21 +493,24 @@ private fun KnowledgeScreen(
                     KnowledgeEntryManagementCard(
                         query = entrySearchQuery,
                         totalCount = entries.size,
-                        visibleCount = visibleEntries.size,
-                        onQueryChange = onEntrySearchQueryChange
+                        visibleCount = filteredEntries.size,
+                        selectedFilter = selectedEntryFilter,
+                        filterCounts = statusFilterCounts,
+                        onQueryChange = onEntrySearchQueryChange,
+                        onFilterChange = { selectedEntryFilter = it }
                     )
                 }
                 if (entries.isEmpty()) {
                     item {
                         EmptyKnowledgeCard(text = "完成 AI 整理并提交后，知识条目会显示在这里。")
                     }
-                } else if (visibleEntries.isEmpty()) {
+                } else if (filteredEntries.isEmpty()) {
                     item {
                         EmptyKnowledgeCard(text = "没有匹配的知识条目。")
                     }
                 } else {
                     items(
-                        items = visibleEntries,
+                        items = filteredEntries,
                         key = { entry -> entry.id }
                     ) { entry ->
                         KnowledgeEntryCard(
@@ -881,7 +902,6 @@ private fun SourceNotesDialog(
 @Composable
 private fun KnowledgeSearchCard(
     entryCount: Int,
-    embeddingCount: Int,
     indexedEntryCount: Int,
     pendingIndexCount: Int,
     failedIndexCount: Int,
@@ -889,27 +909,25 @@ private fun KnowledgeSearchCard(
     onQueryChange: (String) -> Unit,
     onSearch: () -> Unit
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
+    KnowledgeAssetBox(
+        spec = KnowledgeAssetSpecs.SearchPanel,
+        modifier = Modifier.fillMaxWidth()
+    ) {
         Column(
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
-                text = "本地知识检索",
+                text = "语义搜索",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
-            )
-            Text(
-                text = "已沉淀知识 $indexedEntryCount 条",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             OutlinedTextField(
                 value = query,
                 onValueChange = onQueryChange,
                 modifier = Modifier.fillMaxWidth(),
                 minLines = 2,
-                label = { Text(text = "输入想检索的问题") }
+                label = { Text(text = "向知识库提问或描述想查找的内容") }
             )
             Button(
                 onClick = onSearch,
@@ -919,10 +937,16 @@ private fun KnowledgeSearchCard(
                 Text(
                     text = when {
                         entryCount == 0 || indexedEntryCount == 0 -> "暂无可检索内容"
-                        else -> "语义检索"
+                        else -> "搜索相关知识"
                     }
                 )
             }
+            KnowledgeIndexStatusHint(
+                entryCount = entryCount,
+                indexedEntryCount = indexedEntryCount,
+                pendingIndexCount = pendingIndexCount,
+                failedIndexCount = failedIndexCount
+            )
         }
     }
 }
@@ -932,18 +956,35 @@ private fun KnowledgeEntryManagementCard(
     query: String,
     totalCount: Int,
     visibleCount: Int,
-    onQueryChange: (String) -> Unit
+    selectedFilter: KnowledgeEntryStatusFilter,
+    filterCounts: Map<KnowledgeEntryStatusFilter, Int>,
+    onQueryChange: (String) -> Unit,
+    onFilterChange: (KnowledgeEntryStatusFilter) -> Unit
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
+    KnowledgeAssetBox(
+        spec = KnowledgeAssetSpecs.FilterPanel,
+        modifier = Modifier.fillMaxWidth()
+    ) {
         Column(
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text(
-                text = "条目管理",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "本地筛选",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = "$visibleCount / $totalCount",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             OutlinedTextField(
                 value = query,
                 onValueChange = onQueryChange,
@@ -951,11 +992,55 @@ private fun KnowledgeEntryManagementCard(
                 label = { Text(text = "搜索标题、摘要、正文或标签") },
                 singleLine = true
             )
-            Text(
-                text = "显示 $visibleCount / $totalCount 条",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+            KnowledgeEntryStatusFilterRow(
+                selectedFilter = selectedFilter,
+                filterCounts = filterCounts,
+                onFilterChange = onFilterChange
             )
+        }
+    }
+}
+
+@Composable
+private fun KnowledgeEntryStatusFilterRow(
+    selectedFilter: KnowledgeEntryStatusFilter,
+    filterCounts: Map<KnowledgeEntryStatusFilter, Int>,
+    onFilterChange: (KnowledgeEntryStatusFilter) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        KnowledgeEntryStatusFilter.values().toList().chunked(2).forEach { rowFilters ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                rowFilters.forEach { filter ->
+                    val count = filterCounts[filter] ?: 0
+                    val modifier = Modifier.weight(1f)
+                    if (filter == selectedFilter) {
+                        Button(
+                            onClick = { onFilterChange(filter) },
+                            modifier = modifier
+                        ) {
+                            Text(
+                                text = filter.labelWithCount(count),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    } else {
+                        OutlinedButton(
+                            onClick = { onFilterChange(filter) },
+                            modifier = modifier
+                        ) {
+                            Text(
+                                text = filter.labelWithCount(count),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -994,6 +1079,31 @@ private fun KnowledgeIndexStatusHint(
 }
 
 @Composable
+private fun KnowledgeEntryStatusBadge(status: KnowledgeIndexStatus) {
+    val colorScheme = MaterialTheme.colorScheme
+    val contentColor = when (status) {
+        KnowledgeIndexStatus.FAILED -> colorScheme.onErrorContainer
+        KnowledgeIndexStatus.INDEXED -> colorScheme.onPrimaryContainer
+        KnowledgeIndexStatus.PENDING,
+        KnowledgeIndexStatus.INDEXING -> colorScheme.onSecondaryContainer
+    }
+
+    KnowledgeAssetBox(
+        spec = KnowledgeAssetSpecs.StatusBadge,
+        modifier = Modifier.widthIn(min = 76.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = status.badgeText(),
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = contentColor,
+            maxLines = 1
+        )
+    }
+}
+
+@Composable
 private fun KnowledgeResultCard(
     result: SemanticSearchResult,
     onViewEntry: () -> Unit,
@@ -1017,10 +1127,13 @@ private fun KnowledgeEntryCard(
     onReindex: (() -> Unit)? = null,
     actionsEnabled: Boolean = true
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
+    KnowledgeAssetBox(
+        spec = KnowledgeAssetSpecs.EntryCard,
+        modifier = Modifier.fillMaxWidth()
+    ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             leadingText?.let {
                 Text(
@@ -1029,21 +1142,28 @@ private fun KnowledgeEntryCard(
                     color = MaterialTheme.colorScheme.primary
                 )
             }
-            Text(
-                text = entry.userTitle ?: entry.content.lineSequence().firstOrNull().orEmpty().ifBlank { "未命名知识" },
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = entry.displayTitleText(),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                KnowledgeEntryStatusBadge(status = entry.indexStatus)
+            }
             Text(
                 text = entry.summary.ifBlank { entry.content },
                 style = MaterialTheme.typography.bodyMedium,
-                maxLines = 3,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                text = "${entry.confirmedDate} · ${entry.indexStatus.label()}",
+                text = "来源 ${entry.sourceNoteIds.size} 条 · ${entry.confirmedDate}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1056,17 +1176,18 @@ private fun KnowledgeEntryCard(
                     overflow = TextOverflow.Ellipsis
                 )
             }
-            Text(
-                text = "来源笔记 ${entry.sourceNoteIds.size} 条",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
             Spacer(modifier = Modifier.height(4.dp))
             HorizontalDivider()
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End
             ) {
+                TextButton(onClick = onViewEntry) {
+                    Text(text = "查看")
+                }
+                TextButton(onClick = onCopy) {
+                    Text(text = "复制")
+                }
                 onEdit?.let {
                     TextButton(
                         onClick = it,
@@ -1075,14 +1196,6 @@ private fun KnowledgeEntryCard(
                         Text(text = "编辑")
                     }
                 }
-                TextButton(onClick = onViewEntry) {
-                    Text(text = "查看详情")
-                }
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End
-            ) {
                 onReindex?.let {
                     TextButton(
                         onClick = it,
@@ -1090,9 +1203,6 @@ private fun KnowledgeEntryCard(
                     ) {
                         Text(text = entry.indexActionText())
                     }
-                }
-                TextButton(onClick = onCopy) {
-                    Text(text = "复制引用")
                 }
             }
         }
@@ -1110,13 +1220,38 @@ private fun SectionTitle(text: String) {
 
 @Composable
 private fun EmptyKnowledgeCard(text: String) {
-    Card(modifier = Modifier.fillMaxWidth()) {
+    KnowledgeAssetBox(
+        spec = KnowledgeAssetSpecs.EmptyPanel,
+        modifier = Modifier.fillMaxWidth(),
+        contentAlignment = Alignment.CenterStart
+    ) {
         Text(
             text = text,
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier.fillMaxWidth(),
             style = MaterialTheme.typography.bodyMedium
         )
     }
+}
+
+@Composable
+private fun KnowledgeAssetBox(
+    spec: KnowledgeAssetSpec,
+    modifier: Modifier = Modifier,
+    contentAlignment: Alignment = Alignment.TopStart,
+    content: @Composable BoxScope.() -> Unit
+) {
+    val image = ImageBitmap.imageResource(id = spec.backgroundRes)
+    Box(
+        modifier = modifier
+            .heightIn(min = spec.minHeight)
+            .drawBehind {
+                drawKnowledgeNineSliceImage(image = image, spec = spec)
+            }
+            .padding(spec.contentPadding),
+        contentAlignment = contentAlignment,
+        propagateMinConstraints = true,
+        content = content
+    )
 }
 
 @Composable
@@ -1136,6 +1271,175 @@ private fun RequestProgressBlock(progress: AiTaskProgress) {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
     }
+}
+
+private data class KnowledgeAssetSpec(
+    val backgroundRes: Int,
+    val sourceLeft: Int,
+    val sourceTop: Int,
+    val sourceRight: Int,
+    val sourceBottom: Int,
+    val destinationLeft: Dp,
+    val destinationTop: Dp,
+    val destinationRight: Dp,
+    val destinationBottom: Dp,
+    val minHeight: Dp,
+    val contentPadding: PaddingValues
+)
+
+private object KnowledgeAssetSpecs {
+    val SearchPanel = KnowledgeAssetSpec(
+        backgroundRes = R.drawable.knowledge_search_panel_bg,
+        sourceLeft = 72,
+        sourceTop = 72,
+        sourceRight = 72,
+        sourceBottom = 72,
+        destinationLeft = 28.dp,
+        destinationTop = 28.dp,
+        destinationRight = 28.dp,
+        destinationBottom = 28.dp,
+        minHeight = 196.dp,
+        contentPadding = PaddingValues(start = 28.dp, top = 30.dp, end = 28.dp, bottom = 28.dp)
+    )
+
+    val FilterPanel = KnowledgeAssetSpec(
+        backgroundRes = R.drawable.knowledge_filter_panel_bg,
+        sourceLeft = 72,
+        sourceTop = 72,
+        sourceRight = 72,
+        sourceBottom = 72,
+        destinationLeft = 28.dp,
+        destinationTop = 28.dp,
+        destinationRight = 28.dp,
+        destinationBottom = 28.dp,
+        minHeight = 224.dp,
+        contentPadding = PaddingValues(start = 28.dp, top = 30.dp, end = 28.dp, bottom = 28.dp)
+    )
+
+    val EntryCard = KnowledgeAssetSpec(
+        backgroundRes = R.drawable.knowledge_entry_card_bg,
+        sourceLeft = 64,
+        sourceTop = 64,
+        sourceRight = 64,
+        sourceBottom = 64,
+        destinationLeft = 24.dp,
+        destinationTop = 24.dp,
+        destinationRight = 24.dp,
+        destinationBottom = 24.dp,
+        minHeight = 172.dp,
+        contentPadding = PaddingValues(start = 28.dp, top = 30.dp, end = 28.dp, bottom = 26.dp)
+    )
+
+    val EmptyPanel = KnowledgeAssetSpec(
+        backgroundRes = R.drawable.knowledge_empty_panel_bg,
+        sourceLeft = 72,
+        sourceTop = 64,
+        sourceRight = 72,
+        sourceBottom = 64,
+        destinationLeft = 28.dp,
+        destinationTop = 24.dp,
+        destinationRight = 28.dp,
+        destinationBottom = 24.dp,
+        minHeight = 96.dp,
+        contentPadding = PaddingValues(start = 32.dp, top = 24.dp, end = 32.dp, bottom = 24.dp)
+    )
+
+    val StatusBadge = KnowledgeAssetSpec(
+        backgroundRes = R.drawable.knowledge_status_badge_bg,
+        sourceLeft = 36,
+        sourceTop = 24,
+        sourceRight = 36,
+        sourceBottom = 24,
+        destinationLeft = 12.dp,
+        destinationTop = 8.dp,
+        destinationRight = 12.dp,
+        destinationBottom = 8.dp,
+        minHeight = 30.dp,
+        contentPadding = PaddingValues(start = 12.dp, top = 5.dp, end = 12.dp, bottom = 5.dp)
+    )
+}
+
+private fun DrawScope.drawKnowledgeNineSliceImage(
+    image: ImageBitmap,
+    spec: KnowledgeAssetSpec
+) {
+    val dstWidth = size.width.roundToInt()
+    val dstHeight = size.height.roundToInt()
+    if (dstWidth <= 0 || dstHeight <= 0 || image.width <= 0 || image.height <= 0) {
+        return
+    }
+
+    val srcLeft = spec.sourceLeft.coerceIn(0, image.width)
+    val srcTop = spec.sourceTop.coerceIn(0, image.height)
+    val srcRight = spec.sourceRight.coerceIn(0, image.width - srcLeft)
+    val srcBottom = spec.sourceBottom.coerceIn(0, image.height - srcTop)
+    val srcCenterWidth = (image.width - srcLeft - srcRight).coerceAtLeast(0)
+    val srcCenterHeight = (image.height - srcTop - srcBottom).coerceAtLeast(0)
+
+    val rawDstLeft = spec.destinationLeft.toPx()
+    val rawDstRight = spec.destinationRight.toPx()
+    val rawDstTop = spec.destinationTop.toPx()
+    val rawDstBottom = spec.destinationBottom.toPx()
+    val horizontalScale = if (rawDstLeft + rawDstRight > dstWidth) {
+        dstWidth / (rawDstLeft + rawDstRight)
+    } else {
+        1f
+    }
+    val verticalScale = if (rawDstTop + rawDstBottom > dstHeight) {
+        dstHeight / (rawDstTop + rawDstBottom)
+    } else {
+        1f
+    }
+    val dstLeft = (rawDstLeft * horizontalScale).roundToInt()
+    val dstRight = (rawDstRight * horizontalScale).roundToInt()
+    val dstTop = (rawDstTop * verticalScale).roundToInt()
+    val dstBottom = (rawDstBottom * verticalScale).roundToInt()
+    val dstCenterWidth = (dstWidth - dstLeft - dstRight).coerceAtLeast(0)
+    val dstCenterHeight = (dstHeight - dstTop - dstBottom).coerceAtLeast(0)
+
+    fun drawPatch(
+        sourceX: Int,
+        sourceY: Int,
+        sourceWidth: Int,
+        sourceHeight: Int,
+        targetX: Int,
+        targetY: Int,
+        targetWidth: Int,
+        targetHeight: Int
+    ) {
+        if (sourceWidth <= 0 || sourceHeight <= 0 || targetWidth <= 0 || targetHeight <= 0) {
+            return
+        }
+        drawImage(
+            image = image,
+            srcOffset = IntOffset(sourceX, sourceY),
+            srcSize = IntSize(sourceWidth, sourceHeight),
+            dstOffset = IntOffset(targetX, targetY),
+            dstSize = IntSize(targetWidth, targetHeight),
+            filterQuality = FilterQuality.None
+        )
+    }
+
+    val srcMiddleX = srcLeft
+    val srcRightX = image.width - srcRight
+    val srcMiddleY = srcTop
+    val srcBottomY = image.height - srcBottom
+    val dstMiddleX = dstLeft
+    val dstRightX = dstWidth - dstRight
+    val dstMiddleY = dstTop
+    val dstBottomY = dstHeight - dstBottom
+
+    drawPatch(0, 0, srcLeft, srcTop, 0, 0, dstLeft, dstTop)
+    drawPatch(srcMiddleX, 0, srcCenterWidth, srcTop, dstMiddleX, 0, dstCenterWidth, dstTop)
+    drawPatch(srcRightX, 0, srcRight, srcTop, dstRightX, 0, dstRight, dstTop)
+
+    drawPatch(0, srcMiddleY, srcLeft, srcCenterHeight, 0, dstMiddleY, dstLeft, dstCenterHeight)
+    drawPatch(srcMiddleX, srcMiddleY, srcCenterWidth, srcCenterHeight, dstMiddleX, dstMiddleY, dstCenterWidth, dstCenterHeight)
+    drawPatch(srcRightX, srcMiddleY, srcRight, srcCenterHeight, dstRightX, dstMiddleY, dstRight, dstCenterHeight)
+
+    drawPatch(0, srcBottomY, srcLeft, srcBottom, 0, dstBottomY, dstLeft, dstBottom)
+    drawPatch(srcMiddleX, srcBottomY, srcCenterWidth, srcBottom, dstMiddleX, dstBottomY, dstCenterWidth, dstBottom)
+    drawPatch(srcRightX, srcBottomY, srcRight, srcBottom, dstRightX, dstBottomY, dstRight, dstBottom)
 }
 
 private fun com.nazhi.app.core.model.AiTaskStage.label(): String {
@@ -1167,6 +1471,29 @@ private fun DayKnowledgeStatus.statusText(): String {
     }
 }
 
+private enum class KnowledgeEntryStatusFilter(
+    val label: String
+) {
+    ALL("全部"),
+    INDEXED("可问答"),
+    PROCESSING("沉淀中"),
+    FAILED("处理失败");
+
+    fun matches(entry: KnowledgeEntry): Boolean {
+        return when (this) {
+            ALL -> true
+            INDEXED -> entry.indexStatus == KnowledgeIndexStatus.INDEXED
+            PROCESSING -> entry.indexStatus == KnowledgeIndexStatus.PENDING ||
+                entry.indexStatus == KnowledgeIndexStatus.INDEXING
+            FAILED -> entry.indexStatus == KnowledgeIndexStatus.FAILED
+        }
+    }
+
+    fun labelWithCount(count: Int): String {
+        return "$label $count"
+    }
+}
+
 private fun KnowledgeEntryDraft.reviewLabel(): String {
     return "待确认"
 }
@@ -1192,6 +1519,33 @@ private fun KnowledgeEntry.indexActionText(): String {
         KnowledgeIndexStatus.FAILED -> "重试沉淀"
         KnowledgeIndexStatus.INDEXING -> "沉淀中"
         else -> "更新沉淀"
+    }
+}
+
+private fun KnowledgeEntry.displayTitleText(): String {
+    return userTitle
+        ?: summary.takeIf { it.isNotBlank() }?.compactText(32)
+        ?: content.lineSequence().firstOrNull().orEmpty().ifBlank { "未命名知识" }.compactText(32)
+}
+
+private fun KnowledgeIndexStatus.badgeText(): String {
+    return when (this) {
+        KnowledgeIndexStatus.INDEXED -> "可问答"
+        KnowledgeIndexStatus.PENDING,
+        KnowledgeIndexStatus.INDEXING -> "沉淀中"
+        KnowledgeIndexStatus.FAILED -> "处理失败"
+    }
+}
+
+private fun String.compactText(maxLength: Int): String {
+    val compact = lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .joinToString(separator = " ")
+    return if (compact.length <= maxLength) {
+        compact
+    } else {
+        compact.take(maxLength) + "..."
     }
 }
 

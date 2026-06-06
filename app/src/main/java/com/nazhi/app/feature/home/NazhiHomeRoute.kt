@@ -1,15 +1,16 @@
 package com.nazhi.app.feature.home
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -20,14 +21,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import com.nazhi.app.R
 import com.nazhi.app.core.chat.KnowledgeChatCoordinator
 import com.nazhi.app.core.knowledge.KnowledgeIngestionCoordinator
 import com.nazhi.app.core.network.NazhiBackendClient
 import com.nazhi.app.core.repository.NazhiRepository
 import com.nazhi.app.core.settings.BackendSettingsStore
+import com.nazhi.app.core.ui.NazhiTokens
 import com.nazhi.app.feature.calendar.CalendarRoute
 import com.nazhi.app.feature.chat.KnowledgeChatRoute
 import com.nazhi.app.feature.inbox.InboxRoute
@@ -62,31 +66,39 @@ fun NazhiHomeRoute(
     }
 
     Scaffold(
+        containerColor = NazhiTokens.colors.background,
         bottomBar = {
-            NavigationBar {
+            NavigationBar(
+                containerColor = NazhiTokens.colors.navigationBar,
+                tonalElevation = 4.dp
+            ) {
                 NavigationBarItem(
                     selected = selectedTab == MainTab.TODAY,
                     onClick = { selectedTab = MainTab.TODAY },
-                    icon = { Text(text = "今") },
-                    label = { Text(text = "今日") }
+                    icon = { NavIcon(drawableId = R.drawable.nav_today) },
+                    label = { Text(text = "今日") },
+                    colors = navItemColors()
                 )
                 NavigationBarItem(
                     selected = selectedTab == MainTab.CALENDAR,
                     onClick = { selectedTab = MainTab.CALENDAR },
-                    icon = { Text(text = "历") },
-                    label = { Text(text = "日历") }
+                    icon = { NavIcon(drawableId = R.drawable.nav_calendar) },
+                    label = { Text(text = "日历") },
+                    colors = navItemColors()
                 )
                 NavigationBarItem(
                     selected = selectedTab == MainTab.CHAT,
                     onClick = { selectedTab = MainTab.CHAT },
-                    icon = { Text(text = "问") },
-                    label = { Text(text = "问答") }
+                    icon = { NavIcon(drawableId = R.drawable.nav_chat) },
+                    label = { Text(text = "问答") },
+                    colors = navItemColors()
                 )
                 NavigationBarItem(
                     selected = selectedTab == MainTab.KNOWLEDGE,
                     onClick = { selectedTab = MainTab.KNOWLEDGE },
-                    icon = { Text(text = "知") },
-                    label = { Text(text = "知识库") }
+                    icon = { NavIcon(drawableId = R.drawable.nav_knowledge) },
+                    label = { Text(text = "知识库") },
+                    colors = navItemColors()
                 )
             }
         }
@@ -147,16 +159,17 @@ private fun SettingsGearButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Surface(
+    Box(
         modifier = modifier
-            .clip(CircleShape)
-            .alpha(0.94f),
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.surface,
-        contentColor = MaterialTheme.colorScheme.primary,
-        tonalElevation = 4.dp,
-        shadowElevation = 2.dp
+            .size(50.dp)
+            .alpha(0.96f)
     ) {
+        Image(
+            painter = painterResource(id = R.drawable.settings_gear_bg),
+            contentDescription = null,
+            modifier = Modifier.matchParentSize(),
+            contentScale = ContentScale.Fit
+        )
         IconButton(onClick = onClick) {
             Text(
                 text = "⚙",
@@ -165,3 +178,22 @@ private fun SettingsGearButton(
         }
     }
 }
+
+@Composable
+private fun NavIcon(drawableId: Int) {
+    Image(
+        painter = painterResource(id = drawableId),
+        contentDescription = null,
+        modifier = Modifier.size(28.dp),
+        contentScale = ContentScale.Fit
+    )
+}
+
+@Composable
+private fun navItemColors() = NavigationBarItemDefaults.colors(
+    selectedIconColor = NazhiTokens.colors.grassDark,
+    selectedTextColor = NazhiTokens.colors.grassDark,
+    indicatorColor = NazhiTokens.colors.grassSoft,
+    unselectedIconColor = NazhiTokens.colors.textSecondary,
+    unselectedTextColor = NazhiTokens.colors.textSecondary
+)
