@@ -82,6 +82,39 @@ V1.4 采用“像素知识农场”视觉语言：界面有农场的温度，但
 
 详细资产规则见 [docs/V1.4 UI资产规则.md](docs/V1.4%20UI资产规则.md)。
 
+### 8. V1.4 像素知识农场 UI 改版
+
+V1.4 聚焦视觉体验升级，引入像素农场主题，不改变数据库、后端接口、AI 整理逻辑、embedding、问答主逻辑、登录、同步或任务系统。
+
+#### 核心视觉更新
+
+- **今日页**：像素风状态标签、告示牌背景、知识农场面板、底部导航图标
+- **日历页**：农场年鉴风格，草绿色面板、木质边框、叶片浆果点缀
+- **问答页**：像素风消息气泡、输入面板、引用条背景
+- **知识库页**：语义搜索面板、筛选面板、条目卡、空状态、状态徽标背景
+
+#### 农场交互
+
+- **5x5 农田网格**：每个地块可种植不同作物，代表知识条目
+- **作物生长阶段**：幼苗 → 成长 → 成熟，对应知识条目状态
+- **缩放拖拽**：支持 1.0x - 2.2x 缩放，放大后可拖拽平移
+- **地块点击**：选中态覆盖层，聚合展示关联的 Note / Draft / KnowledgeEntry
+
+#### 资产规范
+
+- 所有 PNG 资产位于 `app/src/main/res/drawable-nodpi/`
+- 不在 PNG 中内嵌中文、数字、状态文案、按钮文字、徽标或水印
+- 所有可变文字由 Compose 覆盖渲染
+- 像素边缘保持清晰，不做模糊、柔光、写实质感
+- 详细资产规则见 `docs/V1.4 UI资产规则.md`
+
+#### 技术实现
+
+- **Canvas 渲染**：农场区域使用 `FilterQuality.None` 保持像素清晰
+- **九宫格拉伸**：面板背景使用 NinePatch 避免边角变形
+- **组件复用**：`NazhiStatusChip`、`FarmNoticeCard`、`DailyFarmPreview` 等
+- **主题 token**：复用 `NazhiTokens` 和状态 palette，不散写一次性颜色
+
 ## 技术架构
 
 ### 技术栈
@@ -99,6 +132,7 @@ V1.4 采用“像素知识农场”视觉语言：界面有农场的温度，但
 - Gradle 9.3.1
 - JDK 17
 - Android SDK API 36
+- V1.4 UI 资产位于 `app/src/main/res/drawable-nodpi/`
 
 ### 数据模型
 
@@ -110,6 +144,8 @@ V1.4 采用“像素知识农场”视觉语言：界面有农场的温度，但
 | `EmbeddingRecord` | 知识条目的向量嵌入记录 |
 | `ChatSession` / `ChatMessage` | 对话会话与消息 |
 | `ChatCitation` | 回答中的引用来源 |
+| `FarmPlot` | 农场地块状态（V1.4 新增） |
+| `CropType` | 作物类型与生长阶段（V1.4 新增） |
 
 ### 模块结构
 
@@ -126,7 +162,9 @@ app/src/main/java/com/nazhi/app/
 │   ├── network/          # 后端 API 客户端
 │   ├── repository/       # 数据仓库层
 │   ├── settings/         # 设置存储
-│   └── ui/               # V1.4 像素农场 UI 组件
+│   └── ui/               # V1.4 UI 组件与主题
+│       ├── NazhiComponents.kt  # 像素风 UI 组件
+│       └── NazhiTheme.kt       # 主题配置与 token
 ├── feature/
 │   ├── calendar/         # 日历视图
 │   ├── chat/             # RAG 问答
