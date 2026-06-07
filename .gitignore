@@ -15,3 +15,12 @@ local.properties
 .DS_Store
 Thumbs.db
 
+# Backend local/runtime files
+nazhi-backend/.env
+nazhi-backend/.env.*
+!nazhi-backend/.env.example
+nazhi-backend/node_modules/
+nazhi-backend/npm-debug.log*
+nazhi-backend/.claude/
+nazhi-backend/kyAPI.txt
+

@@ -1,6 +1,7 @@
 package com.nazhi.app.core.data
 
 import android.content.Context
+import com.nazhi.app.core.auth.AuthSessionStore
 import com.nazhi.app.core.chat.KnowledgeChatCoordinator
 import com.nazhi.app.core.database.NazhiDatabase
 import com.nazhi.app.core.knowledge.KnowledgeIngestionCoordinator
@@ -16,8 +17,10 @@ class AppContainer(context: Context) {
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val database = NazhiDatabase.create(context)
     val backendSettingsStore = BackendSettingsStore(context)
+    val authSessionStore = AuthSessionStore(context)
     val backendClient = NazhiBackendClient(
-        configProvider = { backendSettingsStore.current() }
+        configProvider = { backendSettingsStore.current() },
+        accessTokenProvider = { authSessionStore.currentAccessToken() }
     )
 
     val repository: NazhiRepository = LocalNazhiRepository(

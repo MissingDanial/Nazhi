@@ -26,6 +26,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.nazhi.app.R
+import com.nazhi.app.core.auth.AuthSessionStore
 import com.nazhi.app.core.chat.KnowledgeChatCoordinator
 import com.nazhi.app.core.knowledge.KnowledgeIngestionCoordinator
 import com.nazhi.app.core.network.NazhiBackendClient
@@ -50,6 +51,7 @@ private enum class MainTab {
 fun NazhiHomeRoute(
     repository: NazhiRepository,
     backendSettingsStore: BackendSettingsStore,
+    authSessionStore: AuthSessionStore,
     backendClient: NazhiBackendClient,
     knowledgeIngestionCoordinator: KnowledgeIngestionCoordinator,
     knowledgeChatCoordinator: KnowledgeChatCoordinator,
@@ -137,6 +139,7 @@ fun NazhiHomeRoute(
                 MainTab.SETTINGS -> SettingsRoute(
                     repository = repository,
                     backendSettingsStore = backendSettingsStore,
+                    authSessionStore = authSessionStore,
                     backendClient = backendClient
                 )
             }

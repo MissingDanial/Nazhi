@@ -43,6 +43,10 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.nazhi.app.core.network.AiServiceMode
 import com.nazhi.app.core.network.AiVendor
+import com.nazhi.app.core.auth.AuthSession
+import com.nazhi.app.core.auth.AuthSessionStore
+import com.nazhi.app.core.network.AuthLoginRequest
+import com.nazhi.app.core.network.AuthRegisterRequest
 import com.nazhi.app.core.network.BackendAuthCheckResponse
 import com.nazhi.app.core.network.BackendConfig
 import com.nazhi.app.core.network.BackendHealthResponse
@@ -62,11 +66,13 @@ import kotlinx.coroutines.withContext
 fun SettingsRoute(
     repository: NazhiRepository,
     backendSettingsStore: BackendSettingsStore,
+    authSessionStore: AuthSessionStore,
     backendClient: NazhiBackendClient
 ) {
     val savedConfig by backendSettingsStore.settings.collectAsState(
         initial = backendSettingsStore.defaultConfig
     )
+    val authSession by authSessionStore.session.collectAsState(initial = null)
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -143,8 +149,12 @@ fun SettingsRoute(
     var directExtraId by remember { mutableStateOf(savedConfig.directExtraId) }
     var isDirty by remember { mutableStateOf(false) }
     var isTesting by remember { mutableStateOf(false) }
+    var isAuthSubmitting by remember { mutableStateOf(false) }
     var connectionResult by remember { mutableStateOf<ConnectionResult?>(null) }
     var showClearDirectApiDialog by remember { mutableStateOf(false) }
+    var showLoginDialog by remember { mutableStateOf(false) }
+    var showRegisterDialog by remember { mutableStateOf(false) }
+    var showChangePasswordDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(savedConfig) {
         if (!isDirty) {
@@ -179,9 +189,28 @@ fun SettingsRoute(
         isTesting = isTesting,
         isImporting = isImporting,
         connectionResult = connectionResult,
+        authSession = authSession,
+        isAuthSubmitting = isAuthSubmitting,
         hasOverlayPermission = hasOverlayPermission,
         isFloatingCaptureRunning = isFloatingCaptureRunning,
         snackbarHostState = snackbarHostState,
+        onOpenLogin = { showLoginDialog = true },
+        onOpenRegister = { showRegisterDialog = true },
+        onOpenChangePassword = { showChangePasswordDialog = true },
+        onLogout = {
+            coroutineScope.launch {
+                isAuthSubmitting = true
+                val refreshToken = authSessionStore.currentRefreshToken()
+                runCatching {
+                    if (!refreshToken.isNullOrBlank()) {
+                        backendClient.logout(refreshToken)
+                    }
+                }
+                authSessionStore.clear()
+                isAuthSubmitting = false
+                snackbarHostState.showSnackbar("已退出登录")
+            }
+        },
         onBaseUrlChange = {
             baseUrl = it
             isDirty = true
@@ -352,6 +381,89 @@ fun SettingsRoute(
             }
         }
     )
+
+    if (showLoginDialog) {
+        LoginDialog(
+            isSubmitting = isAuthSubmitting,
+            onDismiss = { showLoginDialog = false },
+            onConfirm = { email, password ->
+                coroutineScope.launch {
+                    isAuthSubmitting = true
+                    val message = runCatching {
+                        val response = backendClient.login(AuthLoginRequest(email = email, password = password))
+                        authSessionStore.save(response)
+                        showLoginDialog = false
+                        "登录成功"
+                    }.getOrElse { error ->
+                        "登录失败：${error.toUserMessage()}"
+                    }
+                    isAuthSubmitting = false
+                    snackbarHostState.showSnackbar(message)
+                }
+            },
+            onOpenRegister = {
+                showLoginDialog = false
+                showRegisterDialog = true
+            }
+        )
+    }
+
+    if (showRegisterDialog) {
+        RegisterDialog(
+            isSubmitting = isAuthSubmitting,
+            onDismiss = { showRegisterDialog = false },
+            onConfirm = { email, username, password ->
+                coroutineScope.launch {
+                    isAuthSubmitting = true
+                    val message = runCatching {
+                        val response = backendClient.register(
+                            AuthRegisterRequest(
+                                email = email,
+                                username = username,
+                                password = password
+                            )
+                        )
+                        authSessionStore.save(response)
+                        showRegisterDialog = false
+                        "注册成功"
+                    }.getOrElse { error ->
+                        "注册失败：${error.toUserMessage()}"
+                    }
+                    isAuthSubmitting = false
+                    snackbarHostState.showSnackbar(message)
+                }
+            },
+            onOpenLogin = {
+                showRegisterDialog = false
+                showLoginDialog = true
+            }
+        )
+    }
+
+    if (showChangePasswordDialog) {
+        ChangePasswordDialog(
+            isSubmitting = isAuthSubmitting,
+            onDismiss = { showChangePasswordDialog = false },
+            onConfirm = { currentPassword, newPassword ->
+                coroutineScope.launch {
+                    isAuthSubmitting = true
+                    val message = runCatching {
+                        backendClient.changePassword(
+                            currentPassword = currentPassword,
+                            newPassword = newPassword
+                        )
+                        authSessionStore.clear()
+                        showChangePasswordDialog = false
+                        "密码已修改，请重新登录"
+                    }.getOrElse { error ->
+                        "修改失败：${error.toUserMessage()}"
+                    }
+                    isAuthSubmitting = false
+                    snackbarHostState.showSnackbar(message)
+                }
+            }
+        )
+    }
 
     if (showClearDirectApiDialog) {
         AlertDialog(
@@ -531,9 +643,15 @@ private fun SettingsScreen(
     isTesting: Boolean,
     isImporting: Boolean,
     connectionResult: ConnectionResult?,
+    authSession: AuthSession?,
+    isAuthSubmitting: Boolean,
     hasOverlayPermission: Boolean,
     isFloatingCaptureRunning: Boolean,
     snackbarHostState: SnackbarHostState,
+    onOpenLogin: () -> Unit,
+    onOpenRegister: () -> Unit,
+    onOpenChangePassword: () -> Unit,
+    onLogout: () -> Unit,
     onBaseUrlChange: (String) -> Unit,
     onDevTokenChange: (String) -> Unit,
     onServiceModeChange: (AiServiceMode) -> Unit,
@@ -588,6 +706,16 @@ private fun SettingsScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            item {
+                AccountCard(
+                    authSession = authSession,
+                    isSubmitting = isAuthSubmitting,
+                    onOpenLogin = onOpenLogin,
+                    onOpenRegister = onOpenRegister,
+                    onOpenChangePassword = onOpenChangePassword,
+                    onLogout = onLogout
+                )
+            }
             item {
                 BackendStatusCard(
                     savedConfig = savedConfig,
@@ -647,6 +775,278 @@ private fun SettingsScreen(
             }
         }
     }
+}
+
+@Composable
+private fun AccountCard(
+    authSession: AuthSession?,
+    isSubmitting: Boolean,
+    onOpenLogin: () -> Unit,
+    onOpenRegister: () -> Unit,
+    onOpenChangePassword: () -> Unit,
+    onLogout: () -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = "账号",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            if (authSession == null) {
+                Text(
+                    text = "未登录。登录后可使用用户身份访问纳知服务，后续账号数据和额度能力也会绑定到该账号。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = onOpenLogin,
+                        enabled = !isSubmitting,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(text = "登录")
+                    }
+                    OutlinedButton(
+                        onClick = onOpenRegister,
+                        enabled = !isSubmitting,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(text = "注册")
+                    }
+                }
+            } else {
+                Text(
+                    text = authSession.username.ifBlank { "纳知用户" },
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    text = authSession.email,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Text(
+                    text = "状态：${authSession.status}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onOpenChangePassword,
+                        enabled = !isSubmitting,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(text = "修改密码")
+                    }
+                    OutlinedButton(
+                        onClick = onLogout,
+                        enabled = !isSubmitting,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(text = "退出登录")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LoginDialog(
+    isSubmitting: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (String, String) -> Unit,
+    onOpenRegister: () -> Unit
+) {
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = { if (!isSubmitting) onDismiss() },
+        title = { Text(text = "登录纳知") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = email,
+                    onValueChange = { email = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(text = "邮箱") },
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(text = "密码") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true
+                )
+                TextButton(onClick = onOpenRegister, enabled = !isSubmitting) {
+                    Text(text = "还没有账号？去注册")
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !isSubmitting && email.isNotBlank() && password.isNotBlank(),
+                onClick = { onConfirm(email.trim(), password) }
+            ) {
+                Text(text = if (isSubmitting) "登录中" else "登录")
+            }
+        },
+        dismissButton = {
+            TextButton(enabled = !isSubmitting, onClick = onDismiss) {
+                Text(text = "取消")
+            }
+        }
+    )
+}
+
+@Composable
+private fun RegisterDialog(
+    isSubmitting: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (String, String, String) -> Unit,
+    onOpenLogin: () -> Unit
+) {
+    var email by remember { mutableStateOf("") }
+    var username by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var confirmPassword by remember { mutableStateOf("") }
+    val passwordMatches = password == confirmPassword
+    AlertDialog(
+        onDismissRequest = { if (!isSubmitting) onDismiss() },
+        title = { Text(text = "注册纳知") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = email,
+                    onValueChange = { email = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(text = "邮箱") },
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = username,
+                    onValueChange = { username = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(text = "用户名") },
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(text = "密码") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = confirmPassword,
+                    onValueChange = { confirmPassword = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(text = "确认密码") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    isError = confirmPassword.isNotBlank() && !passwordMatches,
+                    singleLine = true
+                )
+                TextButton(onClick = onOpenLogin, enabled = !isSubmitting) {
+                    Text(text = "已有账号？去登录")
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !isSubmitting &&
+                    email.isNotBlank() &&
+                    username.isNotBlank() &&
+                    password.length >= 8 &&
+                    passwordMatches,
+                onClick = { onConfirm(email.trim(), username.trim(), password) }
+            ) {
+                Text(text = if (isSubmitting) "注册中" else "注册")
+            }
+        },
+        dismissButton = {
+            TextButton(enabled = !isSubmitting, onClick = onDismiss) {
+                Text(text = "取消")
+            }
+        }
+    )
+}
+
+@Composable
+private fun ChangePasswordDialog(
+    isSubmitting: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (String, String) -> Unit
+) {
+    var currentPassword by remember { mutableStateOf("") }
+    var newPassword by remember { mutableStateOf("") }
+    var confirmPassword by remember { mutableStateOf("") }
+    val passwordMatches = newPassword == confirmPassword
+    AlertDialog(
+        onDismissRequest = { if (!isSubmitting) onDismiss() },
+        title = { Text(text = "修改密码") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = currentPassword,
+                    onValueChange = { currentPassword = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(text = "当前密码") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = newPassword,
+                    onValueChange = { newPassword = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(text = "新密码") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = confirmPassword,
+                    onValueChange = { confirmPassword = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(text = "确认新密码") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    isError = confirmPassword.isNotBlank() && !passwordMatches,
+                    singleLine = true
+                )
+                Text(
+                    text = "修改成功后会退出登录，需要使用新密码重新登录。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !isSubmitting &&
+                    currentPassword.isNotBlank() &&
+                    newPassword.length >= 8 &&
+                    passwordMatches,
+                onClick = { onConfirm(currentPassword, newPassword) }
+            ) {
+                Text(text = if (isSubmitting) "修改中" else "修改")
+            }
+        },
+        dismissButton = {
+            TextButton(enabled = !isSubmitting, onClick = onDismiss) {
+                Text(text = "取消")
+            }
+        }
+    )
 }
 
 @Composable

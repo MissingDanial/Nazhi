@@ -38,6 +38,7 @@ class MainActivity : ComponentActivity() {
                 NazhiHomeRoute(
                     repository = appContainer.repository,
                     backendSettingsStore = appContainer.backendSettingsStore,
+                    authSessionStore = appContainer.authSessionStore,
                     backendClient = appContainer.backendClient,
                     knowledgeIngestionCoordinator = appContainer.knowledgeIngestionCoordinator,
                     knowledgeChatCoordinator = appContainer.knowledgeChatCoordinator,

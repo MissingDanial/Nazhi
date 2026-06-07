@@ -185,6 +185,19 @@ app/src/main/java/com/nazhi/app/
 └── SystemAudioCapturePermissionActivity.kt
 ```
 
+### 仓库结构
+
+V2.0 起采用 monorepo 方式管理 Android 与后端，确保登录注册页面、用户鉴权 API、数据库 migration 和部署说明可以在同一个版本提交中同步演进。
+
+```text
+nazhi-android/
+├── app/                    # Android 客户端
+├── docs/                   # 产品、开发和资产规则文档
+└── nazhi-backend/          # Node.js API 中转与 V2 账号认证服务
+```
+
+后端目录只提交源码、migration、`package.json`、`package-lock.json`、`.env.example` 和接口文档。真实 `.env`、`node_modules/`、本地接口密钥文件和工具缓存不进入 Git。
+
 ## 快速开始
 
 ### 环境要求
