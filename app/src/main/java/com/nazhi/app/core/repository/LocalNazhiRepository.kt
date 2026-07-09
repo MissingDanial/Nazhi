@@ -358,7 +358,19 @@ class LocalNazhiRepository(
                 message = "正在写入本地草稿"
             )
         )
-        val count = replaceDraftsFromResponse(date, notes, response)
+        val count = runCatching {
+            replaceDraftsFromResponse(date, notes, response)
+        }.getOrElse { error ->
+            onProgress(
+                AiTaskProgress(
+                    status = AiTaskStatus.FAILED,
+                    stage = AiTaskStage.FAILED,
+                    progress = 100,
+                    message = error.toUserFacingMessage()
+                )
+            )
+            throw error
+        }
         onProgress(
             AiTaskProgress(
                 status = AiTaskStatus.SUCCEEDED,
@@ -426,6 +438,9 @@ class LocalNazhiRepository(
                 }
             }
 
+        if (drafts.isEmpty()) {
+            throw IOException("模型没有返回有效整理结果，请稍后重试或检查后端模型输出。")
+        }
         knowledgeEntryDraftDao.deleteReplaceableDraftsForDate(date)
         knowledgeEntryDraftDao.upsertAll(drafts.map { it.toEntity() })
         return drafts.size
@@ -1715,10 +1730,12 @@ class LocalNazhiRepository(
                 code == "DIRECT_API_BAD_REQUEST" -> publicMessage
                 code == "DIRECT_API_PROVIDER_UNAVAILABLE" -> publicMessage
                 code == "DIRECT_API_CHAT_RESPONSE_EMPTY" -> publicMessage
+                code == "DIRECT_API_ORGANIZE_EMPTY" -> publicMessage
                 code == "DIRECT_API_INVALID_JSON" -> "模型返回格式异常，请检查当前模型是否支持稳定输出 JSON。"
                 code == "DIRECT_API_EMBEDDING_FAILED" -> "Embedding API 调用失败，请检查模型名、Key 和服务额度。"
                 code == "DIRECT_API_EMBEDDING_SHAPE_UNSUPPORTED" -> publicMessage
                 statusCode == 401 || code == "UNAUTHORIZED" -> "后端鉴权失败，请检查设置页中的 NAZHI_DEV_TOKEN。"
+                code == "MINIMAX_ORGANIZE_EMPTY" -> publicMessage
                 code == "MINIMAX_CHAT_FAILED" -> "模型回答处理失败，请稍后重试或检查后端日志。"
                 code == "MINIMAX_NOT_CONFIGURED" -> "后端 Chat 模型未配置，请检查服务器 .env。"
                 else -> publicMessage

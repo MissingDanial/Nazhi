@@ -30,7 +30,7 @@
 
 | 阅读文字时粘贴保存 | 短视频中录制/转写音频 |
 | --- | --- |
-| <img src="docs/app_show/pastecapture.jpg" alt="在阅读场景中通过纳知悬浮窗粘贴保存文字" width="260" /> | <img src="docs/app_show/audio_capture.jpg" alt="在短视频应用中通过纳知悬浮窗录制或转写音频" width="260" /> |
+| <img src="docs/app_show/pastecapture.jpg" alt="在阅读场景中通过纳知悬浮窗粘贴保存文字" width="260" /> | <img src="docs/app_show/audiocapture.jpg" alt="在短视频应用中通过纳知悬浮窗录制或转写音频" width="260" /> |
 
 ### 四个核心页面
 
@@ -184,6 +184,19 @@ app/src/main/java/com/nazhi/app/
 ├── ShareCaptureActivity.kt
 └── SystemAudioCapturePermissionActivity.kt
 ```
+
+### 仓库结构
+
+V2.0 起采用 monorepo 方式管理 Android 与后端，确保登录注册页面、用户鉴权 API、数据库 migration 和部署说明可以在同一个版本提交中同步演进。
+
+```text
+nazhi-android/
+├── app/                    # Android 客户端
+├── docs/                   # 产品、开发和资产规则文档
+└── nazhi-backend/          # Node.js API 中转与 V2 账号认证服务
+```
+
+后端目录只提交源码、migration、`package.json`、`package-lock.json`、`.env.example` 和接口文档。真实 `.env`、`node_modules/`、本地接口密钥文件和工具缓存不进入 Git。
 
 ## 快速开始
 

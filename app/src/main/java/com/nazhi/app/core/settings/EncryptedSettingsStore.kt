@@ -40,6 +40,13 @@ class EncryptedSettingsStore(context: Context) {
             .apply()
     }
 
+    fun clearAuthSessionSecrets() {
+        preferences.edit()
+            .remove(EncryptedSetting.AuthAccessToken.preferenceKey)
+            .remove(EncryptedSetting.AuthRefreshToken.preferenceKey)
+            .apply()
+    }
+
     private fun encrypt(plaintext: String): String {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateSecretKey())
@@ -93,5 +100,7 @@ class EncryptedSettingsStore(context: Context) {
 
 enum class EncryptedSetting(val preferenceKey: String) {
     DirectApiKey("direct_api_key"),
-    DirectEmbeddingApiKey("direct_embedding_api_key")
+    DirectEmbeddingApiKey("direct_embedding_api_key"),
+    AuthAccessToken("auth_access_token"),
+    AuthRefreshToken("auth_refresh_token")
 }

@@ -27,7 +27,10 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 class NazhiBackendClient(
-    private val configProvider: suspend () -> BackendConfig
+    private val configProvider: suspend () -> BackendConfig,
+    private val accessTokenProvider: suspend () -> String? = { null },
+    private val accessTokenRefresher: suspend () -> String? = { null },
+    private val authSessionExpiredHandler: suspend () -> Unit = {}
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -46,6 +49,41 @@ class NazhiBackendClient(
     ): BackendAuthCheckResponse = get(
         path = "/v1/auth-check",
         config = config
+    )
+
+    suspend fun register(request: AuthRegisterRequest): AuthSessionResponse = post(
+        path = "/v2/auth/register",
+        body = request
+    )
+
+    suspend fun login(request: AuthLoginRequest): AuthSessionResponse = post(
+        path = "/v2/auth/login",
+        body = request
+    )
+
+    suspend fun refreshAuthSession(refreshToken: String): AuthSessionResponse = post(
+        path = "/v2/auth/refresh",
+        body = AuthRefreshRequest(refreshToken = refreshToken)
+    )
+
+    suspend fun logout(refreshToken: String): AuthLogoutResponse = post(
+        path = "/v2/auth/logout",
+        body = AuthRefreshRequest(refreshToken = refreshToken)
+    )
+
+    suspend fun currentUser(): AuthMeResponse = getWithUserToken(
+        path = "/v2/auth/me"
+    )
+
+    suspend fun changePassword(
+        currentPassword: String,
+        newPassword: String
+    ): AuthLogoutResponse = postWithUserToken(
+        path = "/v2/auth/change-password",
+        body = AuthChangePasswordRequest(
+            currentPassword = currentPassword,
+            newPassword = newPassword
+        )
     )
 
     suspend fun checkDirectApi(config: BackendConfig): DirectApiCheckResponse {
@@ -318,10 +356,8 @@ class NazhiBackendClient(
             readTimeout = 60_000
             doOutput = true
             setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            if (backendConfig.devToken.isNotBlank()) {
-                setRequestProperty("Authorization", "Bearer ${backendConfig.devToken.trim()}")
-            }
         }
+        setBackendAuthorization(connection, backendConfig, path)
 
         val payload = json.encodeToString(body).toByteArray(Charsets.UTF_8)
         connection.outputStream.use { output -> output.write(payload) }
@@ -358,10 +394,8 @@ class NazhiBackendClient(
             readTimeout = 60_000
             doOutput = true
             setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
-            if (config.devToken.isNotBlank()) {
-                setRequestProperty("Authorization", "Bearer ${config.devToken.trim()}")
-            }
         }
+        setBackendAuthorization(connection, config, path)
 
         connection.outputStream.use { output ->
             fields.forEach { (name, value) ->
@@ -407,10 +441,8 @@ class NazhiBackendClient(
             requestMethod = "GET"
             connectTimeout = 10_000
             readTimeout = 15_000
-            if (backendConfig.devToken.isNotBlank()) {
-                setRequestProperty("Authorization", "Bearer ${backendConfig.devToken.trim()}")
-            }
         }
+        setBackendAuthorization(connection, backendConfig, path)
 
         val statusCode = connection.responseCode
         val responseText = try {
@@ -428,6 +460,140 @@ class NazhiBackendClient(
         }
 
         json.decodeFromString(responseText)
+    }
+
+    private suspend inline fun <reified Request, reified Response> postWithUserToken(
+        path: String,
+        body: Request
+    ): Response = withContext(Dispatchers.IO) {
+        val payload = json.encodeToString(body)
+        var result = executeUserTokenRequest(
+            path = path,
+            method = "POST",
+            body = payload,
+            accessToken = requireAccessToken()
+        )
+        if (result.isUnauthorized()) {
+            result = executeUserTokenRequest(
+                path = path,
+                method = "POST",
+                body = payload,
+                accessToken = refreshAccessTokenOrExpire()
+            )
+        }
+        decodeHttpResult(result)
+    }
+
+    private suspend inline fun <reified Response> getWithUserToken(
+        path: String
+    ): Response = withContext(Dispatchers.IO) {
+        var result = executeUserTokenRequest(
+            path = path,
+            method = "GET",
+            body = null,
+            accessToken = requireAccessToken()
+        )
+        if (result.isUnauthorized()) {
+            result = executeUserTokenRequest(
+                path = path,
+                method = "GET",
+                body = null,
+                accessToken = refreshAccessTokenOrExpire()
+            )
+        }
+        decodeHttpResult(result)
+    }
+
+    private suspend fun requireAccessToken(): String {
+        val accessToken = accessTokenProvider().orEmpty()
+        if (accessToken.isNotBlank()) {
+            return accessToken
+        }
+        authSessionExpiredHandler()
+        throw NazhiBackendException(401, "AUTH_SESSION_REQUIRED", "请先登录纳知账号。")
+    }
+
+    private suspend fun refreshAccessTokenOrExpire(): String {
+        val refreshedToken = accessTokenRefresher().orEmpty()
+        if (refreshedToken.isNotBlank()) {
+            return refreshedToken
+        }
+        authSessionExpiredHandler()
+        throw NazhiBackendException(401, "AUTH_SESSION_EXPIRED", "登录已过期，请重新登录。")
+    }
+
+    private suspend fun executeUserTokenRequest(
+        path: String,
+        method: String,
+        body: String?,
+        accessToken: String
+    ): BackendHttpResult {
+        val backendConfig = configProvider()
+        val url = URL(backendConfig.normalizedBaseUrl + path)
+        val connection = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = method
+            connectTimeout = if (method == "GET") 10_000 else 15_000
+            readTimeout = if (method == "GET") 15_000 else 30_000
+            setRequestProperty("Authorization", "Bearer $accessToken")
+            if (body != null) {
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            }
+        }
+        if (body != null) {
+            connection.outputStream.use { output ->
+                output.write(body.toByteArray(Charsets.UTF_8))
+            }
+        }
+        val statusCode = connection.responseCode
+        val responseText = try {
+            val stream = if (statusCode in 200..299) connection.inputStream else connection.errorStream
+            stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+        } finally {
+            connection.disconnect()
+        }
+        return BackendHttpResult(statusCode = statusCode, responseText = responseText)
+    }
+
+    private suspend fun setBackendAuthorization(
+        connection: HttpURLConnection,
+        backendConfig: BackendConfig,
+        path: String
+    ) {
+        val accessToken = if (path.startsWith("/v1/")) {
+            accessTokenProvider().orEmpty()
+        } else {
+            ""
+        }
+        val bearerToken = accessToken.ifBlank { backendConfig.devToken.trim() }
+        if (bearerToken.isNotBlank()) {
+            connection.setRequestProperty("Authorization", "Bearer $bearerToken")
+        }
+    }
+
+    private inline fun <reified Response> decodeHttpResult(result: BackendHttpResult): Response {
+        if (result.statusCode !in 200..299) {
+            throw result.toBackendException()
+        }
+        return json.decodeFromString(result.responseText)
+    }
+
+    private fun BackendHttpResult.isUnauthorized(): Boolean {
+        return statusCode == 401
+    }
+
+    private fun BackendHttpResult.toBackendException(): NazhiBackendException {
+        val backendError = runCatching {
+            json.decodeFromString<BackendErrorResponse>(responseText).error
+        }.getOrNull()
+        if (statusCode == 401) {
+            return NazhiBackendException(
+                statusCode = statusCode,
+                code = "AUTH_SESSION_EXPIRED",
+                publicMessage = "登录已过期，请重新登录。"
+            )
+        }
+        return NazhiBackendException(statusCode, backendError?.code, backendError.toPublicMessage(statusCode))
     }
 
     private fun OutputStream.writeUtf8(text: String) {
@@ -560,6 +726,13 @@ class NazhiBackendClient(
         )
         val jsonText = extractJsonObject(content)
         val parsed = json.decodeFromString<DirectOrganizePayload>(jsonText)
+        if (parsed.drafts.isEmpty()) {
+            throw NazhiBackendException(
+                statusCode = 502,
+                code = "DIRECT_API_ORGANIZE_EMPTY",
+                publicMessage = "模型没有返回有效整理结果，请稍后重试或检查当前模型是否支持 JSON 输出。"
+            )
+        }
         return OrganizeNotesResponse(
             requestId = requestId,
             date = date,
@@ -984,13 +1157,78 @@ data class BackendHealthResponse(
     val service: String = "",
     val embeddingProvider: String = "",
     val chatProvider: String = "",
-    val asrProvider: String = ""
+    val asrProvider: String = "",
+    val asr: BackendAsrHealth? = null
+)
+
+@Serializable
+data class BackendAsrHealth(
+    val provider: String = "",
+    val configured: Boolean = false,
+    val shortAudio: Boolean = false,
+    val longAudio: Boolean = false,
+    val maxDurationMs: Long = 0,
+    val shortThresholdMs: Long = 0,
+    val status: String = "",
+    val message: String = ""
 )
 
 @Serializable
 data class BackendAuthCheckResponse(
     val ok: Boolean = false,
-    val service: String = ""
+    val service: String = "",
+    val authMode: String = "",
+    val user: AuthUser? = null
+)
+
+@Serializable
+data class AuthRegisterRequest(
+    val email: String,
+    val username: String,
+    val password: String
+)
+
+@Serializable
+data class AuthLoginRequest(
+    val email: String,
+    val password: String
+)
+
+@Serializable
+data class AuthRefreshRequest(
+    val refreshToken: String
+)
+
+@Serializable
+private data class AuthChangePasswordRequest(
+    val currentPassword: String,
+    val newPassword: String
+)
+
+@Serializable
+data class AuthSessionResponse(
+    val user: AuthUser,
+    val accessToken: String,
+    val refreshToken: String,
+    val expiresIn: Long
+)
+
+@Serializable
+data class AuthMeResponse(
+    val user: AuthUser
+)
+
+@Serializable
+data class AuthLogoutResponse(
+    val ok: Boolean = false
+)
+
+@Serializable
+data class AuthUser(
+    val id: String,
+    val email: String,
+    val username: String,
+    val status: String
 )
 
 class NazhiBackendException(
@@ -998,6 +1236,11 @@ class NazhiBackendException(
     val code: String?,
     val publicMessage: String
 ) : IOException(publicMessage)
+
+private data class BackendHttpResult(
+    val statusCode: Int,
+    val responseText: String
+)
 
 @Serializable
 data class EmbeddingInput(

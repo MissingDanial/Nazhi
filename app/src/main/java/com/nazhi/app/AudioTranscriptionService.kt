@@ -382,7 +382,7 @@ class AudioTranscriptionService : Service() {
             if (currentTask.status == "FAILED") {
                 failTranscription(
                     localJobId,
-                    currentTask.error?.message ?: currentTask.message.ifBlank { "处理失败" },
+                    currentTask.error.toAudioTaskMessage(currentTask.message.ifBlank { "处理失败" }),
                     stopWhenFinished
                 )
                 return false
@@ -738,6 +738,9 @@ private fun Throwable.toAudioUserMessage(): String {
     if (this is NazhiBackendException && (statusCode == 401 || code == "UNAUTHORIZED")) {
         return "后端鉴权失败，请在设置页检查服务访问 Token。"
     }
+    if (this is NazhiBackendException) {
+        return code.toAudioErrorMessage(publicMessage)
+    }
     val raw = message.orEmpty()
     return when {
         raw.contains("Failed to connect", ignoreCase = true) -> "无法连接后端，请检查服务器地址和网络。"
@@ -747,6 +750,31 @@ private fun Throwable.toAudioUserMessage(): String {
         raw.contains("401", ignoreCase = true) -> "后端鉴权失败，请检查服务 Token。"
         raw.isNotBlank() -> raw
         else -> "处理失败，请稍后重试。"
+    }
+}
+
+private fun com.nazhi.app.core.network.BackendTaskError?.toAudioTaskMessage(fallback: String): String {
+    return this?.code.toAudioErrorMessage(this?.message ?: fallback)
+}
+
+private fun String?.toAudioErrorMessage(fallback: String): String {
+    return when (this) {
+        "XFYUN_NOT_CONFIGURED" -> "服务器未配置科大讯飞语音服务，请检查 XFYUN_APP_ID / XFYUN_API_KEY / XFYUN_API_SECRET。"
+        "WEBSOCKET_UNAVAILABLE" -> "服务器 Node.js 运行时不支持短音频 WebSocket，请升级 Node.js 或改用长音频转写。"
+        "EMPTY_AUDIO" -> "录音文件为空，请重新录制。"
+        "EMPTY_TRANSCRIPT" -> "语音识别结果为空，请确认录音内容清晰后重试。"
+        "ASR_TIMEOUT" -> "语音转写超时，请稍后重试。"
+        "XFYUN_IAT_FAILED",
+        "XFYUN_IAT_CLOSED" -> "科大讯飞短音频识别失败，请稍后重试。"
+        "XFYUN_UPLOAD_FAILED",
+        "XFYUN_UPLOAD_SHAPE_UNSUPPORTED" -> "科大讯飞长音频上传失败，请稍后重试。"
+        "XFYUN_CREATE_TASK_FAILED",
+        "XFYUN_CREATE_TASK_SHAPE_UNSUPPORTED" -> "科大讯飞长音频任务创建失败，请检查服务开通状态。"
+        "XFYUN_QUERY_TASK_FAILED",
+        "XFYUN_TASK_FAILED" -> "科大讯飞长音频转写失败，请稍后重试。"
+        "XFYUN_HTTP_FAILED" -> "科大讯飞语音服务请求失败，请检查密钥、服务额度或控制台权限。"
+        "UNSUPPORTED_ASR_PROVIDER" -> "服务器配置了不支持的语音服务商。"
+        else -> fallback
     }
 }
 

@@ -1,0 +1,21 @@
+{
+  "name": "nazhi-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "check": "node --check src/server.js && node --check src/config.js && node --check src/http.js && node --check src/router.js && node --check src/handlers.js && node --check src/auth/apiAuth.js && node --check src/auth/handlers.js && node --check src/auth/password.js && node --check src/auth/repository.js && node --check src/auth/service.js && node --check src/auth/tokens.js && node --check src/db/postgres.js && node --check src/db/redis.js && node --check src/providers/minimaxEmbeddingProvider.js && node --check src/providers/minimaxChatProvider.js && node --check src/providers/xfyunAsrProvider.js && node --check src/providers/minimaxChatProvider.test.js && node --check src/services/apiCallLog.js && node --check src/services/mockEmbedding.js && node --check src/services/organizeNotes.js && node --check src/services/knowledgeChat.js && node --check src/services/questionRewrite.js && node --check src/services/asrText.js && node --check src/services/asrText.test.js && node --check src/services/tasks.js && node --check src/services/tasks.test.js",
+    "test": "node --test src/providers/minimaxChatProvider.test.js src/services/asrText.test.js src/services/tasks.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "argon2": "^0.41.1",
+    "jose": "^5.9.6",
+    "pg": "^8.13.1",
+    "redis": "^4.7.0"
+  }
+}
