@@ -30,7 +30,7 @@
 
 | 阅读文字时粘贴保存 | 短视频中录制/转写音频 |
 | --- | --- |
-| <img src="docs/app_show/paste_capture.jpg" alt="在阅读场景中通过纳知悬浮窗粘贴保存文字" width="260" /> | <img src="docs/app_show/audio_capture.jpg" alt="在短视频应用中通过纳知悬浮窗录制或转写音频" width="260" /> |
+| <img src="docs/app_show/pastecapture.jpg" alt="在阅读场景中通过纳知悬浮窗粘贴保存文字" width="260" /> | <img src="docs/app_show/audio_capture.jpg" alt="在短视频应用中通过纳知悬浮窗录制或转写音频" width="260" /> |
 
 ### 四个核心页面
 
