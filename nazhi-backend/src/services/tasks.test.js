@@ -41,3 +41,21 @@ test("task lifecycle exposes status, progress, result and error", () => {
   assert.equal(failed.status, "FAILED");
   assert.equal(failed.error.code, "MINIMAX_CHAT_TIMEOUT");
 });
+
+test("task status is isolated by user owner", () => {
+  const task = createTask({
+    requestId: "req-user-owned",
+    type: "AUDIO_TRANSCRIPTION",
+    stage: "ACCEPTED",
+    progress: 5,
+    message: "已提交录音转写任务",
+    auth: {
+      mode: "user_token",
+      userId: "user-a"
+    }
+  });
+
+  assert.equal(getTask(task.taskId, { mode: "user_token", userId: "user-a" })?.taskId, task.taskId);
+  assert.equal(getTask(task.taskId, { mode: "user_token", userId: "user-b" }), null);
+  assert.equal(getTask(task.taskId, { mode: "dev_token", userId: null }), null);
+});

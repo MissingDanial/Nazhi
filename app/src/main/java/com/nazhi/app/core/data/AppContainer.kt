@@ -18,9 +18,28 @@ class AppContainer(context: Context) {
     private val database = NazhiDatabase.create(context)
     val backendSettingsStore = BackendSettingsStore(context)
     val authSessionStore = AuthSessionStore(context)
+    private val authRefreshClient = NazhiBackendClient(
+        configProvider = { backendSettingsStore.current() }
+    )
     val backendClient = NazhiBackendClient(
         configProvider = { backendSettingsStore.current() },
-        accessTokenProvider = { authSessionStore.currentAccessToken() }
+        accessTokenProvider = {
+            authSessionStore.currentValidAccessToken(
+                refresh = { refreshToken ->
+                    authRefreshClient.refreshAuthSession(refreshToken)
+                }
+            )
+        },
+        accessTokenRefresher = {
+            authSessionStore.refreshAccessToken(
+                refresh = { refreshToken ->
+                    authRefreshClient.refreshAuthSession(refreshToken)
+                }
+            )
+        },
+        authSessionExpiredHandler = {
+            authSessionStore.clearExpiredSession()
+        }
     )
 
     val repository: NazhiRepository = LocalNazhiRepository(

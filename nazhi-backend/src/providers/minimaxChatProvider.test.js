@@ -9,7 +9,7 @@ const config = {
   minimaxJsonMode: false
 };
 
-test("organize falls back to editable drafts when MiniMax returns non-JSON text", async (t) => {
+test("organize rejects when MiniMax returns no valid drafts", async (t) => {
   mockFetch(
     t,
     jsonResponse({
@@ -24,26 +24,28 @@ test("organize falls back to editable drafts when MiniMax returns non-JSON text"
     })
   );
 
-  const result = await organizeNotesWithMinimax({
-    config,
-    requestId: "test-organize",
-    date: "2026-05-14",
-    language: "zh-CN",
-    notes: [
-      {
-        id: "note-1",
-        title: "知识库流程",
-        content: "本地知识库需要先完成向量入库，再使用检索结果回答问题。",
-        sourceType: "MANUAL",
-        createdAt: 0
-      }
-    ],
-    options: { maxDrafts: 3, mergeSimilar: true }
-  });
-
-  assert.equal(result.drafts.length, 1);
-  assert.equal(result.drafts[0].needsReview, true);
-  assert.deepEqual(result.drafts[0].sourceNoteIds, ["note-1"]);
+  await assert.rejects(
+    () =>
+      organizeNotesWithMinimax({
+        config,
+        requestId: "test-organize",
+        date: "2026-05-14",
+        language: "zh-CN",
+        notes: [
+          {
+            id: "note-1",
+            title: "知识库流程",
+            content: "本地知识库需要先完成向量入库，再使用检索结果回答问题。",
+            sourceType: "MANUAL",
+            createdAt: 0
+          }
+        ],
+        options: { maxDrafts: 3, mergeSimilar: true }
+      }),
+    {
+      code: "MINIMAX_ORGANIZE_EMPTY"
+    }
+  );
 });
 
 test("knowledge chat retries without response_format when provider rejects JSON mode", async (t) => {

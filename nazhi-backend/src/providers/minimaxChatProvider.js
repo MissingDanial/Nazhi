@@ -1,6 +1,6 @@
 import { httpError } from "../http.js";
 import { buildKnowledgeChatPrompt, parseKnowledgeChatFromText } from "../services/knowledgeChat.js";
-import { buildOrganizePrompt, organizeNotesMock, parseOrganizeDraftsFromText } from "../services/organizeNotes.js";
+import { buildOrganizePrompt, parseOrganizeDraftsFromText } from "../services/organizeNotes.js";
 import { buildQuestionRewritePrompt, parseQuestionRewriteFromText } from "../services/questionRewrite.js";
 
 const CHAT_TIMEOUT_MS = 45_000;
@@ -39,16 +39,13 @@ export async function organizeNotesWithMinimax({ config, requestId, date, langua
   });
 
   const content = extractText(payload);
-  let drafts = parseOrganizeDraftsFromText(content);
-  let fallback = false;
+  const drafts = parseOrganizeDraftsFromText(content).filter(isValidOrganizeDraft);
   if (drafts.length === 0) {
-    fallback = true;
-    drafts = organizeNotesMock({ requestId, date, notes, options }).drafts.map((draft) => ({
-      ...draft,
-      confidence: Math.min(Number(draft.confidence) || 0.6, 0.62),
-      needsReview: true,
-      insight: draft.insight || "AI 返回格式异常，已生成可编辑草稿，请确认后入库。"
-    }));
+    throw httpError(
+      502,
+      "MINIMAX_ORGANIZE_EMPTY",
+      "模型没有返回有效整理结果，请稍后重试或检查后端模型输出。"
+    );
   }
 
   logProviderResult({
@@ -56,7 +53,7 @@ export async function organizeNotesWithMinimax({ config, requestId, date, langua
     requestId,
     elapsedMs,
     itemCount: drafts.length,
-    fallback
+    fallback: false
   });
 
   return {
@@ -65,6 +62,10 @@ export async function organizeNotesWithMinimax({ config, requestId, date, langua
     drafts,
     usage: normalizeUsage(payload?.usage)
   };
+}
+
+function isValidOrganizeDraft(draft) {
+  return draft && typeof draft === "object" && String(draft.content || "").trim().length > 0;
 }
 
 export async function knowledgeChatWithMinimax({

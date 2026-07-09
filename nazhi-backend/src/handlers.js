@@ -54,7 +54,7 @@ export async function handleOrganizeNotes(body) {
   return runOrganizeNotes({ requestId, date, language, notes, options });
 }
 
-export async function handleCreateOrganizeNotesJob(body) {
+export async function handleCreateOrganizeNotesJob(body, auth) {
   validateOrganizeRequest(body);
 
   const requestId = body.requestId || randomUUID();
@@ -67,7 +67,8 @@ export async function handleCreateOrganizeNotesJob(body) {
     type: "ORGANIZE_NOTES",
     stage: "ACCEPTED",
     progress: 5,
-    message: "已提交 AI 整理任务"
+    message: "已提交 AI 整理任务",
+    auth
   });
 
   runOrganizeNotesJob({
@@ -82,15 +83,15 @@ export async function handleCreateOrganizeNotesJob(body) {
   return task;
 }
 
-export function handleTaskStatus(taskId) {
-  const task = getTask(taskId);
+export function handleTaskStatus(taskId, auth) {
+  const task = getTask(taskId, auth);
   if (!task) {
     throw httpError(404, "TASK_NOT_FOUND", "Task not found or expired.");
   }
   return task;
 }
 
-export async function handleCreateAudioTranscriptionJob(form) {
+export async function handleCreateAudioTranscriptionJob(form, auth) {
   const requestId = form.fields.requestId || randomUUID();
   const durationMs = Number(form.fields.durationMs || 0);
   const language = form.fields.language || "zh-CN";
@@ -103,7 +104,8 @@ export async function handleCreateAudioTranscriptionJob(form) {
     type: "AUDIO_TRANSCRIPTION",
     stage: "ACCEPTED",
     progress: 5,
-    message: "已提交录音转写任务"
+    message: "已提交录音转写任务",
+    auth
   });
 
   runAudioTranscriptionJob({
@@ -118,8 +120,8 @@ export async function handleCreateAudioTranscriptionJob(form) {
   return task;
 }
 
-export function handleAudioTranscriptionTaskStatus(taskId) {
-  const task = getTask(taskId);
+export function handleAudioTranscriptionTaskStatus(taskId, auth) {
+  const task = getTask(taskId, auth);
   if (!task) {
     throw httpError(404, "TASK_NOT_FOUND", "Audio transcription task not found or expired.");
   }

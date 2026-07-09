@@ -18,11 +18,21 @@ Android App -> Nazhi Backend -> MiniMax API -> Nazhi Backend -> Android App
 
 ## 认证
 
-除 `/health` 外，接口都要求 Bearer Token。Token 来源于后端环境变量 `NAZHI_DEV_TOKEN`。
+除 `/health` 外，接口都要求 Bearer Token。
+
+V2 起 `/v1/*` AI 能力接口优先接受用户登录后的 access token：
+
+```http
+Authorization: Bearer <accessToken>
+```
+
+开发期仍兼容后端环境变量 `NAZHI_DEV_TOKEN`：
 
 ```http
 Authorization: Bearer <NAZHI_DEV_TOKEN>
 ```
+
+当 `NAZHI_DEV_TOKEN` 未配置时，后端保持本地开发开放模式；生产环境必须配置用户账号体系和 HTTPS。
 
 认证失败统一返回：
 
@@ -51,7 +61,7 @@ Authorization: Bearer <NAZHI_DEV_TOKEN>
 常见错误码：
 
 - `INVALID_JSON`：请求体不是合法 JSON。
-- `UNAUTHORIZED`：缺少或传入了错误的 Bearer Token。
+- `UNAUTHORIZED`：缺少或传入了错误的 Bearer Token，或用户 access token 已失效。
 - `INVALID_INPUT` / `INVALID_NOTES` / `INVALID_CONTEXTS`：请求字段不符合接口要求。
 - `TASK_NOT_FOUND`：异步任务不存在或已过期。
 - `MINIMAX_CHAT_TIMEOUT`：Chat 模型调用超时。
@@ -69,9 +79,30 @@ Authorization: Bearer <NAZHI_DEV_TOKEN>
   "service": "nazhi-backend",
   "embeddingProvider": "minimax",
   "chatProvider": "minimax",
-  "asrProvider": "xfyun"
+  "asrProvider": "xfyun",
+  "asr": {
+    "provider": "xfyun",
+    "configured": true,
+    "shortAudio": true,
+    "longAudio": true,
+    "maxDurationMs": 900000,
+    "shortThresholdMs": 58000,
+    "status": "ready",
+    "message": "Xfyun ASR is configured."
+  }
 }
 ```
+
+`asr` 为安全自检结果，只返回配置状态，不返回 `XFYUN_APP_ID`、`XFYUN_API_KEY`、`XFYUN_API_SECRET`、签名或请求头。
+
+常见 `asr.status`：
+
+- `ready`：讯飞短音频与长音频配置完整。
+- `mock`：当前为本地模拟转写。
+- `missing_credentials`：缺少讯飞密钥环境变量。
+- `websocket_unavailable`：Node.js 运行时不支持短音频 WebSocket。
+- `missing_endpoint`：讯飞接口地址配置不完整。
+- `unsupported_provider`：`ASR_PROVIDER` 不是当前支持的值。
 
 ## GET /v1/auth-check
 
@@ -82,9 +113,22 @@ Authorization: Bearer <NAZHI_DEV_TOKEN>
 ```json
 {
   "ok": true,
-  "service": "nazhi-backend"
+  "service": "nazhi-backend",
+  "authMode": "user_token",
+  "user": {
+    "id": "uuid",
+    "email": "user@example.com",
+    "username": "用户名",
+    "status": "active"
+  }
 }
 ```
+
+`authMode` 可能为：
+
+- `user_token`：用户 access token。
+- `dev_token`：开发 Token。
+- `dev_open`：未配置 `NAZHI_DEV_TOKEN` 时的本地开放模式。
 
 ## POST /v1/embeddings
 

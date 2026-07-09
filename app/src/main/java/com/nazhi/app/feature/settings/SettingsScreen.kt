@@ -48,6 +48,7 @@ import com.nazhi.app.core.auth.AuthSessionStore
 import com.nazhi.app.core.network.AuthLoginRequest
 import com.nazhi.app.core.network.AuthRegisterRequest
 import com.nazhi.app.core.network.BackendAuthCheckResponse
+import com.nazhi.app.core.network.BackendAsrHealth
 import com.nazhi.app.core.network.BackendConfig
 import com.nazhi.app.core.network.BackendHealthResponse
 import com.nazhi.app.core.network.DirectApiCheckResponse
@@ -673,7 +674,7 @@ private fun SettingsScreen(
     onTestConnection: () -> Unit
 ) {
     val canUseConfig = when (serviceMode) {
-        AiServiceMode.NAZHI -> baseUrl.isValidBackendUrl() && devToken.isNotBlank()
+        AiServiceMode.NAZHI -> baseUrl.isValidBackendUrl() && (authSession != null || devToken.isNotBlank())
         AiServiceMode.DIRECT_API -> {
             directApiBaseUrl.isValidBackendUrl() &&
                 (directEmbeddingApiBaseUrl.isBlank() || directEmbeddingApiBaseUrl.isValidBackendUrl()) &&
@@ -719,6 +720,7 @@ private fun SettingsScreen(
             item {
                 BackendStatusCard(
                     savedConfig = savedConfig,
+                    authSession = authSession,
                     connectionResult = connectionResult
                 )
             }
@@ -861,7 +863,7 @@ private fun AccountCard(
 }
 
 @Composable
-private fun LoginDialog(
+fun LoginDialog(
     isSubmitting: Boolean,
     onDismiss: () -> Unit,
     onConfirm: (String, String) -> Unit,
@@ -911,7 +913,7 @@ private fun LoginDialog(
 }
 
 @Composable
-private fun RegisterDialog(
+fun RegisterDialog(
     isSubmitting: Boolean,
     onDismiss: () -> Unit,
     onConfirm: (String, String, String) -> Unit,
@@ -1052,6 +1054,7 @@ private fun ChangePasswordDialog(
 @Composable
 private fun BackendStatusCard(
     savedConfig: BackendConfig,
+    authSession: AuthSession?,
     connectionResult: ConnectionResult?
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -1081,7 +1084,11 @@ private fun BackendStatusCard(
             )
             Text(
                 text = when (savedConfig.serviceMode) {
-                    AiServiceMode.NAZHI -> if (savedConfig.devToken.isBlank()) "服务 Token 未填写" else "服务 Token 已填写"
+                    AiServiceMode.NAZHI -> when {
+                        authSession != null -> "账号 Token 优先"
+                        savedConfig.devToken.isNotBlank() -> "开发 Token 已填写"
+                        else -> "未登录且开发 Token 未填写"
+                    }
                     AiServiceMode.DIRECT_API -> if (savedConfig.directApiKey.isBlank()) "API Key 未填写" else "API Key 已加密保存"
                 },
                 style = MaterialTheme.typography.bodySmall,
@@ -1146,13 +1153,50 @@ private fun HealthResultView(health: BackendHealthResponse) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+        health.asr?.let { asr ->
+            AsrHealthView(asr)
+        }
+    }
+}
+
+@Composable
+private fun AsrHealthView(asr: BackendAsrHealth) {
+    val configured = asr.configured
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Text(
+            text = if (configured) {
+                "语音转写：${asr.providerLabel()} 已就绪"
+            } else {
+                "语音转写：${asr.providerLabel()} 未就绪"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = if (configured) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+        )
+        Text(
+            text = "短音频 ${asr.shortAudio.readyLabel()} · 长音频 ${asr.longAudio.readyLabel()} · ${asr.statusLabel()}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (asr.maxDurationMs > 0) {
+            Text(
+                text = "最长 ${asr.maxDurationMs.toMinuteLabel()} · 短音频阈值 ${asr.shortThresholdMs.toSecondLabel()}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }
 
 @Composable
 private fun AuthResultView(auth: BackendAuthCheckResponse) {
+    val authLabel = when (auth.authMode) {
+        "user_token" -> auth.user?.username?.let { "账号：$it" } ?: "账号 Token"
+        "dev_token" -> "开发 Token"
+        "dev_open" -> "本地开放模式"
+        else -> "Token"
+    }
     Text(
-        text = if (auth.ok) "鉴权可用：token 已通过校验" else "鉴权返回异常",
+        text = if (auth.ok) "鉴权可用：$authLabel 已通过校验" else "鉴权返回异常",
         style = MaterialTheme.typography.bodySmall,
         color = if (auth.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
     )
@@ -1705,6 +1749,40 @@ private fun String.isValidBackendUrl(): Boolean {
     return trimmed.startsWith("http://") || trimmed.startsWith("https://")
 }
 
+private fun BackendAsrHealth.providerLabel(): String {
+    return when (provider.lowercase()) {
+        "xfyun" -> "科大讯飞"
+        "mock" -> "mock"
+        else -> provider.ifBlank { "unknown" }
+    }
+}
+
+private fun BackendAsrHealth.statusLabel(): String {
+    return when (status) {
+        "ready" -> "配置完整"
+        "mock" -> "本地模拟"
+        "missing_credentials" -> "缺少讯飞密钥"
+        "websocket_unavailable" -> "短音频运行时不可用"
+        "missing_endpoint" -> "缺少接口地址"
+        "unsupported_provider" -> "不支持的服务商"
+        else -> message.ifBlank { status.ifBlank { "状态未知" } }
+    }
+}
+
+private fun Boolean.readyLabel(): String {
+    return if (this) "可用" else "不可用"
+}
+
+private fun Long.toMinuteLabel(): String {
+    val minutes = (this / 60_000L).coerceAtLeast(0L)
+    return "${minutes}分钟"
+}
+
+private fun Long.toSecondLabel(): String {
+    val seconds = (this / 1_000L).coerceAtLeast(0L)
+    return "${seconds}秒"
+}
+
 private fun Throwable.toUserMessage(): String {
     if (this is NazhiBackendException) {
         return when (code) {
@@ -1719,6 +1797,8 @@ private fun Throwable.toUserMessage(): String {
             "DIRECT_API_PROVIDER_UNAVAILABLE" -> publicMessage
             "DIRECT_API_CHAT_RESPONSE_EMPTY" -> publicMessage
             "DIRECT_API_EMBEDDING_SHAPE_UNSUPPORTED" -> publicMessage
+            "AUTH_SESSION_REQUIRED" -> "请先登录纳知账号。"
+            "AUTH_SESSION_EXPIRED" -> "登录已过期，请重新登录。"
             else -> publicMessage
         }
     }

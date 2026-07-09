@@ -4,7 +4,7 @@ const TASK_TTL_MS = 30 * 60 * 1000;
 const MAX_TASKS = 100;
 const tasks = new Map();
 
-export function createTask({ requestId, type, stage, progress, message }) {
+export function createTask({ requestId, type, stage, progress, message, auth }) {
   cleanupTasks();
 
   const now = Date.now();
@@ -19,16 +19,20 @@ export function createTask({ requestId, type, stage, progress, message }) {
     createdAt: now,
     updatedAt: now,
     result: null,
-    error: null
+    error: null,
+    owner: normalizeTaskOwner(auth)
   };
   tasks.set(task.taskId, task);
   trimTasks();
   return publicTask(task);
 }
 
-export function getTask(taskId) {
+export function getTask(taskId, auth) {
   cleanupTasks();
   const task = tasks.get(taskId);
+  if (task && !canAccessTask(task, auth)) {
+    return null;
+  }
   return task ? publicTask(task) : null;
 }
 
@@ -97,6 +101,28 @@ function publicTask(task) {
     payload.error = task.error;
   }
   return payload;
+}
+
+function normalizeTaskOwner(auth) {
+  if (!auth) {
+    return null;
+  }
+  return {
+    authMode: auth.mode || "unknown",
+    userId: auth.userId || null
+  };
+}
+
+function canAccessTask(task, auth) {
+  if (!task.owner) {
+    return true;
+  }
+  const ownerUserId = task.owner.userId || null;
+  const authUserId = auth?.userId || null;
+  if (ownerUserId || authUserId) {
+    return Boolean(ownerUserId && authUserId && ownerUserId === authUserId);
+  }
+  return true;
 }
 
 function cleanupTasks() {

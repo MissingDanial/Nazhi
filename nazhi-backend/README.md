@@ -55,16 +55,16 @@ npm test
 
 ## Auth
 
-V1 development endpoints still support `NAZHI_DEV_TOKEN`. If it is set, all `/v1/*` requests must include:
-
-```http
-Authorization: Bearer <NAZHI_DEV_TOKEN>
-```
-
 V2 account endpoints use user access tokens:
 
 ```http
 Authorization: Bearer <accessToken>
+```
+
+`/v1/*` AI endpoints now prefer user access tokens, so backend calls can be attributed to a user. V1 development endpoints still support `NAZHI_DEV_TOKEN`. If it is set, development requests may include:
+
+```http
+Authorization: Bearer <NAZHI_DEV_TOKEN>
 ```
 
 `/health` is public so deployment monitors can verify service status.
@@ -75,6 +75,7 @@ Apply the PostgreSQL migration before using `/v2/auth/*`:
 
 ```powershell
 psql $env:DATABASE_URL -f migrations/001_auth.sql
+psql $env:DATABASE_URL -f migrations/002_api_call_events.sql
 ```
 
 Required auth environment variables:
@@ -116,6 +117,27 @@ EMBEDDING_PROVIDER=mock
 CHAT_PROVIDER=mock
 ```
 
+Recommended Xfyun ASR settings:
+
+```env
+ASR_PROVIDER=xfyun
+ASR_MAX_DURATION_MS=900000
+ASR_SHORT_THRESHOLD_MS=58000
+XFYUN_APP_ID=<server-only-app-id>
+XFYUN_API_KEY=<server-only-api-key>
+XFYUN_API_SECRET=<server-only-api-secret>
+```
+
+After configuring Xfyun, restart the backend and check `/health`. The response includes an `asr` object with `configured`, `shortAudio`, `longAudio`, and `status` fields. It never returns raw credentials or signatures.
+
+Expected ASR smoke test:
+
+1. Start the backend with `ASR_PROVIDER=xfyun`.
+2. Open Android Settings and run the backend connection check.
+3. Confirm the ASR row shows Xfyun ready, with short and long audio available.
+4. Record a 10-30 second microphone sample from Android and verify it becomes a Today note.
+5. Record a silent sample and verify it fails without saving an empty note.
+
 ## Deployment Notes
 
 - Keep `.env` on the server only.
@@ -128,4 +150,6 @@ CHAT_PROVIDER=mock
 - Chat requests have a 45 second server-side timeout and return `MINIMAX_CHAT_TIMEOUT` on timeout.
 - AI organize supports async jobs so Android can show progress instead of waiting on a blank loading state.
 - Async task state is in memory only; after backend restart Android should allow retry.
+- Async task status is scoped by auth owner: user-token tasks can only be read by the same user, while development-token tasks stay in the development lane.
 - Knowledge chat citations are constrained to context IDs supplied by Android.
+- API call logs are written to `auth.api_call_events` when `DATABASE_URL` and the migration are available. Logs include route, auth mode, user id, request id, provider, status, latency and error code; they do not store note content, prompts, answers, audio, API keys or bearer tokens.

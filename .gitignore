@@ -10,6 +10,9 @@ gradle/gradle-daemon-jvm.properties
 
 # Local config
 local.properties
+*.jks
+*.keystore
+release/
 
 # OS
 .DS_Store

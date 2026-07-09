@@ -38,6 +38,15 @@ fun escaped(value: String): String {
         .replace("\"", "\\\"")
 }
 
+val releaseKeystorePath = localConfig("NAZHI_RELEASE_STORE_FILE", "")
+val releaseKeystorePassword = localConfig("NAZHI_RELEASE_STORE_PASSWORD", "")
+val releaseKeyAlias = localConfig("NAZHI_RELEASE_KEY_ALIAS", "")
+val releaseKeyPassword = localConfig("NAZHI_RELEASE_KEY_PASSWORD", "")
+val hasReleaseSigning = releaseKeystorePath.isNotBlank() &&
+    releaseKeystorePassword.isNotBlank() &&
+    releaseKeyAlias.isNotBlank() &&
+    releaseKeyPassword.isNotBlank()
+
 android {
     namespace = "com.nazhi.app"
     compileSdk = 36
@@ -64,6 +73,27 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    signingConfigs {
+        create("release") {
+            if (hasReleaseSigning) {
+                storeFile = rootProject.file(releaseKeystorePath)
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            isShrinkResources = false
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
     }
 
     compileOptions {

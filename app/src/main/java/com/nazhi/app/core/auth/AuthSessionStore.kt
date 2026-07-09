@@ -13,9 +13,14 @@ import com.nazhi.app.core.settings.EncryptedSetting
 import com.nazhi.app.core.settings.EncryptedSettingsStore
 import java.io.IOException
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 private val Context.authSessionDataStore: DataStore<Preferences> by preferencesDataStore(
     name = "auth_session"
@@ -24,6 +29,10 @@ private val Context.authSessionDataStore: DataStore<Preferences> by preferencesD
 class AuthSessionStore(context: Context) {
     private val dataStore = context.authSessionDataStore
     private val encryptedSettingsStore = EncryptedSettingsStore(context)
+    private val refreshMutex = Mutex()
+    private val _events = MutableSharedFlow<AuthSessionEvent>(extraBufferCapacity = 1)
+
+    val events: SharedFlow<AuthSessionEvent> = _events.asSharedFlow()
 
     val session: Flow<AuthSession?> = dataStore.data
         .catch { error ->
@@ -64,6 +73,27 @@ class AuthSessionStore(context: Context) {
         return session.first()?.refreshToken?.takeIf { it.isNotBlank() }
     }
 
+    suspend fun currentValidAccessToken(
+        refresh: suspend (String) -> AuthSessionResponse,
+        refreshSkewSeconds: Long = 60
+    ): String? {
+        return refreshAccessTokenIfNeeded(
+            refresh = refresh,
+            force = false,
+            refreshSkewSeconds = refreshSkewSeconds
+        )
+    }
+
+    suspend fun refreshAccessToken(
+        refresh: suspend (String) -> AuthSessionResponse
+    ): String? {
+        return refreshAccessTokenIfNeeded(
+            refresh = refresh,
+            force = true,
+            refreshSkewSeconds = 0
+        )
+    }
+
     suspend fun save(response: AuthSessionResponse) {
         encryptedSettingsStore.write(EncryptedSetting.AuthAccessToken, response.accessToken)
         encryptedSettingsStore.write(EncryptedSetting.AuthRefreshToken, response.refreshToken)
@@ -84,6 +114,41 @@ class AuthSessionStore(context: Context) {
         }
     }
 
+    suspend fun clearExpiredSession() {
+        val hadSession = session.first() != null
+        clear()
+        if (hadSession) {
+            _events.emit(AuthSessionEvent.SessionExpired)
+        }
+    }
+
+    private suspend fun refreshAccessTokenIfNeeded(
+        refresh: suspend (String) -> AuthSessionResponse,
+        force: Boolean,
+        refreshSkewSeconds: Long
+    ): String? {
+        return refreshMutex.withLock {
+            val current = session.first() ?: return@withLock null
+            val accessToken = current.accessToken.takeIf { it.isNotBlank() } ?: return@withLock null
+            val nowEpochSeconds = System.currentTimeMillis() / 1000L
+            if (!force && current.expiresAtEpochSeconds > nowEpochSeconds + refreshSkewSeconds) {
+                return@withLock accessToken
+            }
+            val refreshToken = current.refreshToken.takeIf { it.isNotBlank() } ?: run {
+                clearExpiredSession()
+                return@withLock null
+            }
+            val response = runCatching {
+                refresh(refreshToken)
+            }.getOrElse {
+                clearExpiredSession()
+                return@withLock null
+            }
+            save(response)
+            response.accessToken.takeIf { it.isNotBlank() }
+        }
+    }
+
     private object Keys {
         val USER_ID = stringPreferencesKey("user_id")
         val EMAIL = stringPreferencesKey("email")
@@ -91,6 +156,10 @@ class AuthSessionStore(context: Context) {
         val STATUS = stringPreferencesKey("status")
         val EXPIRES_AT_EPOCH_SECONDS = longPreferencesKey("expires_at_epoch_seconds")
     }
+}
+
+sealed interface AuthSessionEvent {
+    data object SessionExpired : AuthSessionEvent
 }
 
 data class AuthSession(

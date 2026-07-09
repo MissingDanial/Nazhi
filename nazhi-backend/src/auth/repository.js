@@ -94,6 +94,35 @@ export async function createLoginEvent({ userId, email, ip, userAgent, success, 
   );
 }
 
+export async function createApiCallEvent({
+  userId,
+  authMode,
+  route,
+  requestId,
+  provider,
+  status,
+  statusCode,
+  elapsedMs,
+  errorCode
+}) {
+  await query(
+    `insert into auth.api_call_events
+       (user_id, auth_mode, route, request_id, provider, status, status_code, elapsed_ms, error_code)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [
+      userId || null,
+      authMode || "unknown",
+      route,
+      requestId || null,
+      provider || null,
+      status,
+      statusCode || null,
+      Number.isFinite(elapsedMs) ? elapsedMs : 0,
+      errorCode || null
+    ]
+  );
+}
+
 export function toPublicUser(user) {
   if (!user) {
     return null;
