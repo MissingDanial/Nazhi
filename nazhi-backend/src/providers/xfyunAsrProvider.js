@@ -7,6 +7,8 @@ const SHORT_FRAME_INTERVAL_MS = 40;
 const SHORT_TIMEOUT_MS = 75_000;
 const LONG_POLL_INTERVAL_MS = 3_000;
 const LONG_MAX_POLLS = 80;
+const ASR_REQUEST_TIMEOUT_MS = 30_000;
+const ASR_TASK_TIMEOUT_MS = 240_000;
 
 export async function transcribeAudioWithXfyun({ config, audio, durationMs, requestId, onProgress }) {
   ensureXfyunConfigured(config);
@@ -39,34 +41,55 @@ async function transcribeShortAudio({ config, audio, durationMs, requestId, onPr
 
   const url = buildIatUrl(config);
   const parts = [];
-  let resolved = false;
-
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url);
-    const timer = setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        socket.close();
-        reject(httpError(504, "ASR_TIMEOUT", "短音频转写超时。"));
-      }
-    }, SHORT_TIMEOUT_MS);
+    const frameController = new AbortController();
+    let resolved = false;
+    const timer = setTimeout(
+      () => finish(httpError(504, "ASR_TIMEOUT", "短音频转写超时。")),
+      SHORT_TIMEOUT_MS
+    );
 
-    socket.addEventListener("open", () => {
+    function finish(error, result) {
+      if (resolved) {
+        return;
+      }
+      resolved = true;
+      clearTimeout(timer);
+      frameController.abort();
+      socket.removeEventListener("open", onOpen);
+      socket.removeEventListener("message", onMessage);
+      socket.removeEventListener("error", onError);
+      socket.removeEventListener("close", onClose);
+      try {
+        socket.close();
+      } catch {
+        // Closing a failed connection must not prevent the task from settling.
+      }
+      if (error) {
+        reject(error);
+      } else {
+        resolve(result);
+      }
+    }
+
+    function onOpen() {
       void sendIatFrames(socket, {
         appId: config.xfyunAppId,
         pcm,
-        onProgress
+        onProgress,
+        signal: frameController.signal
       }).catch((error) => {
-        if (!resolved) {
-          resolved = true;
-          clearTimeout(timer);
-          socket.close();
-          reject(error);
+        if (!frameController.signal.aborted) {
+          finish(error);
         }
       });
-    });
+    }
 
-    socket.addEventListener("message", (event) => {
+    function onMessage(event) {
+      if (resolved) {
+        return;
+      }
       try {
         const payload = JSON.parse(String(event.data));
         if (payload.header?.code !== 0) {
@@ -77,10 +100,7 @@ async function transcribeShortAudio({ config, audio, durationMs, requestId, onPr
           parts.push(text);
         }
         if (payload.header?.status === 2) {
-          resolved = true;
-          clearTimeout(timer);
-          socket.close();
-          resolve(buildAsrResult({
+          finish(null, buildAsrResult({
             requestId,
             text: parts.join(""),
             durationMs,
@@ -89,38 +109,31 @@ async function transcribeShortAudio({ config, audio, durationMs, requestId, onPr
           }));
         }
       } catch (error) {
-        if (!resolved) {
-          resolved = true;
-          clearTimeout(timer);
-          socket.close();
-          reject(error);
-        }
+        finish(error);
       }
-    });
+    }
 
-    socket.addEventListener("error", (event) => {
-      if (!resolved) {
-        resolved = true;
-        clearTimeout(timer);
-        const detail = event?.error?.message || event?.message || "";
-        reject(httpError(502, "XFYUN_IAT_FAILED", detail ? `讯飞短音频识别连接失败：${detail}` : "讯飞短音频识别连接失败。"));
-      }
-    });
+    function onError(event) {
+      const detail = event?.error?.message || event?.message || "";
+      finish(httpError(502, "XFYUN_IAT_FAILED", detail ? `讯飞短音频识别连接失败：${detail}` : "讯飞短音频识别连接失败。"));
+    }
 
-    socket.addEventListener("close", (event) => {
-      if (!resolved) {
-        resolved = true;
-        clearTimeout(timer);
-        const reason = event?.reason ? `，原因：${event.reason}` : "";
-        reject(httpError(502, "XFYUN_IAT_CLOSED", `讯飞短音频识别连接已关闭：${event?.code || "unknown"}${reason}`));
-      }
-    });
+    function onClose(event) {
+      const reason = event?.reason ? `，原因：${event.reason}` : "";
+      finish(httpError(502, "XFYUN_IAT_CLOSED", `讯飞短音频识别连接已关闭：${event?.code || "unknown"}${reason}`));
+    }
+
+    socket.addEventListener("open", onOpen);
+    socket.addEventListener("message", onMessage);
+    socket.addEventListener("error", onError);
+    socket.addEventListener("close", onClose);
   });
 }
 
-async function sendIatFrames(socket, { appId, pcm, onProgress }) {
+async function sendIatFrames(socket, { appId, pcm, onProgress, signal }) {
   let seq = 1;
   for (let offset = 0; offset < pcm.length; offset += SHORT_FRAME_SIZE) {
+    signal.throwIfAborted();
     const chunk = pcm.slice(offset, offset + SHORT_FRAME_SIZE);
     const isFirst = offset === 0;
     const frame = {
@@ -164,8 +177,9 @@ async function sendIatFrames(socket, { appId, pcm, onProgress }) {
         message: "正在接收短音频识别结果"
       });
     }
-    await sleep(SHORT_FRAME_INTERVAL_MS);
+    await sleep(SHORT_FRAME_INTERVAL_MS, signal);
   }
+  signal.throwIfAborted();
   socket.send(JSON.stringify({
     header: {
       app_id: appId,
@@ -186,28 +200,30 @@ async function sendIatFrames(socket, { appId, pcm, onProgress }) {
 }
 
 async function transcribeLongAudio({ config, audio, durationMs, requestId, onProgress }) {
+  const deadline = Date.now() + positiveTimeout(config.asrTaskTimeoutMs, ASR_TASK_TIMEOUT_MS);
   onProgress?.({
     stage: "UPLOADING_ASR_AUDIO",
     progress: 20,
     message: "正在上传长音频"
   });
-  const uploadUrl = await uploadLongAudio({ config, audio, requestId });
+  const uploadUrl = await uploadLongAudio({ config, audio, requestId, deadline });
 
   onProgress?.({
     stage: "CALLING_ASR",
     progress: 45,
     message: "正在创建长音频转写任务"
   });
-  const providerTaskId = await createLongTask({ config, requestId, uploadUrl, durationMs });
+  const providerTaskId = await createLongTask({ config, requestId, uploadUrl, durationMs, deadline });
 
   for (let attempt = 0; attempt < LONG_MAX_POLLS; attempt += 1) {
-    await sleep(LONG_POLL_INTERVAL_MS);
+    await sleep(Math.min(LONG_POLL_INTERVAL_MS, remainingTaskTime(deadline)));
+    remainingTaskTime(deadline);
     onProgress?.({
       stage: "POLLING_ASR",
       progress: Math.min(95, 50 + attempt),
       message: "正在等待长音频转写结果"
     });
-    const task = await queryLongTask({ config, providerTaskId });
+    const task = await queryLongTask({ config, providerTaskId, deadline });
     if (task.status === "done") {
       return buildAsrResult({
         requestId,
@@ -222,7 +238,7 @@ async function transcribeLongAudio({ config, audio, durationMs, requestId, onPro
   throw httpError(504, "ASR_TIMEOUT", "长音频转写超时，请稍后重试。");
 }
 
-async function uploadLongAudio({ config, audio, requestId }) {
+async function uploadLongAudio({ config, audio, requestId, deadline }) {
   const multipart = createMultipart({
     fields: {
       app_id: config.xfyunAppId,
@@ -237,6 +253,7 @@ async function uploadLongAudio({ config, audio, requestId }) {
   });
   const response = await signedJsonFetch(config.xfyunSpeedUploadEndpoint, {
     config,
+    deadline,
     body: multipart.body,
     contentType: multipart.contentType
   });
@@ -248,7 +265,7 @@ async function uploadLongAudio({ config, audio, requestId }) {
   return url;
 }
 
-async function createLongTask({ config, requestId, uploadUrl, durationMs }) {
+async function createLongTask({ config, requestId, uploadUrl, durationMs, deadline }) {
   const body = Buffer.from(JSON.stringify({
     common: {
       app_id: config.xfyunAppId
@@ -271,6 +288,7 @@ async function createLongTask({ config, requestId, uploadUrl, durationMs }) {
   }));
   const response = await signedJsonFetch(config.xfyunSpeedCreateEndpoint, {
     config,
+    deadline,
     body,
     contentType: "application/json"
   });
@@ -282,7 +300,7 @@ async function createLongTask({ config, requestId, uploadUrl, durationMs }) {
   return taskId;
 }
 
-async function queryLongTask({ config, providerTaskId }) {
+async function queryLongTask({ config, providerTaskId, deadline }) {
   const body = Buffer.from(JSON.stringify({
     common: {
       app_id: config.xfyunAppId
@@ -293,6 +311,7 @@ async function queryLongTask({ config, providerTaskId }) {
   }));
   const response = await signedJsonFetch(config.xfyunSpeedQueryEndpoint, {
     config,
+    deadline,
     body,
     contentType: "application/json"
   });
@@ -310,7 +329,7 @@ async function queryLongTask({ config, providerTaskId }) {
   throw httpError(502, "XFYUN_TASK_FAILED", `讯飞长音频转写状态异常：${status || "unknown"}`);
 }
 
-async function signedJsonFetch(endpoint, { config, body, contentType }) {
+async function signedJsonFetch(endpoint, { config, body, contentType, deadline }) {
   const url = new URL(endpoint);
   const digest = `SHA-256=${crypto.createHash("sha256").update(body).digest("base64")}`;
   const date = new Date().toUTCString();
@@ -323,23 +342,62 @@ async function signedJsonFetch(endpoint, { config, body, contentType }) {
   const authorization =
     `api_key="${config.xfyunApiKey}", algorithm="hmac-sha256", headers="host date request-line digest", signature="${signature}"`;
 
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "content-type": contentType,
-      "content-length": String(body.length),
-      host: url.host,
-      date,
-      digest,
-      authorization
-    },
-    body
+  const remainingMs = remainingTaskTime(deadline);
+  const requestTimeoutMs = positiveTimeout(config.asrRequestTimeoutMs, ASR_REQUEST_TIMEOUT_MS);
+  const controller = new AbortController();
+  let timeoutError;
+  let timer;
+  const expiration = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      timeoutError = remainingMs <= requestTimeoutMs
+        ? httpError(504, "ASR_TIMEOUT", "长音频转写超时，请稍后重试。")
+        : httpError(504, "ASR_REQUEST_TIMEOUT", "讯飞 ASR 请求超时，请稍后重试。");
+      controller.abort(timeoutError);
+      reject(timeoutError);
+    }, Math.min(requestTimeoutMs, remainingMs));
   });
-  const text = await response.text();
-  if (!response.ok) {
-    throw httpError(response.status, "XFYUN_HTTP_FAILED", text || "讯飞 ASR 请求失败。");
+
+  try {
+    return await Promise.race([
+      (async () => {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": contentType,
+            "content-length": String(body.length),
+            host: url.host,
+            date,
+            digest,
+            authorization
+          },
+          body,
+          signal: controller.signal
+        });
+        const text = await response.text();
+        if (!response.ok) {
+          throw httpError(response.status, "XFYUN_HTTP_FAILED", text || "讯飞 ASR 请求失败。");
+        }
+        return JSON.parse(text);
+      })(),
+      expiration
+    ]);
+  } catch (error) {
+    throw timeoutError || error;
+  } finally {
+    clearTimeout(timer);
   }
-  return JSON.parse(text);
+}
+
+function positiveTimeout(value, fallback) {
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function remainingTaskTime(deadline) {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) {
+    throw httpError(504, "ASR_TIMEOUT", "长音频转写超时，请稍后重试。");
+  }
+  return remainingMs;
 }
 
 function buildIatUrl(config) {
@@ -448,6 +506,21 @@ function tryParseJson(value) {
   }
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    function onAbort() {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(signal.reason);
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }

@@ -2,6 +2,7 @@ package com.nazhi.app.feature.home
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -14,6 +15,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -21,6 +23,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -40,6 +43,8 @@ import com.nazhi.app.core.network.NazhiBackendClient
 import com.nazhi.app.core.network.NazhiBackendException
 import com.nazhi.app.core.repository.NazhiRepository
 import com.nazhi.app.core.settings.BackendSettingsStore
+import com.nazhi.app.core.settings.BackupHistoryStore
+import com.nazhi.app.core.tasks.PendingTaskStore
 import com.nazhi.app.core.ui.NazhiTokens
 import com.nazhi.app.feature.calendar.CalendarRoute
 import com.nazhi.app.feature.chat.KnowledgeChatRoute
@@ -48,6 +53,7 @@ import com.nazhi.app.feature.knowledge.KnowledgeRoute
 import com.nazhi.app.feature.settings.LoginDialog
 import com.nazhi.app.feature.settings.RegisterDialog
 import com.nazhi.app.feature.settings.SettingsRoute
+import com.nazhi.app.feature.tasks.PendingTasksRoute
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -56,7 +62,8 @@ private enum class MainTab {
     CALENDAR,
     CHAT,
     KNOWLEDGE,
-    SETTINGS
+    SETTINGS,
+    TASKS
 }
 
 @Composable
@@ -67,16 +74,19 @@ fun NazhiHomeRoute(
     backendClient: NazhiBackendClient,
     knowledgeIngestionCoordinator: KnowledgeIngestionCoordinator,
     knowledgeChatCoordinator: KnowledgeChatCoordinator,
+    pendingTaskStore: PendingTaskStore,
+    backupHistoryStore: BackupHistoryStore? = null,
     initialShareText: String? = null,
     initialShareSource: String? = null,
     onShareConsumed: () -> Unit = {}
 ) {
-    var selectedTab by remember { mutableStateOf(MainTab.TODAY) }
+    var selectedTab by rememberSaveable { mutableStateOf(MainTab.TODAY) }
     val authSession by authSessionStore.session.collectAsState(initial = null)
+    val pendingTasks by pendingTaskStore.tasks.collectAsState(initial = emptyList())
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     var hasCheckedAuthSession by remember { mutableStateOf(false) }
-    var hasDismissedStartupAuth by remember { mutableStateOf(false) }
+    var hasDismissedStartupAuth by rememberSaveable { mutableStateOf(false) }
     var isAuthSubmitting by remember { mutableStateOf(false) }
     var showLoginDialog by remember { mutableStateOf(false) }
     var showRegisterDialog by remember { mutableStateOf(false) }
@@ -194,18 +204,33 @@ fun NazhiHomeRoute(
                     repository = repository,
                     backendSettingsStore = backendSettingsStore,
                     authSessionStore = authSessionStore,
-                    backendClient = backendClient
+                    backendClient = backendClient,
+                    backupHistoryStore = backupHistoryStore
+                )
+
+                MainTab.TASKS -> PendingTasksRoute(
+                    repository = repository,
+                    pendingTaskStore = pendingTaskStore,
+                    knowledgeIngestionCoordinator = knowledgeIngestionCoordinator,
+                    knowledgeChatCoordinator = knowledgeChatCoordinator,
+                    onNavigateBack = { selectedTab = MainTab.TODAY }
                 )
             }
 
-            if (selectedTab != MainTab.SETTINGS) {
-                SettingsGearButton(
-                    onClick = { selectedTab = MainTab.SETTINGS },
+            if (selectedTab != MainTab.SETTINGS && selectedTab != MainTab.TASKS) {
+                Row(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(top = 8.dp, end = 8.dp)
-                        .zIndex(1f)
-                )
+                        .zIndex(1f),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(onClick = { selectedTab = MainTab.TASKS }) {
+                        val countLabel = if (pendingTasks.size > 99) "99+" else pendingTasks.size.toString()
+                        Text(text = "待处理 ($countLabel)")
+                    }
+                    SettingsGearButton(onClick = { selectedTab = MainTab.SETTINGS })
+                }
             }
         }
     }

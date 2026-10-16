@@ -1,3 +1,5 @@
+import { httpError } from "../http.js";
+
 export function knowledgeChatMock({
   requestId,
   question,
@@ -72,7 +74,7 @@ export function buildKnowledgeChatPrompt({
 6. sessionMemory 只用于理解用户追问和指代关系，不能作为事实来源。
 7. previousCitationIds 只表示用户可能在追问这些来源，不能作为独立事实来源。
 8. 补全后的独立问题只用于理解追问和检索意图，不能作为事实来源。
-9. quote 必须是对应 context 中能支撑回答的短句或摘要。
+9. quote 非空时必须逐字摘录对应 context 的 title、summary 或 content 中能支撑回答的短句，不能把转述或摘要写成原文引用；如果回答是在概括来源而没有合适的短句，quote 使用空字符串，reason 说明该来源如何支持回答。
 10. updatedMemoryDigest 是完整替换后的本会话摘要，最多 200 个中文字符，只总结主题、用户关注点和已基于 contexts 讨论过的结论。
 11. 如果 contexts 不足、answer 表示知识不足、或 citations 为空，updatedMemoryDigest 必须为空字符串。
 12. 回答使用 ${language || "zh-CN"}，保持简洁、可执行。
@@ -85,6 +87,7 @@ export function buildKnowledgeChatPrompt({
    - 如果 contexts 不足以回答，不要输出“可以继续追问”段落。
    - 不要输出表格、代码块、HTML、图片链接或复杂嵌套列表。
    - 单段尽量不超过 3 行，避免长篇纯文本。
+15. 如果给出实质结论，citations 至少包含一个确实支持该结论的来源；如果无法提供依据，改为明确说明“当前知识库中没有足够信息”，citations 使用空数组。
 
 输出格式：
 {
@@ -116,34 +119,63 @@ ${JSON.stringify(contextPayload, null, 2)}
 `.trim();
 }
 
-export function parseKnowledgeChatFromText(text, allowedContextIds) {
+export function parseKnowledgeChatFromText(text, allowedContexts) {
   const cleaned = String(text || "")
-    .replace(/<think>[\s\S]*?<\/think>/gi, "")
-    .replace(/```json/gi, "```")
+    .trim()
+    .replace(/^(?:<think>[\s\S]*?<\/think>\s*)+/i, "")
     .trim();
+  const fencedJson = cleaned.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  let parsed;
+  try {
+    parsed = JSON.parse(fencedJson ? fencedJson[1] : cleaned);
+  } catch {
+    throw invalidKnowledgeChatResponse();
+  }
+  if (!isValidKnowledgeChatResponse(parsed)) {
+    throw invalidKnowledgeChatResponse();
+  }
 
-  for (const jsonText of extractJsonCandidates(cleaned)) {
-    try {
-      const parsed = JSON.parse(jsonText);
-      const answer = typeof parsed.answer === "string" ? parsed.answer.trim() : "";
-      if (!answer) {
-        continue;
-      }
-      return {
-        answer,
-        citations: normalizeCitations(parsed.citations, allowedContextIds),
-        updatedMemoryDigest: normalizeMemoryDigest(parsed.updatedMemoryDigest)
-      };
-    } catch {
-      // Try the next candidate.
-    }
+  const answer = parsed.answer.trim();
+  const citations = normalizeCitations(parsed.citations, allowedContexts);
+  const insufficientKnowledge = /没有足够|不足以|无法回答|知识不足|信息不足|insufficient (?:knowledge|information)|not enough (?:knowledge|information)/i.test(answer);
+  if (!citations.length && !insufficientKnowledge) {
+    throw httpError(
+      502,
+      "MINIMAX_CHAT_UNGROUNDED",
+      "模型回答缺少可验证的知识来源，请稍后重试。"
+    );
   }
 
   return {
-    answer: cleaned || "当前知识库中没有足够信息回答这个问题。",
-    citations: [],
-    updatedMemoryDigest: ""
+    answer,
+    citations,
+    updatedMemoryDigest: citations.length && !insufficientKnowledge ? normalizeMemoryDigest(parsed.updatedMemoryDigest) : ""
   };
+}
+
+function isValidKnowledgeChatResponse(value) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    typeof value.answer === "string" &&
+    value.answer.trim().length > 0 &&
+    Array.isArray(value.citations) &&
+    value.citations.every((citation) => (
+      citation !== null &&
+      typeof citation === "object" &&
+      !Array.isArray(citation) &&
+      typeof citation.contextId === "string" &&
+      citation.contextId.trim().length > 0 &&
+      typeof citation.quote === "string" &&
+      (citation.reason === undefined || typeof citation.reason === "string")
+    )) &&
+    (value.updatedMemoryDigest === undefined || typeof value.updatedMemoryDigest === "string")
+  );
+}
+
+function invalidKnowledgeChatResponse() {
+  return httpError(502, "MINIMAX_CHAT_INVALID_RESPONSE", "模型未返回有效的知识问答结果，请稍后重试。");
 }
 
 export function normalizeKnowledgeChatContexts(contexts) {
@@ -163,19 +195,29 @@ export function normalizeKnowledgeChatContexts(contexts) {
     .slice(0, 8);
 }
 
-function normalizeCitations(citations, allowedContextIds) {
-  if (!Array.isArray(citations)) {
-    return [];
-  }
-  const allowed = new Set(allowedContextIds);
+function normalizeCitations(citations, allowedContexts) {
+  const allowed = new Map(allowedContexts.map((context) => [context.id, context]));
   return citations
     .map((citation) => ({
-      contextId: String(citation?.contextId || "").trim(),
-      quote: String(citation?.quote || "").trim(),
-      reason: String(citation?.reason || "").trim()
+      contextId: citation.contextId.trim(),
+      quote: citation.quote.trim(),
+      reason: (citation.reason || "").trim()
     }))
-    .filter((citation) => allowed.has(citation.contextId))
+    .filter((citation) => {
+      const context = allowed.get(citation.contextId);
+      if (!context) {
+        return false;
+      }
+      // An empty excerpt is an explicit source pointer for a paraphrase. Nonempty
+      // excerpts must occur in the supplied source; never synthesize evidence.
+      const quote = normalizeExcerpt(citation.quote);
+      return !quote || [context.title, context.summary, context.content].some((source) => normalizeExcerpt(source).includes(quote));
+    })
     .slice(0, 5);
+}
+
+function normalizeExcerpt(value) {
+  return String(value || "").normalize("NFKC").replace(/\s+/g, "");
 }
 
 function normalizeMemoryDigest(value) {
@@ -205,23 +247,4 @@ function buildUpdatedMemoryDigest({ question, contexts, sessionMemory }) {
 
 function roughTokenCount(text) {
   return Math.ceil(String(text || "").length / 2);
-}
-
-function extractJsonCandidates(text) {
-  const candidates = [];
-  const fencedMatches = text.matchAll(/```([\s\S]*?)```/g);
-  for (const match of fencedMatches) {
-    const body = match[1].trim();
-    if (body.startsWith("{") || body.startsWith("[")) {
-      candidates.push(body);
-    }
-  }
-
-  const firstObject = text.indexOf("{");
-  const lastObject = text.lastIndexOf("}");
-  if (firstObject >= 0 && lastObject > firstObject) {
-    candidates.push(text.slice(firstObject, lastObject + 1).trim());
-  }
-
-  return candidates.length ? candidates : [text];
 }

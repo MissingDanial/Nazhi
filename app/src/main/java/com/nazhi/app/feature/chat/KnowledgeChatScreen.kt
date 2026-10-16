@@ -83,7 +83,9 @@ import kotlin.math.roundToInt
 @Composable
 fun KnowledgeChatRoute(
     repository: NazhiRepository,
-    knowledgeChatCoordinator: KnowledgeChatCoordinator
+    knowledgeChatCoordinator: KnowledgeChatCoordinator,
+    initialSessionId: String? = null,
+    onNavigateBack: (() -> Unit)? = null
 ) {
     val embeddingCount by remember(repository) {
         repository.observeEmbeddingCount()
@@ -93,19 +95,19 @@ fun KnowledgeChatRoute(
     }.collectAsState(initial = emptyList())
     val chatSessions by remember(repository) {
         repository.observeChatSessions()
-    }.collectAsState(initial = emptyList())
+    }.collectAsState(initial = null)
     val historicalChatSessions = remember(chatSessions) {
-        chatSessions.filter { it.messageCount > 0 }
+        chatSessions.orEmpty().filter { it.messageCount > 0 }
     }
-    var activeChatSessionId by remember { mutableStateOf<String?>(null) }
+    var activeChatSessionId by remember(initialSessionId) { mutableStateOf(initialSessionId) }
     val activeChatSession = remember(historicalChatSessions, activeChatSessionId) {
         historicalChatSessions.firstOrNull { it.id == activeChatSessionId }
     }
     val visibleHistorySessions = remember(historicalChatSessions, activeChatSessionId) {
         historicalChatSessions.filterNot { it.id == activeChatSessionId }
     }
-    LaunchedEffect(historicalChatSessions) {
-        if (activeChatSessionId != null && historicalChatSessions.none { it.id == activeChatSessionId }) {
+    LaunchedEffect(chatSessions) {
+        if (chatSessions != null && activeChatSessionId != null && historicalChatSessions.none { it.id == activeChatSessionId }) {
             activeChatSessionId = null
         }
     }
@@ -224,7 +226,8 @@ fun KnowledgeChatRoute(
         },
         onUseFollowUpSuggestion = { suggestion ->
             question = suggestion
-        }
+        },
+        onNavigateBack = onNavigateBack
     )
 
     editingEntry?.let { entry ->
@@ -354,7 +357,8 @@ private fun KnowledgeChatScreen(
     onRetry: (ChatMessage) -> Unit,
     onRegenerate: (ChatMessage) -> Unit,
     onCopyAnswer: (String) -> Unit,
-    onUseFollowUpSuggestion: (String) -> Unit
+    onUseFollowUpSuggestion: (String) -> Unit,
+    onNavigateBack: (() -> Unit)? = null
 ) {
     val canAsk = question.isNotBlank() && !isAsking && indexedEntryCount > 0
     val hasAssistantReply = messages.any { it.role == ChatRole.ASSISTANT }
@@ -373,6 +377,11 @@ private fun KnowledgeChatScreen(
         containerColor = NazhiTokens.colors.background,
         topBar = {
             TopAppBar(
+                navigationIcon = {
+                    onNavigateBack?.let { navigateBack ->
+                        TextButton(onClick = navigateBack) { Text("返回待处理") }
+                    }
+                },
                 title = {
                     Column {
                         Text(text = "问答")

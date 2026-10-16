@@ -15,6 +15,7 @@ import com.nazhi.app.core.database.dao.EmbeddingDao
 import com.nazhi.app.core.database.dao.KnowledgeEntryDraftDao
 import com.nazhi.app.core.database.dao.KnowledgeEntryDao
 import com.nazhi.app.core.database.dao.NoteDao
+import com.nazhi.app.core.database.dao.PersistedAiTaskDao
 import com.nazhi.app.core.database.dao.ReviewSessionDao
 import com.nazhi.app.core.database.entity.AudioTranscriptionJobEntity
 import com.nazhi.app.core.database.entity.ChatCitationEntity
@@ -24,6 +25,7 @@ import com.nazhi.app.core.database.entity.EmbeddingRecordEntity
 import com.nazhi.app.core.database.entity.KnowledgeEntryDraftEntity
 import com.nazhi.app.core.database.entity.KnowledgeEntryEntity
 import com.nazhi.app.core.database.entity.NoteEntity
+import com.nazhi.app.core.database.entity.PersistedAiTaskEntity
 import com.nazhi.app.core.database.entity.ReviewSessionEntity
 
 @Database(
@@ -36,9 +38,10 @@ import com.nazhi.app.core.database.entity.ReviewSessionEntity
         ChatSessionEntity::class,
         ChatMessageEntity::class,
         ChatCitationEntity::class,
-        AudioTranscriptionJobEntity::class
+        AudioTranscriptionJobEntity::class,
+        PersistedAiTaskEntity::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = true
 )
 @TypeConverters(NazhiTypeConverters::class)
@@ -52,6 +55,7 @@ abstract class NazhiDatabase : RoomDatabase() {
     abstract fun chatMessageDao(): ChatMessageDao
     abstract fun chatCitationDao(): ChatCitationDao
     abstract fun audioTranscriptionJobDao(): AudioTranscriptionJobDao
+    abstract fun persistedAiTaskDao(): PersistedAiTaskDao
 
     companion object {
         private const val DATABASE_NAME = "nazhi.db"
@@ -69,9 +73,35 @@ abstract class NazhiDatabase : RoomDatabase() {
                     MIGRATION_4_5,
                     MIGRATION_5_6,
                     MIGRATION_6_7,
-                    MIGRATION_7_8
+                    MIGRATION_7_8,
+                    MIGRATION_8_9
                 )
                 .build()
+        }
+
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE audio_transcription_jobs ADD COLUMN requiresConfirmation INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS local_ai_tasks (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        type TEXT NOT NULL,
+                        requestId TEXT NOT NULL,
+                        bindingKey TEXT NOT NULL,
+                        date TEXT NOT NULL,
+                        sourceNoteIds TEXT NOT NULL,
+                        inputFingerprint TEXT NOT NULL,
+                        backendTaskId TEXT,
+                        status TEXT NOT NULL,
+                        errorMessage TEXT,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL
+                    )
+                """.trimIndent())
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_local_ai_tasks_requestId_bindingKey ON local_ai_tasks(requestId, bindingKey)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_local_ai_tasks_bindingKey_status ON local_ai_tasks(bindingKey, status)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_local_ai_tasks_date_type ON local_ai_tasks(date, type)")
+            }
         }
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {

@@ -7,10 +7,13 @@ import java.io.IOException
 import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
+import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.add
@@ -29,12 +32,23 @@ import kotlinx.serialization.json.put
 class NazhiBackendClient(
     private val configProvider: suspend () -> BackendConfig,
     private val accessTokenProvider: suspend () -> String? = { null },
-    private val accessTokenRefresher: suspend () -> String? = { null },
-    private val authSessionExpiredHandler: suspend () -> Unit = {}
+    private val accessTokenRefresher: suspend (failedToken: String) -> String? = { null },
+    private val authSessionExpiredHandler: suspend () -> Unit = {},
+    private val accountIdProvider: suspend () -> String? = { null }
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
+    }
+
+    suspend fun currentTaskBinding(forAudio: Boolean = false): String =
+        TaskBindingKey.create(configProvider(), accountIdProvider(), forAudio)
+
+    private suspend fun verifyTaskBinding(expected: String?, forAudio: Boolean = false, snapshot: BackendConfig? = null) {
+        if (expected != null && (expected != currentTaskBinding(forAudio) ||
+                (snapshot != null && expected != TaskBindingKey.create(snapshot, accountIdProvider(), forAudio)))) {
+            throw NazhiBackendException(409, "TASK_BINDING_CHANGED", "请切回提交任务时的账号和服务配置后继续查询。")
+        }
     }
 
     suspend fun checkHealth(
@@ -132,35 +146,47 @@ class NazhiBackendClient(
     suspend fun createEmbeddings(
         requestId: String,
         input: List<EmbeddingInput>,
-        model: String = EMBEDDING_MODEL
+        model: String = EMBEDDING_MODEL,
+        type: String? = null
     ): EmbeddingResponse {
+        val embeddingType = resolveEmbeddingType(input, type)
         val backendConfig = configProvider()
-        if (backendConfig.serviceMode == AiServiceMode.DIRECT_API) {
-            return createDirectEmbeddings(
-                config = backendConfig,
-                requestId = requestId,
-                input = input,
-                model = backendConfig.directEmbeddingModel.ifBlank { model }
-            )
+        val response = try {
+            if (backendConfig.serviceMode == AiServiceMode.DIRECT_API) {
+                createDirectEmbeddings(
+                    config = backendConfig,
+                    requestId = requestId,
+                    input = input,
+                    model = backendConfig.directEmbeddingModel.ifBlank { model },
+                    type = embeddingType
+                )
+            } else {
+                post<EmbeddingRequest, EmbeddingResponse>(
+                    path = "/v1/embeddings",
+                    body = EmbeddingRequest(
+                        requestId = requestId,
+                        model = model,
+                        input = input,
+                        type = embeddingType
+                    ),
+                    config = backendConfig
+                )
+            }
+        } catch (error: SerializationException) {
+            throw invalidEmbeddingResponse()
         }
-        return post(
-            path = "/v1/embeddings",
-            body = EmbeddingRequest(
-                requestId = requestId,
-                model = model,
-                input = input
-            ),
-            config = backendConfig
-        )
+        return validateEmbeddingResponse(response, requestId, input)
     }
 
     suspend fun organizeNotes(
         requestId: String,
         date: String,
         notes: List<Note>,
-        maxDrafts: Int = 10
+        maxDrafts: Int = 10,
+        expectedBinding: String? = null
     ): OrganizeNotesResponse {
         val backendConfig = configProvider()
+        verifyTaskBinding(expectedBinding, snapshot = backendConfig)
         if (backendConfig.serviceMode == AiServiceMode.DIRECT_API) {
             return organizeNotesDirect(
                 config = backendConfig,
@@ -190,7 +216,8 @@ class NazhiBackendClient(
                     mergeSimilar = true
                 )
             ),
-            config = backendConfig
+            config = backendConfig,
+            expectedTaskBinding = expectedBinding
         )
     }
 
@@ -198,7 +225,8 @@ class NazhiBackendClient(
         requestId: String,
         date: String,
         notes: List<Note>,
-        maxDrafts: Int = 10
+        maxDrafts: Int = 10,
+        expectedBinding: String? = null
     ): BackendTaskResponse {
         val backendConfig = configProvider()
         if (backendConfig.serviceMode == AiServiceMode.DIRECT_API) {
@@ -228,13 +256,28 @@ class NazhiBackendClient(
                     mergeSimilar = true
                 )
             ),
-            config = backendConfig
+            config = backendConfig,
+            expectedTaskBinding = expectedBinding
         )
     }
 
-    suspend fun getTask(taskId: String): BackendTaskResponse = get(
-        path = "/v1/tasks/$taskId"
+    suspend fun getTask(taskId: String, expectedBinding: String? = null): BackendTaskResponse = get(
+        path = "/v1/tasks/${encodePath(taskId)}",
+        expectedTaskBinding = expectedBinding
     )
+
+    suspend fun getOrganizeTaskByRequestId(requestId: String, expectedBinding: String? = null): BackendTaskResponse = get(
+        path = "/v1/tasks/by-request/${encodePath(requestId)}?type=ORGANIZE_NOTES",
+        expectedTaskBinding = expectedBinding
+    )
+
+    suspend fun getAudioTaskByRequestId(requestId: String, expectedBinding: String? = null): AudioTranscriptionTaskResponse = get(
+        path = "/v1/tasks/by-request/${encodePath(requestId)}?type=AUDIO_TRANSCRIPTION",
+        expectedTaskBinding = expectedBinding,
+        audioTask = true
+    )
+
+    private fun encodePath(value: String) = URLEncoder.encode(value, "UTF-8").replace("+", "%20")
 
     suspend fun rewriteQuestion(
         requestId: String,
@@ -314,7 +357,9 @@ class NazhiBackendClient(
         audioFile: File,
         durationMs: Long,
         source: String = "floating_ball",
-        language: String = "zh-CN"
+        language: String = "zh-CN",
+        requestId: String = UUID.randomUUID().toString(),
+        expectedBinding: String? = null
     ): AudioTranscriptionTaskResponse {
         val backendConfig = configProvider()
         if (backendConfig.serviceMode == AiServiceMode.DIRECT_API) {
@@ -328,6 +373,7 @@ class NazhiBackendClient(
             path = "/v1/audio-transcriptions/jobs",
             audioFile = audioFile,
             fields = mapOf(
+                "requestId" to requestId,
                 "durationMs" to durationMs.toString(),
                 "source" to source,
                 "language" to language,
@@ -335,173 +381,107 @@ class NazhiBackendClient(
                 "channels" to "1",
                 "encoding" to "wav"
             ),
-            config = backendConfig
+            config = backendConfig,
+            expectedTaskBinding = expectedBinding
         )
     }
 
-    suspend fun getAudioTranscriptionJob(taskId: String): AudioTranscriptionTaskResponse = get(
-        path = "/v1/audio-transcriptions/jobs/$taskId"
+    suspend fun getAudioTranscriptionJob(taskId: String, expectedBinding: String? = null): AudioTranscriptionTaskResponse = get(
+        path = "/v1/audio-transcriptions/jobs/${encodePath(taskId)}",
+        expectedTaskBinding = expectedBinding,
+        audioTask = true
     )
 
     private suspend inline fun <reified Request, reified Response> post(
         path: String,
         body: Request,
-        config: BackendConfig? = null
+        config: BackendConfig? = null,
+        expectedTaskBinding: String? = null
     ): Response = withContext(Dispatchers.IO) {
         val backendConfig = config ?: configProvider()
-        val url = URL(backendConfig.normalizedBaseUrl + path)
-        val connection = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            connectTimeout = 15_000
-            readTimeout = 60_000
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json; charset=utf-8")
-        }
-        setBackendAuthorization(connection, backendConfig, path)
-
         val payload = json.encodeToString(body).toByteArray(Charsets.UTF_8)
-        connection.outputStream.use { output -> output.write(payload) }
-
-        val statusCode = connection.responseCode
-        val responseText = try {
-            val stream = if (statusCode in 200..299) connection.inputStream else connection.errorStream
-            stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-        } finally {
-            connection.disconnect()
-        }
-
-        if (statusCode !in 200..299) {
-            val backendError = runCatching {
-                json.decodeFromString<BackendErrorResponse>(responseText).error
-            }.getOrNull()
-            throw NazhiBackendException(statusCode, backendError?.code, backendError.toPublicMessage(statusCode))
-        }
-
-        json.decodeFromString(responseText)
+        decodeHttpResult(executeAuthorizedRequest(path, backendConfig, expectedTaskBinding = expectedTaskBinding) { token ->
+            executeBackendRequest(
+                path = path,
+                method = "POST",
+                config = backendConfig,
+                bearerToken = token,
+                contentType = "application/json; charset=utf-8",
+                writeBody = { output -> output.write(payload) }
+            )
+        })
     }
 
     private suspend inline fun <reified Response> postMultipartAudio(
         path: String,
         audioFile: File,
         fields: Map<String, String>,
-        config: BackendConfig
+        config: BackendConfig,
+        expectedTaskBinding: String? = null
     ): Response = withContext(Dispatchers.IO) {
         val boundary = "NazhiBoundary${System.currentTimeMillis()}"
-        val url = URL(config.normalizedBaseUrl + path)
-        val connection = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            connectTimeout = 15_000
-            readTimeout = 60_000
-            doOutput = true
-            setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
-        }
-        setBackendAuthorization(connection, config, path)
-
-        connection.outputStream.use { output ->
-            fields.forEach { (name, value) ->
-                output.writeUtf8("--$boundary\r\n")
-                output.writeUtf8("Content-Disposition: form-data; name=\"$name\"\r\n\r\n")
-                output.writeUtf8(value)
-                output.writeUtf8("\r\n")
-            }
-            output.writeUtf8("--$boundary\r\n")
-            output.writeUtf8(
-                "Content-Disposition: form-data; name=\"audio\"; filename=\"${audioFile.name}\"\r\n"
+        decodeHttpResult(executeAuthorizedRequest(path, config, expectedTaskBinding = expectedTaskBinding, audioTask = true) { token ->
+            executeBackendRequest(
+                path = path,
+                method = "POST",
+                config = config,
+                bearerToken = token,
+                contentType = "multipart/form-data; boundary=$boundary",
+                writeBody = { output ->
+                    fields.forEach { (name, value) ->
+                        output.writeUtf8("--$boundary\r\n")
+                        output.writeUtf8("Content-Disposition: form-data; name=\"$name\"\r\n\r\n")
+                        output.writeUtf8(value)
+                        output.writeUtf8("\r\n")
+                    }
+                    output.writeUtf8("--$boundary\r\n")
+                    output.writeUtf8("Content-Disposition: form-data; name=\"audio\"; filename=\"${audioFile.name}\"\r\n")
+                    output.writeUtf8("Content-Type: audio/wav\r\n\r\n")
+                    audioFile.inputStream().use { input -> input.copyTo(output) }
+                    output.writeUtf8("\r\n--$boundary--\r\n")
+                }
             )
-            output.writeUtf8("Content-Type: audio/wav\r\n\r\n")
-            audioFile.inputStream().use { input -> input.copyTo(output) }
-            output.writeUtf8("\r\n--$boundary--\r\n")
-        }
-
-        val statusCode = connection.responseCode
-        val responseText = try {
-            val stream = if (statusCode in 200..299) connection.inputStream else connection.errorStream
-            stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-        } finally {
-            connection.disconnect()
-        }
-
-        if (statusCode !in 200..299) {
-            val backendError = runCatching {
-                json.decodeFromString<BackendErrorResponse>(responseText).error
-            }.getOrNull()
-            throw NazhiBackendException(statusCode, backendError?.code, backendError.toPublicMessage(statusCode))
-        }
-
-        json.decodeFromString(responseText)
+        })
     }
 
     private suspend inline fun <reified Response> get(
         path: String,
-        config: BackendConfig? = null
+        config: BackendConfig? = null,
+        expectedTaskBinding: String? = null,
+        audioTask: Boolean = false
     ): Response = withContext(Dispatchers.IO) {
         val backendConfig = config ?: configProvider()
-        val url = URL(backendConfig.normalizedBaseUrl + path)
-        val connection = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 10_000
-            readTimeout = 15_000
-        }
-        setBackendAuthorization(connection, backendConfig, path)
-
-        val statusCode = connection.responseCode
-        val responseText = try {
-            val stream = if (statusCode in 200..299) connection.inputStream else connection.errorStream
-            stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-        } finally {
-            connection.disconnect()
-        }
-
-        if (statusCode !in 200..299) {
-            val backendError = runCatching {
-                json.decodeFromString<BackendErrorResponse>(responseText).error
-            }.getOrNull()
-            throw NazhiBackendException(statusCode, backendError?.code, backendError.toPublicMessage(statusCode))
-        }
-
-        json.decodeFromString(responseText)
+        decodeHttpResult(executeAuthorizedRequest(path, backendConfig, expectedTaskBinding = expectedTaskBinding, audioTask = audioTask) { token ->
+            executeBackendRequest(path, "GET", backendConfig, token)
+        })
     }
 
     private suspend inline fun <reified Request, reified Response> postWithUserToken(
         path: String,
         body: Request
     ): Response = withContext(Dispatchers.IO) {
-        val payload = json.encodeToString(body)
-        var result = executeUserTokenRequest(
-            path = path,
-            method = "POST",
-            body = payload,
-            accessToken = requireAccessToken()
-        )
-        if (result.isUnauthorized()) {
-            result = executeUserTokenRequest(
+        val backendConfig = configProvider()
+        val payload = json.encodeToString(body).toByteArray(Charsets.UTF_8)
+        decodeHttpResult(executeAuthorizedRequest(path, backendConfig, userTokenRequired = true) { token ->
+            executeBackendRequest(
                 path = path,
                 method = "POST",
-                body = payload,
-                accessToken = refreshAccessTokenOrExpire()
+                config = backendConfig,
+                bearerToken = token,
+                contentType = "application/json; charset=utf-8",
+                writeBody = { output -> output.write(payload) },
+                readTimeoutMs = 30_000
             )
-        }
-        decodeHttpResult(result)
+        })
     }
 
     private suspend inline fun <reified Response> getWithUserToken(
         path: String
     ): Response = withContext(Dispatchers.IO) {
-        var result = executeUserTokenRequest(
-            path = path,
-            method = "GET",
-            body = null,
-            accessToken = requireAccessToken()
-        )
-        if (result.isUnauthorized()) {
-            result = executeUserTokenRequest(
-                path = path,
-                method = "GET",
-                body = null,
-                accessToken = refreshAccessTokenOrExpire()
-            )
-        }
-        decodeHttpResult(result)
+        val backendConfig = configProvider()
+        decodeHttpResult(executeAuthorizedRequest(path, backendConfig, userTokenRequired = true) { token ->
+            executeBackendRequest(path, "GET", backendConfig, token)
+        })
     }
 
     private suspend fun requireAccessToken(): String {
@@ -513,8 +493,8 @@ class NazhiBackendClient(
         throw NazhiBackendException(401, "AUTH_SESSION_REQUIRED", "请先登录纳知账号。")
     }
 
-    private suspend fun refreshAccessTokenOrExpire(): String {
-        val refreshedToken = accessTokenRefresher().orEmpty()
+    private suspend fun refreshAccessTokenOrExpire(failedToken: String): String {
+        val refreshedToken = accessTokenRefresher(failedToken).orEmpty()
         if (refreshedToken.isNotBlank()) {
             return refreshedToken
         }
@@ -522,52 +502,67 @@ class NazhiBackendClient(
         throw NazhiBackendException(401, "AUTH_SESSION_EXPIRED", "登录已过期，请重新登录。")
     }
 
-    private suspend fun executeUserTokenRequest(
+    private suspend fun executeAuthorizedRequest(
         path: String,
-        method: String,
-        body: String?,
-        accessToken: String
+        config: BackendConfig,
+        userTokenRequired: Boolean = false,
+        expectedTaskBinding: String? = null,
+        audioTask: Boolean = false,
+        execute: suspend (String) -> BackendHttpResult
     ): BackendHttpResult {
-        val backendConfig = configProvider()
-        val url = URL(backendConfig.normalizedBaseUrl + path)
-        val connection = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = method
-            connectTimeout = if (method == "GET") 10_000 else 15_000
-            readTimeout = if (method == "GET") 15_000 else 30_000
-            setRequestProperty("Authorization", "Bearer $accessToken")
-            if (body != null) {
-                doOutput = true
-                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        verifyTaskBinding(expectedTaskBinding, audioTask, config)
+        val userToken = when {
+            userTokenRequired -> requireAccessToken()
+            path.startsWith("/v1/") -> accessTokenProvider().orEmpty()
+            else -> ""
+        }
+        val bearerToken = userToken.ifBlank { config.devToken.trim() }
+        verifyTaskBinding(expectedTaskBinding, audioTask, config)
+        var result = execute(bearerToken)
+        if (result.isUnauthorized() && userToken.isNotBlank()) {
+            val refreshedToken = refreshAccessTokenOrExpire(userToken)
+            verifyTaskBinding(expectedTaskBinding, audioTask, config)
+            result = execute(refreshedToken)
+            if (result.isUnauthorized()) {
+                authSessionExpiredHandler()
+                throw NazhiBackendException(401, "AUTH_SESSION_EXPIRED", "登录已过期，请重新登录。")
             }
         }
-        if (body != null) {
-            connection.outputStream.use { output ->
-                output.write(body.toByteArray(Charsets.UTF_8))
-            }
-        }
-        val statusCode = connection.responseCode
-        val responseText = try {
-            val stream = if (statusCode in 200..299) connection.inputStream else connection.errorStream
-            stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-        } finally {
-            connection.disconnect()
-        }
-        return BackendHttpResult(statusCode = statusCode, responseText = responseText)
+        return result
     }
 
-    private suspend fun setBackendAuthorization(
-        connection: HttpURLConnection,
-        backendConfig: BackendConfig,
-        path: String
-    ) {
-        val accessToken = if (path.startsWith("/v1/")) {
-            accessTokenProvider().orEmpty()
-        } else {
-            ""
-        }
-        val bearerToken = accessToken.ifBlank { backendConfig.devToken.trim() }
-        if (bearerToken.isNotBlank()) {
-            connection.setRequestProperty("Authorization", "Bearer $bearerToken")
+    private fun executeBackendRequest(
+        path: String,
+        method: String,
+        config: BackendConfig,
+        bearerToken: String,
+        contentType: String? = null,
+        writeBody: ((OutputStream) -> Unit)? = null,
+        readTimeoutMs: Int = if (method == "GET") 15_000 else 60_000
+    ): BackendHttpResult {
+        val connection = URL(config.normalizedBaseUrl + path).openConnection() as HttpURLConnection
+        try {
+            connection.apply {
+                requestMethod = method
+                connectTimeout = if (method == "GET") 10_000 else 15_000
+                readTimeout = readTimeoutMs
+                if (bearerToken.isNotBlank()) {
+                    setRequestProperty("Authorization", "Bearer $bearerToken")
+                }
+                if (writeBody != null) {
+                    doOutput = true
+                    setRequestProperty("Content-Type", contentType)
+                }
+            }
+            if (writeBody != null) {
+                connection.outputStream.use(writeBody)
+            }
+            val statusCode = connection.responseCode
+            val stream = if (statusCode in 200..299) connection.inputStream else connection.errorStream
+            val responseText = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            return BackendHttpResult(statusCode = statusCode, responseText = responseText)
+        } finally {
+            connection.disconnect()
         }
     }
 
@@ -586,13 +581,6 @@ class NazhiBackendClient(
         val backendError = runCatching {
             json.decodeFromString<BackendErrorResponse>(responseText).error
         }.getOrNull()
-        if (statusCode == 401) {
-            return NazhiBackendException(
-                statusCode = statusCode,
-                code = "AUTH_SESSION_EXPIRED",
-                publicMessage = "登录已过期，请重新登录。"
-            )
-        }
         return NazhiBackendException(statusCode, backendError?.code, backendError.toPublicMessage(statusCode))
     }
 
@@ -604,25 +592,31 @@ class NazhiBackendClient(
         config: BackendConfig,
         requestId: String,
         input: List<EmbeddingInput>,
-        model: String
+        model: String,
+        type: String? = null
     ): EmbeddingResponse {
-        if (input.isEmpty()) {
-            throw NazhiBackendException(400, "INVALID_INPUT", "`input` must be a non-empty array.")
+        val embeddingType = resolveEmbeddingType(input, type)
+        val response = try {
+            if (config.vendor == AiVendor.MINIMAX) {
+                createMinimaxDirectEmbeddings(config, requestId, input, model, embeddingType)
+            } else {
+                createOpenAiCompatibleEmbeddings(config, requestId, input, model)
+            }
+        } catch (error: SerializationException) {
+            throw invalidEmbeddingResponse()
+        } catch (error: IllegalArgumentException) {
+            throw invalidEmbeddingResponse()
         }
-        return if (config.vendor == AiVendor.MINIMAX) {
-            createMinimaxDirectEmbeddings(config, requestId, input, model)
-        } else {
-            createOpenAiCompatibleEmbeddings(config, requestId, input, model)
-        }
+        return validateEmbeddingResponse(response, requestId, input)
     }
 
     private suspend fun createMinimaxDirectEmbeddings(
         config: BackendConfig,
         requestId: String,
         input: List<EmbeddingInput>,
-        model: String
+        model: String,
+        type: String
     ): EmbeddingResponse {
-        val type = if (input.all { it.metadata["type"] == "query" }) "query" else "db"
         val responseText = postDirectJson(
             config = config,
             path = "/embeddings",
@@ -647,10 +641,16 @@ class NazhiBackendClient(
             }
         }
         val vectors = payload["vectors"]?.jsonArray.orEmpty().map { vector ->
-            vector.jsonArray.map { value -> value.jsonPrimitive.floatOrNull ?: 0f }
+            vector.jsonArray.map { value ->
+                val primitive = value.jsonPrimitive
+                if (primitive.isString) {
+                    throw invalidEmbeddingResponse()
+                }
+                primitive.floatOrNull ?: throw invalidEmbeddingResponse()
+            }
         }
         if (vectors.size != input.size) {
-            throw NazhiBackendException(502, "DIRECT_API_EMBEDDING_SHAPE_UNSUPPORTED", "Embedding response shape does not match input.")
+            throw invalidEmbeddingResponse()
         }
         return EmbeddingResponse(
             requestId = requestId,
@@ -685,9 +685,12 @@ class NazhiBackendClient(
         )
         val payload = json.decodeFromString<OpenAiEmbeddingResponse>(responseText)
         val vectorsByIndex = payload.data.associateBy { it.index }
+        if (payload.data.size != input.size || vectorsByIndex.keys != input.indices.toSet()) {
+            throw invalidEmbeddingResponse()
+        }
         val items = input.mapIndexed { index, item ->
             val vector = vectorsByIndex[index]?.embedding
-                ?: throw NazhiBackendException(502, "DIRECT_API_EMBEDDING_SHAPE_UNSUPPORTED", "Embedding response shape does not match input.")
+                ?: throw invalidEmbeddingResponse()
             EmbeddingItem(
                 id = item.id,
                 embedding = vector,
@@ -701,6 +704,48 @@ class NazhiBackendClient(
             items = items
         )
     }
+
+    private fun resolveEmbeddingType(input: List<EmbeddingInput>, type: String?): String {
+        if (input.isEmpty() || input.any { it.id.isBlank() || it.text.isBlank() } ||
+            input.map { it.id }.toSet().size != input.size
+        ) {
+            throw NazhiBackendException(400, "INVALID_INPUT", "向量输入不能为空，ID 必须唯一。")
+        }
+        val declaredTypes = input.mapNotNull { it.metadata["type"] }
+        if ((type != null && type !in setOf("db", "query")) || declaredTypes.any { it !in setOf("db", "query") }) {
+            throw NazhiBackendException(400, "INVALID_EMBEDDING_TYPE", "向量用途必须为 db 或 query。")
+        }
+        val types = input.map { it.metadata["type"] ?: type ?: "db" }.toSet()
+        if (types.size != 1 || (type != null && types.single() != type)) {
+            throw NazhiBackendException(400, "MIXED_EMBEDDING_TYPES", "同一批向量输入必须使用一致的用途。")
+        }
+        return type ?: types.single()
+    }
+
+    private fun validateEmbeddingResponse(
+        response: EmbeddingResponse,
+        requestId: String,
+        input: List<EmbeddingInput>
+    ): EmbeddingResponse {
+        val expectedIds = input.map { it.id }.toSet()
+        val actualIds = response.items.map { it.id }
+        if (response.requestId != requestId || response.model.isBlank() || response.dimensions <= 0 ||
+            response.items.size != input.size || actualIds.toSet() != expectedIds ||
+            actualIds.toSet().size != actualIds.size || response.items.any { item ->
+                item.embedding.size != response.dimensions || item.embedding.any { !it.isFinite() } ||
+                    item.embedding.none { it != 0f }
+            }
+        ) {
+            throw invalidEmbeddingResponse()
+        }
+        return response
+    }
+
+    private fun invalidEmbeddingResponse(): NazhiBackendException = NazhiBackendException(
+        502,
+        "EMBEDDING_RESPONSE_INVALID",
+        "向量服务返回的数据无效，请重试或检查模型配置。"
+    )
 
     private suspend fun organizeNotesDirect(
         config: BackendConfig,
@@ -763,7 +808,10 @@ class NazhiBackendClient(
             messages = listOf(
                 DirectChatMessage(
                     role = "system",
-                    content = "你是纳知的个人知识库问答助手。只能基于用户提供的 contexts 回答。禁止输出 Markdown 或解释，只返回合法 JSON。"
+                    content = "你是纳知的个人知识库问答助手。只能基于用户提供的 contexts 回答，只返回合法 JSON。" +
+                        "quote 非空时必须逐字摘录对应来源的 title、summary 或 content，不能把转述写成原文；" +
+                        "概括来源且没有合适摘录时显式使用空字符串 quote，并在 reason 说明来源如何支持回答。" +
+                        "实质结论必须提供支持它的 citations；无法提供依据时明确说明当前知识库中没有足够信息，citations 为空数组。"
                 ),
                 DirectChatMessage(
                     role = "user",
@@ -780,18 +828,63 @@ class NazhiBackendClient(
             temperature = 0.2f,
             maxTokens = 1200
         )
-        val jsonText = extractJsonObject(content)
-        val parsed = json.decodeFromString<DirectKnowledgeChatPayload>(jsonText)
-        val allowedContextIds = contexts.map { it.id }.toSet()
+        val parsed = parseDirectKnowledgeChatContent(content)
+        val answer = parsed.answer.trim()
+        val contextsById = contexts.associateBy { it.id }
+        val citations = parsed.citations.map { citation ->
+            citation.copy(contextId = citation.contextId.trim(), quote = citation.quote.trim(), reason = citation.reason.trim())
+        }.filter { citation ->
+            val source = contextsById[citation.contextId] ?: return@filter false
+            val quote = normalizeDirectKnowledgeExcerpt(citation.quote)
+            quote.isEmpty() || listOf(source.title, source.summary, source.content).any {
+                normalizeDirectKnowledgeExcerpt(it).contains(quote)
+            }
+        }.take(5)
+        val insufficientKnowledge = Regex(
+            "没有足够|不足以|无法回答|知识不足|信息不足|insufficient (?:knowledge|information)|not enough (?:knowledge|information)",
+            RegexOption.IGNORE_CASE
+        ).containsMatchIn(answer)
+        if (citations.isEmpty() && !insufficientKnowledge) {
+            throw NazhiBackendException(502, "DIRECT_API_CHAT_UNGROUNDED", "模型回答缺少可验证的知识来源，请稍后重试。")
+        }
         return KnowledgeChatResponse(
             requestId = requestId,
-            answer = parsed.answer,
-            citations = parsed.citations.filter { it.contextId in allowedContextIds }.take(5),
+            answer = answer,
+            citations = citations,
             updatedMemoryDigest = parsed.updatedMemoryDigest.takeIf {
-                parsed.citations.any { citation -> citation.contextId in allowedContextIds }
-            }.orEmpty()
+                citations.isNotEmpty() && !insufficientKnowledge
+            }.orEmpty().trim().replace(Regex("\\s+"), " ").take(200)
         )
     }
+
+    private fun parseDirectKnowledgeChatContent(content: String): DirectKnowledgeChatPayload {
+        val cleaned = content.trim()
+            .replace(Regex("^(?:<think>[\\s\\S]*?</think>\\s*)+", RegexOption.IGNORE_CASE), "")
+            .trim()
+        val fenced = Regex("^```(?:json)?\\s*([\\s\\S]*?)\\s*```$", RegexOption.IGNORE_CASE)
+            .matchEntire(cleaned)?.groupValues?.get(1)
+        try {
+            val payload = json.parseToJsonElement(fenced ?: cleaned).jsonObject
+            fun JsonObject.hasString(key: String): Boolean =
+                (get(key) as? kotlinx.serialization.json.JsonPrimitive)?.isString == true
+            require(payload.hasString("answer") && payload.getValue("answer").jsonPrimitive.content.trim().isNotEmpty())
+            val citations = payload["citations"] as? JsonArray ?: throw IllegalArgumentException("Missing citations array")
+            require(citations.all { item ->
+                val citation = item as? JsonObject ?: return@all false
+                citation.hasString("contextId") && citation.getValue("contextId").jsonPrimitive.content.trim().isNotEmpty() &&
+                    citation.hasString("quote") && ("reason" !in citation || citation.hasString("reason"))
+            })
+            require("updatedMemoryDigest" !in payload || payload.hasString("updatedMemoryDigest"))
+            return json.decodeFromString<DirectKnowledgeChatPayload>(payload.toString())
+        } catch (_: SerializationException) {
+            throw NazhiBackendException(502, "DIRECT_API_CHAT_INVALID_RESPONSE", "模型未返回有效的知识问答结果，请稍后重试。")
+        } catch (_: IllegalArgumentException) {
+            throw NazhiBackendException(502, "DIRECT_API_CHAT_INVALID_RESPONSE", "模型未返回有效的知识问答结果，请稍后重试。")
+        }
+    }
+
+    private fun normalizeDirectKnowledgeExcerpt(value: String): String =
+        java.text.Normalizer.normalize(value, java.text.Normalizer.Form.NFKC).replace(Regex("\\s+"), "")
 
     private suspend fun rewriteQuestionDirect(
         config: BackendConfig,
@@ -913,38 +1006,38 @@ class NazhiBackendClient(
         }
         val endpoint = baseUrl + path
         val url = URL(buildDirectEndpoint(config, endpoint))
-        val connection = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            connectTimeout = 15_000
-            readTimeout = 60_000
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            setRequestProperty("Authorization", "Bearer $apiKey")
-        }
-        connection.outputStream.use { output ->
-            output.write(body.toByteArray(Charsets.UTF_8))
-        }
-
-        val statusCode = connection.responseCode
-        val responseText = try {
+        val connection = url.openConnection() as HttpURLConnection
+        try {
+            connection.apply {
+                requestMethod = "POST"
+                connectTimeout = 15_000
+                readTimeout = 60_000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                setRequestProperty("Authorization", "Bearer $apiKey")
+            }
+            connection.outputStream.use { output ->
+                output.write(body.toByteArray(Charsets.UTF_8))
+            }
+            val statusCode = connection.responseCode
             val stream = if (statusCode in 200..299) connection.inputStream else connection.errorStream
-            stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            val responseText = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            if (statusCode !in 200..299) {
+                val providerMessage = runCatching {
+                    val element = json.parseToJsonElement(responseText).jsonObject
+                    element["error"]?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull
+                        ?: element["message"]?.jsonPrimitive?.contentOrNull
+                }.getOrNull()
+                throw NazhiBackendException(
+                    statusCode,
+                    directApiErrorCode(statusCode),
+                    directApiPublicMessage(statusCode, capability, providerMessage)
+                )
+            }
+            responseText
         } finally {
             connection.disconnect()
         }
-        if (statusCode !in 200..299) {
-            val providerMessage = runCatching {
-                val element = json.parseToJsonElement(responseText).jsonObject
-                element["error"]?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull
-                    ?: element["message"]?.jsonPrimitive?.contentOrNull
-            }.getOrNull()
-            throw NazhiBackendException(
-                statusCode,
-                directApiErrorCode(statusCode),
-                directApiPublicMessage(statusCode, capability, providerMessage)
-            )
-        }
-        responseText
     }
 
     private fun directApiErrorCode(statusCode: Int): String {
@@ -1253,7 +1346,8 @@ data class EmbeddingInput(
 private data class EmbeddingRequest(
     val requestId: String,
     val model: String,
-    val input: List<EmbeddingInput>
+    val input: List<EmbeddingInput>,
+    val type: String = "db"
 )
 
 @Serializable

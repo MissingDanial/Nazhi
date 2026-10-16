@@ -16,6 +16,7 @@ import {
   handleKnowledgeChat,
   handleOrganizeNotes,
   handleRewriteQuestion,
+  handleTaskByRequestId,
   handleTaskStatus
 } from "./handlers.js";
 import { httpError, readJsonBody, readMultipartForm, sendJson } from "./http.js";
@@ -105,6 +106,17 @@ export async function route(request, response) {
       response,
       { auth, route: "v1.organize-notes.jobs", provider: config.chatProvider, requestId: body.requestId, statusCode: 202 },
       async () => handleCreateOrganizeNotesJob(body, auth)
+    );
+  }
+
+  if (request.method === "GET" && url.pathname.startsWith("/v1/tasks/by-request/")) {
+    const auth = await resolveApiAuth(request);
+    const requestId = decodeURIComponent(url.pathname.slice("/v1/tasks/by-request/".length));
+    const type = url.searchParams.get("type");
+    return sendLoggedJson(
+      response,
+      { auth, route: "v1.tasks.by-request", provider: null, requestId, statusCode: 200 },
+      async () => handleTaskByRequestId(requestId, type, auth)
     );
   }
 

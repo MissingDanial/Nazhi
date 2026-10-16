@@ -1,5 +1,7 @@
 # Gradle
 .gradle/
+.kotlin/
+.verification/
 build/
 **/build/
 gradle/gradle-daemon-jvm.properties

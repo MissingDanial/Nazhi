@@ -1,6 +1,7 @@
 package com.nazhi.app.core.database.entity
 
 import androidx.room.Entity
+import androidx.room.ColumnInfo
 import androidx.room.Index
 import androidx.room.PrimaryKey
 import com.nazhi.app.core.model.AudioTranscriptionJob
@@ -30,7 +31,8 @@ data class AudioTranscriptionJobEntity(
     val createdAt: Long,
     val createdDate: String,
     val updatedAt: Long,
-    val audioDeletedAt: Long?
+    val audioDeletedAt: Long?,
+    @ColumnInfo(defaultValue = "0") val requiresConfirmation: Boolean = false
 )
 
 fun AudioTranscriptionJobEntity.toModel(): AudioTranscriptionJob {
@@ -50,7 +52,8 @@ fun AudioTranscriptionJobEntity.toModel(): AudioTranscriptionJob {
         createdAt = createdAt,
         createdDate = createdDate,
         updatedAt = updatedAt,
-        audioDeletedAt = audioDeletedAt
+        audioDeletedAt = audioDeletedAt,
+        requiresConfirmation = requiresConfirmation
     )
 }
 
@@ -71,6 +74,7 @@ fun AudioTranscriptionJob.toEntity(): AudioTranscriptionJobEntity {
         createdAt = createdAt,
         createdDate = createdDate,
         updatedAt = updatedAt,
-        audioDeletedAt = audioDeletedAt
+        audioDeletedAt = audioDeletedAt,
+        requiresConfirmation = requiresConfirmation
     )
 }

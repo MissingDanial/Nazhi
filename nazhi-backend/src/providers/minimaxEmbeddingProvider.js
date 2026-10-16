@@ -8,21 +8,49 @@ export async function createMinimaxEmbeddings({ config, requestId, model, input,
   const endpoint = config.minimaxEmbeddingEndpoint || "https://api.minimaxi.com/v1/embeddings";
   const providerModel = model || config.minimaxEmbeddingModel || "embo-01";
   const dimensions = config.minimaxEmbeddingDim || 1536;
-
-  const response = await fetch(buildEmbeddingEndpoint(endpoint, config.minimaxGroupId), {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${config.minimaxEmbeddingApiKey}`,
-      "content-type": "application/json"
-    },
-    body: JSON.stringify({
-      texts: input.map(item => item.text),
-      model: providerModel,
-      type: type
-    })
+  const controller = new AbortController();
+  const timeoutMs = config.embeddingTimeoutMs ?? 30_000;
+  let timeoutId;
+  const deadline = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      const error = httpError(504, "MINIMAX_EMBEDDING_TIMEOUT", "MiniMax embedding request timed out.");
+      reject(error);
+      controller.abort(error);
+    }, timeoutMs);
   });
 
-  const payload = await response.json().catch(() => null);
+  let response;
+  let payload;
+  try {
+    ({ response, payload } = await Promise.race([
+      (async () => {
+        const response = await fetch(buildEmbeddingEndpoint(endpoint, config.minimaxGroupId), {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${config.minimaxEmbeddingApiKey}`,
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({
+            texts: input.map((item) => item.text),
+            model: providerModel,
+            type
+          }),
+          signal: controller.signal
+        });
+        const payload = await response.json().catch(() => null);
+        return { response, payload };
+      })(),
+      deadline
+    ]));
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw httpError(504, "MINIMAX_EMBEDDING_TIMEOUT", "MiniMax embedding request timed out.");
+    }
+    throw httpError(502, "MINIMAX_EMBEDDING_FAILED", "MiniMax embedding request failed.");
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
   if (payload?.base_resp && payload.base_resp.status_code !== 0) {
     throw httpError(
       502,
@@ -39,8 +67,15 @@ export async function createMinimaxEmbeddings({ config, requestId, model, input,
     );
   }
 
-  const vectors = payload?.vectors || [];
-  if (vectors.length !== input.length) {
+  const vectors = payload?.vectors;
+  if (
+    !Array.isArray(vectors) ||
+    vectors.length !== input.length ||
+    vectors.some((vector) =>
+      !Array.isArray(vector) || vector.length !== dimensions ||
+      vector.some((value) => typeof value !== "number" || !Number.isFinite(value))
+    )
+  ) {
     throw httpError(
       502,
       "MINIMAX_EMBEDDING_SHAPE_UNSUPPORTED",
@@ -50,6 +85,7 @@ export async function createMinimaxEmbeddings({ config, requestId, model, input,
 
   return {
     requestId,
+    provider: "minimax",
     model: providerModel,
     dimensions,
     items: input.map((item, index) => ({

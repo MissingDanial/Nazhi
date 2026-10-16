@@ -10,8 +10,11 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.AlertDialog
@@ -35,6 +38,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -58,8 +62,18 @@ import com.nazhi.app.core.export.LocalDataImportPreview
 import com.nazhi.app.core.export.LocalDataImportResult
 import com.nazhi.app.core.repository.NazhiRepository
 import com.nazhi.app.core.settings.BackendSettingsStore
+import com.nazhi.app.core.settings.BackupHistory
+import com.nazhi.app.core.settings.BackupHistoryStore
 import com.nazhi.app.FloatingCaptureService
+import java.io.File
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -68,7 +82,8 @@ fun SettingsRoute(
     repository: NazhiRepository,
     backendSettingsStore: BackendSettingsStore,
     authSessionStore: AuthSessionStore,
-    backendClient: NazhiBackendClient
+    backendClient: NazhiBackendClient,
+    backupHistoryStore: BackupHistoryStore? = null
 ) {
     val savedConfig by backendSettingsStore.settings.collectAsState(
         initial = backendSettingsStore.defaultConfig
@@ -77,6 +92,10 @@ fun SettingsRoute(
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
+    val effectiveBackupHistoryStore = remember(context, backupHistoryStore) {
+        backupHistoryStore ?: BackupHistoryStore(context)
+    }
+    val backupHistory by effectiveBackupHistoryStore.history.collectAsState(initial = null)
     var hasOverlayPermission by remember { mutableStateOf(context.hasOverlayPermission()) }
     var isFloatingCaptureRunning by remember { mutableStateOf(FloatingCaptureService.isRunning) }
     val overlayPermissionLauncher = rememberLauncherForActivityResult(
@@ -85,56 +104,130 @@ fun SettingsRoute(
         hasOverlayPermission = context.hasOverlayPermission()
         isFloatingCaptureRunning = FloatingCaptureService.isRunning
     }
-    var pendingExportText by remember { mutableStateOf<String?>(null) }
+    // A file path survives document-picker Activity recreation without putting a large JSON in Bundle.
+    var pendingExportPath by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingExportPhase by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingExportCount by rememberSaveable { mutableStateOf(0) }
+    var pendingExportedAt by rememberSaveable { mutableStateOf(0L) }
+    var isPreparingExport by remember { mutableStateOf(false) }
+    var isSelectingImport by rememberSaveable { mutableStateOf(false) }
+    var isReadingImport by remember { mutableStateOf(false) }
     var pendingImportText by remember { mutableStateOf<String?>(null) }
     var importPreview by remember { mutableStateOf<LocalDataImportPreview?>(null) }
     var importResult by remember { mutableStateOf<LocalDataImportResult?>(null) }
     var isImporting by remember { mutableStateOf(false) }
     var isReindexingAfterImport by remember { mutableStateOf(false) }
+    val isExporting = isPreparingExport || pendingExportPath != null
+    val isBackupBusy = isExporting || isSelectingImport || isReadingImport || isImporting || isReindexingAfterImport ||
+        importPreview != null || importResult != null
+    // A writer survives Activity rotation, but never process death. Cached files alone cannot
+    // distinguish those states; only the current process can vouch for an active writer.
+    LaunchedEffect(pendingExportPath, pendingExportPhase) {
+        val path = pendingExportPath ?: return@LaunchedEffect
+        when (BackupDocumentIO.pendingRecovery(path, pendingExportPhase)) {
+            BackupDocumentIO.PendingRecovery.WAIT_FOR_PICKER -> Unit
+            BackupDocumentIO.PendingRecovery.WAIT_FOR_WRITE -> {
+                while (BackupDocumentIO.isWriteActive(path)) delay(250)
+                if (pendingExportPath == path) {
+                    pendingExportPath = null
+                    pendingExportPhase = null
+                }
+            }
+            BackupDocumentIO.PendingRecovery.INTERRUPTED -> {
+                pendingExportPath = null
+                pendingExportPhase = null
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar("上次备份未能确认完成，请重新导出")
+                }
+            }
+            BackupDocumentIO.PendingRecovery.NONE -> Unit
+        }
+    }
     val exportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
     ) { uri ->
-        val exportText = pendingExportText
-        if (uri == null || exportText == null) {
-            pendingExportText = null
+        val stagedFile = pendingExportPath?.let(::File)
+        if (uri == null || stagedFile == null) {
+            stagedFile?.delete()
+            pendingExportPath = null
+            pendingExportPhase = null
             return@rememberLauncherForActivityResult
         }
-        coroutineScope.launch {
-            val message = runCatching {
-                withContext(Dispatchers.IO) {
-                    context.writeTextToUri(uri, exportText)
+        val exportCount = pendingExportCount
+        val exportedAt = pendingExportedAt
+        if (!BackupDocumentIO.registerWrite(stagedFile.absolutePath)) return@rememberLauncherForActivityResult
+        pendingExportPhase = BackupDocumentIO.PHASE_WRITING
+        val exportJob = coroutineScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            val message = try {
+                val (written, historySaved) = withContext(NonCancellable + Dispatchers.IO) {
+                    try {
+                        val written = BackupDocumentIO.writeDocument(context, uri, stagedFile)
+                        val historySaved = try {
+                            effectiveBackupHistoryStore.recordSuccessfulExport(
+                                recordCount = exportCount,
+                                snapshotAt = exportedAt,
+                                fileVerified = written.readBackVerified
+                            )
+                            true
+                        } catch (_: Exception) {
+                            false
+                        }
+                        written to historySaved
+                    } finally {
+                        stagedFile.delete()
+                        BackupDocumentIO.unregisterWrite(stagedFile.absolutePath)
+                    }
                 }
-                "本地数据已导出"
-            }.getOrElse { error ->
+                when {
+                    !written.readBackVerified -> "备份已保存；该位置不支持读取核验，请尝试导入检查"
+                    !historySaved -> "备份已保存并核验，最近备份时间未能记录"
+                    else -> "备份已保存，文件内容核验通过"
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
                 "导出失败：${error.message ?: "无法写入文件"}"
+            } finally {
+                withContext(NonCancellable) {
+                    pendingExportPath = null
+                    pendingExportPhase = null
+                }
             }
-            pendingExportText = null
             snackbarHostState.showSnackbar(message)
         }
+        exportJob.invokeOnCompletion { BackupDocumentIO.unregisterWrite(stagedFile.absolutePath) }
     }
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri == null) {
+            isSelectingImport = false
             return@rememberLauncherForActivityResult
         }
         coroutineScope.launch {
+            isSelectingImport = false
+            isReadingImport = true
             val importText = runCatching {
                 withContext(Dispatchers.IO) {
-                    context.readTextFromUri(uri)
+                    BackupDocumentIO.readDocument(context, uri)
                 }
             }.getOrElse { error ->
+                isReadingImport = false
+                if (error is CancellationException) throw error
                 snackbarHostState.showSnackbar("导入失败：${error.message ?: "无法读取文件"}")
                 return@launch
             }
             val preview = runCatching {
                 repository.previewLocalDataImportJson(importText)
             }.getOrElse { error ->
+                isReadingImport = false
+                if (error is CancellationException) throw error
                 snackbarHostState.showSnackbar("导入失败：${error.message ?: "文件格式不支持"}")
                 return@launch
             }
             pendingImportText = importText
             importPreview = preview
+            isReadingImport = false
         }
     }
     var baseUrl by remember { mutableStateOf(savedConfig.baseUrl) }
@@ -189,6 +282,9 @@ fun SettingsRoute(
         isDirty = isDirty,
         isTesting = isTesting,
         isImporting = isImporting,
+        isExporting = isExporting,
+        isBackupBusy = isBackupBusy,
+        backupHistory = backupHistory,
         connectionResult = connectionResult,
         authSession = authSession,
         isAuthSubmitting = isAuthSubmitting,
@@ -271,19 +367,41 @@ fun SettingsRoute(
             showClearDirectApiDialog = true
         },
         onExportLocalData = {
-            coroutineScope.launch {
-                val exportText = runCatching {
-                    repository.buildLocalDataExportJson()
-                }.getOrElse { error ->
+            if (!isBackupBusy) coroutineScope.launch {
+                isPreparingExport = true
+                try {
+                    val exportText = repository.buildLocalDataExportJson()
+                    val exportPreview = repository.previewLocalDataImportJson(exportText)
+                    val stagedFile = withContext(Dispatchers.IO) {
+                        BackupDocumentIO.stageExport(context, exportText)
+                    }
+                    pendingExportPath = stagedFile.absolutePath
+                    pendingExportPhase = BackupDocumentIO.PHASE_PICKER
+                    pendingExportCount = exportPreview.totalCount
+                    pendingExportedAt = exportPreview.exportedAt
+                    exportLauncher.launch("nazhi-export-${System.currentTimeMillis()}.json")
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    pendingExportPath?.let { File(it).delete() }
+                    pendingExportPath = null
+                    pendingExportPhase = null
                     snackbarHostState.showSnackbar("导出失败：${error.message ?: "无法读取本地数据"}")
-                    return@launch
+                } finally {
+                    isPreparingExport = false
                 }
-                pendingExportText = exportText
-                exportLauncher.launch("nazhi-export-${System.currentTimeMillis()}.json")
             }
         },
         onImportLocalData = {
-            importLauncher.launch(arrayOf("application/json", "text/*", "application/octet-stream"))
+            if (!isBackupBusy) {
+                isSelectingImport = true
+                try {
+                    importLauncher.launch(arrayOf("application/json", "text/*", "application/octet-stream"))
+                } catch (error: Exception) {
+                    isSelectingImport = false
+                    coroutineScope.launch { snackbarHostState.showSnackbar("无法打开文件选择器：${error.message.orEmpty()}") }
+                }
+            }
         },
         onRequestOverlayPermission = {
             overlayPermissionLauncher.launch(context.overlayPermissionIntent())
@@ -515,8 +633,31 @@ fun SettingsRoute(
             },
             title = { Text(text = "确认导入本地数据") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(
+                    modifier = Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     Text(text = preview.toPreviewText())
+                    preview.errors.take(20).forEach { message ->
+                        Text(text = message, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error)
+                    }
+                    if (preview.errors.size > 20) {
+                        Text(text = "另有 ${preview.errors.size - 20} 项检查问题，请选择完整备份文件重新检查。",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
+                    if (preview.conflictCount > 0) {
+                        Text(text = "以下记录与本机内容冲突，将保留本机修改并跳过备份记录：",
+                            style = MaterialTheme.typography.bodySmall)
+                        preview.conflicts.take(20).forEach { message ->
+                            Text(text = message, style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if (preview.conflicts.size > 20) {
+                            Text(text = "另有 ${preview.conflicts.size - 20} 条冲突记录，均保留本机内容并跳过。",
+                                style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
                     preview.warnings.forEach { warning ->
                         Text(
                             text = warning,
@@ -528,7 +669,7 @@ fun SettingsRoute(
             },
             confirmButton = {
                 TextButton(
-                    enabled = !isImporting,
+                    enabled = !isImporting && preview.canImport,
                     onClick = {
                         coroutineScope.launch {
                             isImporting = true
@@ -536,6 +677,7 @@ fun SettingsRoute(
                                 repository.importLocalDataJson(importText)
                             }.getOrElse { error ->
                                 isImporting = false
+                                if (error is CancellationException) throw error
                                 snackbarHostState.showSnackbar("导入失败：${error.message ?: "无法写入本地数据库"}")
                                 return@launch
                             }
@@ -547,7 +689,7 @@ fun SettingsRoute(
                         }
                     }
                 ) {
-                    Text(text = if (isImporting) "导入中" else "导入")
+                    Text(text = if (isImporting) "导入中" else if (preview.canImport) "确认恢复" else "无法恢复")
                 }
             },
             dismissButton = {
@@ -643,6 +785,9 @@ private fun SettingsScreen(
     isDirty: Boolean,
     isTesting: Boolean,
     isImporting: Boolean,
+    isExporting: Boolean,
+    isBackupBusy: Boolean,
+    backupHistory: BackupHistory?,
     connectionResult: ConnectionResult?,
     authSession: AuthSession?,
     isAuthSubmitting: Boolean,
@@ -771,6 +916,9 @@ private fun SettingsScreen(
             item {
                 LocalDataExportCard(
                     isImporting = isImporting,
+                    isExporting = isExporting,
+                    isBusy = isBackupBusy,
+                    backupHistory = backupHistory,
                     onExportLocalData = onExportLocalData,
                     onImportLocalData = onImportLocalData
                 )
@@ -1610,6 +1758,9 @@ private fun FloatingCaptureCard(
 @Composable
 private fun LocalDataExportCard(
     isImporting: Boolean,
+    isExporting: Boolean,
+    isBusy: Boolean,
+    backupHistory: BackupHistory?,
     onExportLocalData: () -> Unit,
     onImportLocalData: () -> Unit
 ) {
@@ -1624,23 +1775,38 @@ private fun LocalDataExportCard(
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "导出或导入 Note、KnowledgeEntry、AI 草稿和问答记录，便于换机、备份或检查。",
+                text = "备份笔记、知识条目、AI 草稿、问答记录与引用，便于换机或恢复。",
                 style = MaterialTheme.typography.bodyMedium
             )
             Text(
-                text = "导入导出都不会处理 API Key、服务 Token、后端配置或本地问答能力数据；同 ID 数据导入时会跳过。",
+                text = "不包含录音原文件、待确认转写、未完成任务身份、复习记录、API Key、登录凭据、服务配置和检索向量。恢复不会覆盖本机已有修改。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Text(
+                text = backupHistory?.let { history ->
+                    "最近成功备份：${history.exportedAt.toBackupTimeLabel()}\n内容截至 ${history.snapshotAt.toBackupTimeLabel()}，共 ${history.recordCount} 条记录；此后新增或修改的内容需要重新备份。"
+                } ?: "尚无成功备份记录。请将文件保存在手机以外的位置，并妥善保管个人内容。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (backupHistory?.fileVerified == false) {
+                Text(
+                    text = "上次保存位置不支持读取核验；可选择该备份导入，检查通过后再确认恢复。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             OutlinedButton(
                 onClick = onExportLocalData,
+                enabled = !isBusy,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text(text = "导出本地数据")
+                Text(text = if (isExporting) "导出中" else "导出本地数据")
             }
             Button(
                 onClick = onImportLocalData,
-                enabled = !isImporting,
+                enabled = !isBusy,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(text = if (isImporting) "导入中" else "导入本地数据")
@@ -1828,19 +1994,30 @@ private fun Throwable.toUserMessage(): String {
 }
 
 private fun LocalDataImportPreview.toPreviewText(): String {
+    val integrityLabel = when {
+        integrityVerified -> "备份完整性校验通过"
+        schemaVersion in 1..2 && canImport -> "旧备份未带校验；已检查记录格式和关联关系"
+        schemaVersion in 1..2 -> "旧备份未带校验，记录检查未通过"
+        else -> "备份完整性检查未通过"
+    }
     return """
-        将导入 schemaVersion=$schemaVersion 的纳知数据：
-        Note：$noteCount
+        $integrityLabel
+        笔记：$noteCount
         知识条目：$knowledgeEntryCount
         AI 草稿：$knowledgeDraftCount
         问答会话：$chatSessionCount
         问答消息：$chatMessageCount
         问答引用：$chatCitationCount
+
+        可新增：$newCount
+        已有且相同：$unchangedCount
+        冲突跳过：$conflictCount
+        ${if (canImport) "确认后仅新增可恢复的记录。" else "备份检查未通过，无法导入；本机数据不会更改。"}
     """.trimIndent()
 }
 
 private fun LocalDataImportResult.toImportMessage(): String {
-    return "导入完成：新增 $insertedCount，跳过 $skippedCount，处理失败 $failedCount"
+    return "恢复完成：新增 $insertedCount，跳过 $skippedCount，已核对 $verifiedCount 条记录"
 }
 
 private fun LocalDataImportResult.toResultText(): String {
@@ -1848,7 +2025,10 @@ private fun LocalDataImportResult.toResultText(): String {
         新增：$insertedCount
         跳过：$skippedCount
         处理失败：$failedCount
+        冲突保留本机：$conflictCount
+        已核对：$verifiedCount
         新增知识条目：${knowledgeEntries.insertedCount}
+        $verificationMessage
     """.trimIndent()
 }
 
@@ -1856,17 +2036,8 @@ private fun LocalDataImportResult.shouldOfferIndexRebuild(): Boolean {
     return knowledgeEntries.insertedCount > 0
 }
 
-private fun Context.readTextFromUri(uri: Uri): String {
-    return contentResolver.openInputStream(uri)?.use { input ->
-        input.readBytes().toString(Charsets.UTF_8)
-    } ?: error("无法打开导入文件")
-}
-
-private fun Context.writeTextToUri(uri: Uri, text: String) {
-    contentResolver.openOutputStream(uri)?.use { output ->
-        output.write(text.toByteArray(Charsets.UTF_8))
-    } ?: error("无法打开导出文件")
-}
+private fun Long.toBackupTimeLabel(): String = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+    .withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(this))
 
 private fun Context.hasOverlayPermission(): Boolean {
     return AndroidSettings.canDrawOverlays(this)

@@ -18,19 +18,17 @@ import androidx.core.content.ContextCompat
 import com.nazhi.app.core.audio.PlaybackAudioRecorder
 import com.nazhi.app.core.audio.RecordedAudio
 import com.nazhi.app.core.audio.WavAudioRecorder
-import com.nazhi.app.core.capture.CaptureSaveResult
-import com.nazhi.app.core.capture.saveCapturedText
-import com.nazhi.app.core.capture.toToastMessage
 import com.nazhi.app.core.model.AudioTranscriptionJob
 import com.nazhi.app.core.model.AudioTranscriptionJobStatus
-import com.nazhi.app.core.model.SourceType
-import com.nazhi.app.core.network.NazhiBackendException
 import com.nazhi.app.core.util.toLocalDateId
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -105,13 +103,12 @@ class AudioTranscriptionService : Service() {
                         audio.file.delete()
                         fail("没有录到有效声音")
                     } else {
-                        val persistedAudio = persistAudioForRetry(audio, AudioCaptureMode.MICROPHONE)
-                        activeAudio = persistedAudio
-                        val job = createLocalAudioJob(persistedAudio, AudioCaptureMode.MICROPHONE)
-                        processAudio(persistedAudio, AudioCaptureMode.MICROPHONE, job.id)
+                        val job = persistLocalAudioJob(audio, AudioCaptureMode.MICROPHONE)
+                        processAudio(job.id)
                     }
                 },
                 onFailure = { error ->
+                    if (error is CancellationException) throw error
                     fail(error.message ?: "录音失败")
                 }
             )
@@ -168,14 +165,13 @@ class AudioTranscriptionService : Service() {
                             fail("没有捕获到有效系统音频，当前 App 可能不允许音频捕获")
                         }
                         else -> {
-                            val persistedAudio = persistAudioForRetry(audio, AudioCaptureMode.SYSTEM_AUDIO)
-                            activeAudio = persistedAudio
-                            val job = createLocalAudioJob(persistedAudio, AudioCaptureMode.SYSTEM_AUDIO)
-                            processAudio(persistedAudio, AudioCaptureMode.SYSTEM_AUDIO, job.id)
+                            val job = persistLocalAudioJob(audio, AudioCaptureMode.SYSTEM_AUDIO)
+                            processAudio(job.id)
                         }
                     }
                 },
                 onFailure = { error ->
+                    if (error is CancellationException) throw error
                     fail(error.message ?: "系统音频录制失败")
                 }
             )
@@ -209,8 +205,9 @@ class AudioTranscriptionService : Service() {
     }
 
     private fun cancelRecording() {
+        recordingJob?.cancel()
         cancelActiveRecorder()
-        activeAudio?.file?.delete()
+        deleteOnlyCachedAudio()
         activeAudio = null
         updateState(AudioFloatingState.IDLE, "", floatingStatusMs = 0)
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -293,13 +290,7 @@ class AudioTranscriptionService : Service() {
             reachedLimit = false
         )
         activeAudio = audio
-        return processAudio(
-            audio = audio,
-            mode = mode,
-            localJobId = job.id,
-            retryIncrement = 1,
-            stopWhenFinished = false
-        )
+        return processAudio(job.id, stopWhenFinished = false)
     }
 
     private fun persistAudioForRetry(audio: RecordedAudio, mode: AudioCaptureMode): RecordedAudio {
@@ -307,11 +298,21 @@ class AudioTranscriptionService : Service() {
         if (audio.file.parentFile?.absolutePath == outputDir.absolutePath) {
             return audio
         }
-        val target = File(outputDir, "nazhi-${mode.backendSource}-${System.currentTimeMillis()}.wav")
-        audio.file.copyTo(target, overwrite = true)
-        audio.file.delete()
+        val target = File(outputDir, "nazhi-${mode.backendSource}-${UUID.randomUUID()}.wav")
+        audio.file.copyTo(target, overwrite = false)
         return audio.copy(file = target)
     }
+
+    private suspend fun persistLocalAudioJob(audio: RecordedAudio, mode: AudioCaptureMode): AudioTranscriptionJob =
+        withContext(NonCancellable) {
+            val persisted = withContext(Dispatchers.IO) { persistAudioForRetry(audio, mode) }
+            activeAudio = persisted
+            val job = createLocalAudioJob(persisted, mode)
+            if (audio.file.absolutePath != persisted.file.absolutePath) {
+                withContext(Dispatchers.IO) { audio.file.delete() }
+            }
+            job
+        }
 
     private suspend fun createLocalAudioJob(
         audio: RecordedAudio,
@@ -335,137 +336,43 @@ class AudioTranscriptionService : Service() {
     }
 
     private suspend fun processAudio(
-        audio: RecordedAudio,
-        mode: AudioCaptureMode,
         localJobId: String,
-        retryIncrement: Int = 0,
         stopWhenFinished: Boolean = true
     ): Boolean {
         val appContainer = (application as NazhiApp).appContainer
-        val startedAt = System.currentTimeMillis()
-        appContainer.repository.updateAudioTranscriptionJobStatus(
-            id = localJobId,
-            status = AudioTranscriptionJobStatus.UPLOADING,
-            errorMessage = null,
-            retryIncrement = retryIncrement,
-            lastTriedAt = startedAt,
-            updatedAt = startedAt
-        )
-        updateState(
-            AudioFloatingState.UPLOADING,
-            if (audio.reachedLimit) "已达到 15 分钟上限，正在上传" else mode.uploadingText(),
-            floatingStatusMs = 1600
-        )
-        updateNotification(statusText)
-        val createdTask = runCatching {
-            appContainer.backendClient.createAudioTranscriptionJob(
-                audioFile = audio.file,
-                durationMs = audio.durationMs,
-                source = mode.backendSource
-            )
-        }.getOrElse { error ->
-            failTranscription(localJobId, error.toAudioUserMessage(), stopWhenFinished)
+        val job = try {
+            appContainer.audioTaskProcessor.submit(localJobId) { message ->
+                updateState(AudioFloatingState.TRANSCRIBING, message)
+                updateNotification(message)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            failTranscription(localJobId, error.message ?: "音频处理失败，录音已保留", stopWhenFinished)
             return false
         }
-
-        var currentTask = createdTask
-        repeat(90) {
-            if (currentTask.status == "SUCCEEDED") {
-                val text = currentTask.result?.text.orEmpty().trim()
-                if (text.isBlank()) {
-                    failTranscription(localJobId, "转写结果为空", stopWhenFinished)
-                    return false
-                } else {
-                    return saveTranscript(text, audio, localJobId, stopWhenFinished)
-                }
-            }
-            if (currentTask.status == "FAILED") {
-                failTranscription(
-                    localJobId,
-                    currentTask.error.toAudioTaskMessage(currentTask.message.ifBlank { "处理失败" }),
-                    stopWhenFinished
-                )
-                return false
-            }
-            appContainer.repository.updateAudioTranscriptionJobStatus(
-                id = localJobId,
-                status = AudioTranscriptionJobStatus.TRANSCRIBING,
-                updatedAt = System.currentTimeMillis()
-            )
-            updateState(
-                AudioFloatingState.TRANSCRIBING,
-                currentTask.message.ifBlank { "音频转写中" }
-            )
-            updateNotification(statusText)
-            delay(1500)
-            currentTask = runCatching {
-                appContainer.backendClient.getAudioTranscriptionJob(currentTask.taskId)
-            }.getOrElse { error ->
-                failTranscription(localJobId, error.toAudioUserMessage(), stopWhenFinished)
-                return false
-            }
-        }
-        failTranscription(localJobId, "转写超时，请稍后重试", stopWhenFinished)
-        return false
-    }
-
-    private suspend fun saveTranscript(
-        text: String,
-        audio: RecordedAudio,
-        localJobId: String,
-        stopWhenDone: Boolean
-    ): Boolean {
-        updateState(AudioFloatingState.SAVING, "正在加入今日收件箱")
-        updateNotification(statusText)
-        val repository = (application as NazhiApp).appContainer.repository
-        val saveResult = runCatching {
-            saveCapturedText(
-                repository = repository,
-                rawText = text,
-                sourceType = SourceType.AUDIO_TRANSCRIPTION,
-                sourceApp = activeMode.sourceApp,
-                title = activeMode.noteTitle(audio.durationMs),
-                audioDurationMs = audio.durationMs
-            )
-        }.getOrElse {
-            null
-        }
         activeAudio = null
-        if (saveResult is CaptureSaveResult.Saved) {
-            repository.markAudioTranscriptionJobSaved(
-                id = localJobId,
-                noteId = saveResult.noteId,
-                transcriptText = text,
-                updatedAt = System.currentTimeMillis()
-            )
-        } else {
-            repository.updateAudioTranscriptionJobStatus(
-                id = localJobId,
-                status = AudioTranscriptionJobStatus.FAILED,
-                errorMessage = saveResult?.toToastMessage(emptyMessage = "转写文本为空，未保存")
-                    ?: "保存失败，请稍后重试",
-                updatedAt = System.currentTimeMillis()
-            )
+        val saved = job.status == AudioTranscriptionJobStatus.SAVED ||
+            job.status == AudioTranscriptionJobStatus.READY_TO_SAVE
+        val message = when (job.status) {
+            AudioTranscriptionJobStatus.SAVED -> "音频已加入今日收件箱"
+            AudioTranscriptionJobStatus.READY_TO_SAVE -> "转写已完成，请在收件箱预览并确认"
+            else -> job.errorMessage ?: "音频已暂存，请稍后重试"
         }
-        val userMessage = when (saveResult) {
-            is CaptureSaveResult.Saved -> "音频已加入今日收件箱"
-            null -> "保存失败，请稍后重试"
-            else -> saveResult.toToastMessage(emptyMessage = "转写文本为空，未保存")
-        }
-        updateState(AudioFloatingState.SAVED, userMessage, floatingStatusMs = 2200)
-        updateNotification(userMessage)
-        Toast.makeText(this, userMessage, Toast.LENGTH_SHORT).show()
-        if (stopWhenDone) {
-            delay(2600)
+        updateState(if (saved) AudioFloatingState.SAVED else AudioFloatingState.FAILED, message, 2200)
+        updateNotification(message)
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+        if (stopWhenFinished) {
+            delay(2400)
             updateState(AudioFloatingState.IDLE, "", floatingStatusMs = 0)
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
-        return saveResult is CaptureSaveResult.Saved
+        return saved
     }
 
     private fun fail(message: String) {
-        activeAudio?.file?.delete()
+        deleteOnlyCachedAudio()
         activeAudio = null
         updateState(AudioFloatingState.FAILED, message, floatingStatusMs = 2200)
         updateNotification(message)
@@ -476,6 +383,11 @@ class AudioTranscriptionService : Service() {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
+    }
+
+    private fun deleteOnlyCachedAudio() {
+        val file = activeAudio?.file ?: return
+        if (file.parentFile?.absolutePath == File(cacheDir, "audio_transcriptions").absolutePath) file.delete()
     }
 
     private suspend fun failTranscription(
@@ -733,50 +645,6 @@ private fun RecordedAudio.isLikelySilentSystemAudio(): Boolean {
 private const val MIN_SYSTEM_AUDIO_DURATION_MS = 800L
 private const val MIN_SYSTEM_AUDIO_RMS = 25.0
 private const val MIN_SYSTEM_AUDIO_PEAK = 200
-
-private fun Throwable.toAudioUserMessage(): String {
-    if (this is NazhiBackendException && (statusCode == 401 || code == "UNAUTHORIZED")) {
-        return "后端鉴权失败，请在设置页检查服务访问 Token。"
-    }
-    if (this is NazhiBackendException) {
-        return code.toAudioErrorMessage(publicMessage)
-    }
-    val raw = message.orEmpty()
-    return when {
-        raw.contains("Failed to connect", ignoreCase = true) -> "无法连接后端，请检查服务器地址和网络。"
-        raw.contains("timeout", ignoreCase = true) || raw.contains("timed out", ignoreCase = true) -> {
-            "转写请求超时，请稍后重试。"
-        }
-        raw.contains("401", ignoreCase = true) -> "后端鉴权失败，请检查服务 Token。"
-        raw.isNotBlank() -> raw
-        else -> "处理失败，请稍后重试。"
-    }
-}
-
-private fun com.nazhi.app.core.network.BackendTaskError?.toAudioTaskMessage(fallback: String): String {
-    return this?.code.toAudioErrorMessage(this?.message ?: fallback)
-}
-
-private fun String?.toAudioErrorMessage(fallback: String): String {
-    return when (this) {
-        "XFYUN_NOT_CONFIGURED" -> "服务器未配置科大讯飞语音服务，请检查 XFYUN_APP_ID / XFYUN_API_KEY / XFYUN_API_SECRET。"
-        "WEBSOCKET_UNAVAILABLE" -> "服务器 Node.js 运行时不支持短音频 WebSocket，请升级 Node.js 或改用长音频转写。"
-        "EMPTY_AUDIO" -> "录音文件为空，请重新录制。"
-        "EMPTY_TRANSCRIPT" -> "语音识别结果为空，请确认录音内容清晰后重试。"
-        "ASR_TIMEOUT" -> "语音转写超时，请稍后重试。"
-        "XFYUN_IAT_FAILED",
-        "XFYUN_IAT_CLOSED" -> "科大讯飞短音频识别失败，请稍后重试。"
-        "XFYUN_UPLOAD_FAILED",
-        "XFYUN_UPLOAD_SHAPE_UNSUPPORTED" -> "科大讯飞长音频上传失败，请稍后重试。"
-        "XFYUN_CREATE_TASK_FAILED",
-        "XFYUN_CREATE_TASK_SHAPE_UNSUPPORTED" -> "科大讯飞长音频任务创建失败，请检查服务开通状态。"
-        "XFYUN_QUERY_TASK_FAILED",
-        "XFYUN_TASK_FAILED" -> "科大讯飞长音频转写失败，请稍后重试。"
-        "XFYUN_HTTP_FAILED" -> "科大讯飞语音服务请求失败，请检查密钥、服务额度或控制台权限。"
-        "UNSUPPORTED_ASR_PROVIDER" -> "服务器配置了不支持的语音服务商。"
-        else -> fallback
-    }
-}
 
 private fun AudioFloatingState.defaultStatusText(): String {
     return when (this) {

@@ -113,27 +113,21 @@ export async function knowledgeChatWithMinimax({
   });
 
   const content = extractText(payload);
-  const parsed = parseKnowledgeChatFromText(
-    content,
-    contexts.map((context) => context.id)
-  );
-  const citations = parsed.citations.length
-    ? parsed.citations
-    : fallbackCitations(parsed.answer, contexts);
+  const parsed = parseKnowledgeChatFromText(content, contexts);
 
   logProviderResult({
     route: "knowledge-chat",
     requestId,
     elapsedMs,
-    itemCount: citations.length,
-    fallback: parsed.citations.length === 0 && citations.length > 0
+    itemCount: parsed.citations.length,
+    fallback: false
   });
 
   return {
     requestId,
     answer: parsed.answer,
-    citations,
-    updatedMemoryDigest: parsed.citations.length ? parsed.updatedMemoryDigest : "",
+    citations: parsed.citations,
+    updatedMemoryDigest: parsed.updatedMemoryDigest,
     usage: normalizeUsage(payload?.usage)
   };
 }
@@ -237,14 +231,19 @@ async function postChatCompletion({ endpoint, apiKey, body }) {
       body: JSON.stringify(body),
       signal: controller.signal
     });
-    const payload = await response.json().catch(() => null);
+    const payload = await response.json().catch((error) => {
+      if (error?.name === "SyntaxError") {
+        return null;
+      }
+      throw error;
+    });
     return {
       response,
       payload,
       elapsedMs: Date.now() - startedAt
     };
   } catch (error) {
-    if (error?.name === "AbortError") {
+    if (controller.signal.aborted || error?.name === "AbortError") {
       throw httpError(504, "MINIMAX_CHAT_TIMEOUT", "AI 请求超时，请稍后重试。");
     }
     throw httpError(502, "MINIMAX_CHAT_UNAVAILABLE", "AI 服务连接失败，请稍后重试。");
@@ -274,17 +273,6 @@ function isUnsupportedResponseFormat(payload) {
     message.includes("response_format") &&
     (message.includes("unsupported") || message.includes("unknown") || message.includes("invalid"))
   );
-}
-
-function fallbackCitations(answer, contexts) {
-  if (!answer || /没有足够|不足以|无法回答/.test(answer)) {
-    return [];
-  }
-  return contexts.slice(0, 2).map((context) => ({
-    contextId: context.id,
-    quote: (context.summary || context.content || context.title || "").slice(0, 120),
-    reason: "该条目是本次回答使用的本地检索上下文。"
-  }));
 }
 
 function logProviderResult({ route, requestId, elapsedMs, itemCount, fallback }) {

@@ -27,6 +27,9 @@ interface ChatCitationDao {
     @Query("SELECT * FROM chat_citations WHERE messageId = :messageId ORDER BY createdAt ASC")
     suspend fun getCitationsForMessage(messageId: String): List<ChatCitationEntity>
 
+    @Query("DELETE FROM chat_citations WHERE messageId = :messageId")
+    suspend fun deleteForMessage(messageId: String)
+
     @Upsert
     suspend fun upsert(citation: ChatCitationEntity)
 
