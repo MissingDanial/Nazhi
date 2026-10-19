@@ -2,7 +2,7 @@
 
 Lightweight Node.js backend proxy for Nazhi AI features.
 
-The backend is intentionally small for V1: it proxies MiniMax embedding/chat calls, validates request shape, and returns Android-friendly JSON. It does not own the user's long-term knowledge base; Android keeps notes, knowledge entries, embeddings, and local retrieval state.
+The backend proxies AI requests, provides account authentication and owner-scoped async jobs, and returns Android-friendly JSON. Android keeps notes, knowledge entries, embeddings, and local retrieval state.
 
 For the full API contract, see [API.md](./API.md).
 
@@ -17,8 +17,10 @@ For the full API contract, see [API.md](./API.md).
 ## Run Locally
 
 ```powershell
-cd C:\Users\Administrator.BF-202003301653\Desktop\codes\self_knowledge\nazhi-backend
+cd nazhi-backend
+npm ci
 Copy-Item .env.example .env
+# Edit .env before starting; for mock-only development, leave DATABASE_URL and REDIS_URL empty.
 npm run dev
 ```
 
@@ -27,6 +29,8 @@ Default URL:
 ```text
 http://localhost:8787
 ```
+
+The sample uses mock AI providers. For account-free local testing, keep `NAZHI_DEV_TOKEN`, cancel the Android login dialog, and set the app's service access token to the same value. Real AI and account setup are described below.
 
 ## Commands
 
@@ -73,6 +77,8 @@ Authorization: Bearer <NAZHI_DEV_TOKEN>
 
 Apply the PostgreSQL migration before using `/v2/auth/*`:
 
+Set `$env:DATABASE_URL` to your configured database connection first; `psql` does not load `.env` automatically. The Node.js service loads `.env` from the backend working directory.
+
 ```powershell
 psql $env:DATABASE_URL -f migrations/001_auth.sql
 psql $env:DATABASE_URL -f migrations/002_api_call_events.sql
@@ -91,7 +97,7 @@ REFRESH_TOKEN_TTL_DAYS=30
 Install dependencies after pulling V2 changes:
 
 ```powershell
-npm install
+npm ci
 ```
 
 ## Provider Setup
