@@ -40,19 +40,27 @@ object LocalEmbeddingEngine {
         return vector
     }
 
+    fun decodeCompatibleVector(blob: ByteArray, dimensions: Int, queryDimensions: Int): FloatArray? {
+        if (dimensions <= 0 || dimensions != queryDimensions ||
+            blob.size.toLong() != dimensions.toLong() * Float.SIZE_BYTES
+        ) {
+            return null
+        }
+        val vector = fromBlob(blob)
+        return vector.takeIf { values -> values.all { it.isFinite() } && values.any { it != 0f } }
+    }
+
     fun dot(left: FloatArray, right: FloatArray): Float {
-        val size = minOf(left.size, right.size)
+        require(left.size == right.size) { "Embedding dimensions must match." }
         var sum = 0f
-        for (index in 0 until size) {
+        for (index in left.indices) {
             sum += left[index] * right[index]
         }
         return sum
     }
 
     fun norm(vector: FloatArray): Float {
-        var sum = 0f
-        vector.forEach { value -> sum += value * value }
-        return sqrt(sum)
+        return magnitude(vector).toFloat()
     }
 
     fun textHash(text: String): String {
@@ -62,10 +70,16 @@ object LocalEmbeddingEngine {
     }
 
     fun normalize(vector: FloatArray): FloatArray {
-        val norm = norm(vector)
-        if (norm == 0f) {
+        val norm = magnitude(vector)
+        if (norm == 0.0) {
             return vector
         }
-        return FloatArray(vector.size) { index -> vector[index] / norm }
+        return FloatArray(vector.size) { index -> (vector[index].toDouble() / norm).toFloat() }
+    }
+
+    private fun magnitude(vector: FloatArray): Double {
+        var sum = 0.0
+        vector.forEach { value -> sum += value.toDouble() * value.toDouble() }
+        return sqrt(sum)
     }
 }

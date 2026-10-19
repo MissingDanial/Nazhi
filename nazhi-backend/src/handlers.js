@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import { httpError } from "./http.js";
 import { createMinimaxEmbeddings } from "./providers/minimaxEmbeddingProvider.js";
@@ -9,17 +9,18 @@ import { knowledgeChatMock, normalizeKnowledgeChatContexts } from "./services/kn
 import { organizeNotesMock } from "./services/organizeNotes.js";
 import { rewriteQuestionMock } from "./services/questionRewrite.js";
 import { buildAsrResult } from "./services/asrText.js";
-import { completeTask, createTask, failTask, getTask, updateTask } from "./services/tasks.js";
+import { completeTask, createOrGetTask, failTask, getTask, getTaskByRequestId, updateTask } from "./services/tasks.js";
 
 export async function handleEmbeddings(body) {
   validateEmbeddingRequest(body);
+  const type = resolveEmbeddingType(body);
 
   const requestId = body.requestId || randomUUID();
   const model = body.model || config.embeddingModel;
   const input = body.input;
 
   if (config.embeddingProvider === "minimax") {
-    return createMinimaxEmbeddings({ config, requestId, model, input });
+    return createMinimaxEmbeddings({ config, requestId, model, input, type });
   }
 
   if (config.embeddingProvider !== "mock") {
@@ -29,7 +30,8 @@ export async function handleEmbeddings(body) {
   const dimensions = config.embeddingDimensions;
   return {
     requestId,
-    model,
+    provider: "mock",
+    model: "mock-bow-v1",
     dimensions,
     items: input.map((item) => ({
       id: item.id,
@@ -57,21 +59,22 @@ export async function handleOrganizeNotes(body) {
 export async function handleCreateOrganizeNotesJob(body, auth) {
   validateOrganizeRequest(body);
 
-  const requestId = body.requestId || randomUUID();
+  const requestId = resolveTaskRequestId(body.requestId);
   const date = body.date;
   const language = body.language || "zh-CN";
   const notes = body.notes;
   const options = body.options || {};
-  const task = createTask({
+  const { task, created } = createOrGetTask({
     requestId,
     type: "ORGANIZE_NOTES",
     stage: "ACCEPTED",
     progress: 5,
     message: "已提交 AI 整理任务",
-    auth
+    auth,
+    payloadFingerprint: fingerprintPayload({ date, language, notes, options })
   });
 
-  runOrganizeNotesJob({
+  if (created) runOrganizeNotesJob({
     taskId: task.taskId,
     requestId,
     date,
@@ -91,24 +94,42 @@ export function handleTaskStatus(taskId, auth) {
   return task;
 }
 
+export function handleTaskByRequestId(requestId, type, auth) {
+  validateTaskRequestId(requestId);
+  if (type !== "ORGANIZE_NOTES" && type !== "AUDIO_TRANSCRIPTION") {
+    throw httpError(400, "INVALID_TASK_TYPE", "Task `type` must be ORGANIZE_NOTES or AUDIO_TRANSCRIPTION.");
+  }
+  const task = getTaskByRequestId(requestId, type, auth);
+  if (!task) {
+    throw httpError(404, "TASK_NOT_FOUND", "Task not found or expired.");
+  }
+  return task;
+}
+
 export async function handleCreateAudioTranscriptionJob(form, auth) {
-  const requestId = form.fields.requestId || randomUUID();
+  const requestId = resolveTaskRequestId(form.fields.requestId);
   const durationMs = Number(form.fields.durationMs || 0);
   const language = form.fields.language || "zh-CN";
   const source = form.fields.source || "unknown";
   const audio = form.files.audio;
   validateAudioTranscriptionRequest({ audio, durationMs });
 
-  const task = createTask({
+  const { task, created } = createOrGetTask({
     requestId,
     type: "AUDIO_TRANSCRIPTION",
     stage: "ACCEPTED",
     progress: 5,
     message: "已提交录音转写任务",
-    auth
+    auth,
+    payloadFingerprint: fingerprintPayload({
+      durationMs,
+      language,
+      source,
+      audioSha256: createHash("sha256").update(audio.data).digest("hex")
+    })
   });
 
-  runAudioTranscriptionJob({
+  if (created) runAudioTranscriptionJob({
     taskId: task.taskId,
     requestId,
     audio,
@@ -118,6 +139,30 @@ export async function handleCreateAudioTranscriptionJob(form, auth) {
   });
 
   return task;
+}
+
+function fingerprintPayload(payload) {
+  return createHash("sha256").update(JSON.stringify(canonicalize(payload))).digest("hex");
+}
+
+function resolveTaskRequestId(requestId) {
+  if (requestId === undefined) return randomUUID();
+  validateTaskRequestId(requestId);
+  return requestId;
+}
+
+function validateTaskRequestId(requestId) {
+  if (typeof requestId !== "string" || !requestId.trim() || requestId.length > 200) {
+    throw httpError(400, "INVALID_REQUEST_ID", "Task `requestId` must be a non-empty string of at most 200 characters.");
+  }
+}
+
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalize(value[key])]));
+  }
+  return value;
 }
 
 export function handleAudioTranscriptionTaskStatus(taskId, auth) {
@@ -336,7 +381,7 @@ export async function handleRewriteQuestion(body) {
 }
 
 function validateEmbeddingRequest(body) {
-  if (!Array.isArray(body.input) || body.input.length === 0) {
+  if (!Array.isArray(body?.input) || body.input.length === 0) {
     throw httpError(400, "INVALID_INPUT", "`input` must be a non-empty array.");
   }
   for (const item of body.input) {
@@ -344,6 +389,27 @@ function validateEmbeddingRequest(body) {
       throw httpError(400, "INVALID_INPUT_ITEM", "Each input item needs `id` and `text`.");
     }
   }
+}
+
+function resolveEmbeddingType(body) {
+  const isSupportedType = (type) => type === "db" || type === "query";
+  if (body.type !== undefined && !isSupportedType(body.type)) {
+    throw httpError(400, "INVALID_EMBEDDING_TYPE", "Embedding `type` must be `db` or `query`.");
+  }
+  const types = body.input.map((item) => {
+    const metadataType = item.metadata?.type;
+    if (metadataType !== undefined && !isSupportedType(metadataType)) {
+      throw httpError(400, "INVALID_EMBEDDING_TYPE", "Embedding metadata `type` must be `db` or `query`.");
+    }
+    if (body.type !== undefined && metadataType !== undefined && metadataType !== body.type) {
+      throw httpError(400, "MIXED_EMBEDDING_TYPES", "All embedding input items must share the request purpose.");
+    }
+    return metadataType ?? body.type ?? "db";
+  });
+  if (types.some((type) => type !== types[0])) {
+    throw httpError(400, "MIXED_EMBEDDING_TYPES", "Query and database embeddings must be submitted separately.");
+  }
+  return types[0];
 }
 
 function validateOrganizeRequest(body) {

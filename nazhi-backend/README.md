@@ -1,4 +1,4 @@
-# Nazhi Backend
+# Nazhi Backend V2.1
 
 Lightweight Node.js backend proxy for Nazhi AI features.
 
@@ -8,7 +8,7 @@ For the full API contract, see [API.md](./API.md).
 
 ## Requirements
 
-- Node.js >= 20
+- Node.js >= 22 (the short-audio provider uses the built-in WebSocket)
 - PostgreSQL for V2 account data
 - Redis for V2 auth rate limiting and short-lived auth state
 - A `.env` file based on `.env.example`
@@ -148,8 +148,15 @@ Expected ASR smoke test:
 ## Runtime Behavior
 
 - Chat requests have a 45 second server-side timeout and return `MINIMAX_CHAT_TIMEOUT` on timeout.
+- Embedding requests, including response-body reads, default to 30 seconds (`EMBEDDING_TIMEOUT_MS`) and return `MINIMAX_EMBEDDING_TIMEOUT` on timeout.
+- Long ASR defaults to 30 seconds per request (`ASR_REQUEST_TIMEOUT_MS`) and 240 seconds for the whole task (`ASR_TASK_TIMEOUT_MS`). Timeout errors are `ASR_REQUEST_TIMEOUT` or `ASR_TIMEOUT`.
 - AI organize supports async jobs so Android can show progress instead of waiting on a blank loading state.
 - Async task state is in memory only; after backend restart Android should allow retry.
 - Async task status is scoped by auth owner: user-token tasks can only be read by the same user, while development-token tasks stay in the development lane.
-- Knowledge chat citations are constrained to context IDs supplied by Android.
+- Organize/audio job creation is idempotent for the same auth mode, user, task type and `requestId`. Repeating an identical payload returns the original task; changing the payload returns `409 IDEMPOTENCY_CONFLICT`. Explicitly retrying a failed task needs a new request ID.
+- `GET /v1/tasks/by-request/:requestId?type=ORGANIZE_NOTES|AUDIO_TRANSCRIPTION` recovers an accepted job after a lost creation response. The request ID must be URL encoded. Lookup is owner scoped and never starts a model call.
+- Running jobs are never evicted by TTL or capacity trimming. When all 100 slots are running, new jobs return `429 TASK_CAPACITY_REACHED` before invoking a provider. Terminal jobs can expire after 30 minutes or be removed under capacity pressure. Task identities and results still do not survive a server restart.
+- Knowledge chat requires valid JSON and model-supplied citations. Unknown source IDs and fabricated excerpts are rejected; no citations are synthesized. Empty excerpts are allowed as explicit source pointers for paraphrases. Answers without valid sources return `MINIMAX_CHAT_UNGROUNDED`, except explicit insufficient-knowledge responses, which return an empty memory digest and do not add unsupported conclusions to conversation memory.
+- Embedding requests accept `type=db|query`. Legacy query metadata remains supported; mixed or conflicting purposes return 400. Vectors must match the configured dimension and contain finite numbers. Mock responses use `model=mock-bow-v1`, independently of a requested real model.
+- Historical mock vectors already labeled as a real model must be reindexed before using that real model. Their provenance cannot be recovered automatically from the old records.
 - API call logs are written to `auth.api_call_events` when `DATABASE_URL` and the migration are available. Logs include route, auth mode, user id, request id, provider, status, latency and error code; they do not store note content, prompts, answers, audio, API keys or bearer tokens.

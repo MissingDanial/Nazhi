@@ -19,7 +19,8 @@ export const config = {
   authRegisterMaxAttempts: readNumber("AUTH_REGISTER_MAX_ATTEMPTS", 5),
   embeddingProvider: readString("EMBEDDING_PROVIDER", "mock"),
   embeddingModel: readString("EMBEDDING_MODEL", "embo-01"),
-  embeddingDimensions: readNumber("EMBEDDING_DIMENSIONS", 1536),
+  embeddingDimensions: readPositiveNumber("EMBEDDING_DIMENSIONS", 1536),
+  embeddingTimeoutMs: readPositiveNumber("EMBEDDING_TIMEOUT_MS", 30_000),
   chatProvider: readString("CHAT_PROVIDER", "mock"),
   chatModel: readString("CHAT_MODEL", "MiniMax-M2.7-highspeed"),
   minimaxApiKey: readString("MINIMAX_API", readString("MINIMAX_API_KEY", "")),
@@ -30,13 +31,15 @@ export const config = {
   minimaxGroupId: readString("MINIMAX_GROUP_ID", ""),
   minimaxEmbeddingEndpoint: readString("MINIMAX_EMBEDDING_ENDPOINT", "https://api.minimaxi.com/v1/embeddings"),
   minimaxEmbeddingModel: readString("MINIMAX_EMBEDDING_MODEL", "embo-01"),
-  minimaxEmbeddingDim: readNumber("MINIMAX_EMBEDDING_DIM", 1536),
+  minimaxEmbeddingDim: readPositiveNumber("MINIMAX_EMBEDDING_DIM", 1536),
   minimaxChatEndpoint: readString("MINIMAX_CHAT_ENDPOINT", "https://api.minimaxi.com/v1/chat/completions"),
   minimaxChatModel: readString("MINIMAX_CHAT_MODEL", "MiniMax-M2.7-highspeed"),
   minimaxJsonMode: readBoolean("MINIMAX_JSON_MODE", false),
   asrProvider: readString("ASR_PROVIDER", "mock"),
   asrMaxDurationMs: readNumber("ASR_MAX_DURATION_MS", 15 * 60 * 1000),
   asrShortThresholdMs: readNumber("ASR_SHORT_THRESHOLD_MS", 58 * 1000),
+  asrRequestTimeoutMs: readPositiveNumber("ASR_REQUEST_TIMEOUT_MS", 30_000),
+  asrTaskTimeoutMs: readPositiveNumber("ASR_TASK_TIMEOUT_MS", 240_000),
   xfyunAppId: readString("XFYUN_APP_ID", readString("APPID", "")),
   xfyunApiKey: readString("XFYUN_API_KEY", readString("APIKey", "")),
   xfyunApiSecret: readString("XFYUN_API_SECRET", readString("APISecret", "")),
@@ -61,6 +64,11 @@ function readBoolean(name, fallback) {
     return fallback;
   }
   return ["1", "true", "yes", "on"].includes(value);
+}
+
+function readPositiveNumber(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
 function loadEnvFile(envPath) {

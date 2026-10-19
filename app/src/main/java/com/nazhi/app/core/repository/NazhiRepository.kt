@@ -17,6 +17,7 @@ import com.nazhi.app.core.model.KnowledgeEntry
 import com.nazhi.app.core.model.KnowledgeEntryDraft
 import com.nazhi.app.core.model.Note
 import com.nazhi.app.core.model.NoteStatus
+import com.nazhi.app.core.model.PersistedAiTask
 import com.nazhi.app.core.model.ReviewSession
 import com.nazhi.app.core.model.SemanticSearchResult
 import kotlinx.coroutines.flow.Flow
@@ -77,6 +78,22 @@ interface NazhiRepository {
         date: String,
         onProgress: (AiTaskProgress) -> Unit = {}
     ): Int
+
+    fun observePersistedAiTasksForDate(date: String): Flow<List<PersistedAiTask>>
+
+    suspend fun getPersistedAiTask(id: String): PersistedAiTask?
+
+    suspend fun savePersistedAiTask(task: PersistedAiTask)
+
+    suspend fun getRecoverableAiTasks(): List<PersistedAiTask>
+
+    /** Queries an existing request only; this never submits a new model request. */
+    suspend fun recoverOrganizeTask(
+        task: PersistedAiTask,
+        onProgress: (AiTaskProgress) -> Unit = {}
+    ): Int
+
+    suspend fun normalizeInterruptedOperations()
 
     suspend fun updateKnowledgeDraft(draft: KnowledgeEntryDraft)
 
@@ -150,6 +167,14 @@ interface NazhiRepository {
     suspend fun getRetryableAudioTranscriptionJobs(): List<AudioTranscriptionJob>
 
     suspend fun saveAudioTranscriptionJob(job: AudioTranscriptionJob)
+
+    /** Commits the transcript and task result together, saving a note for automatic captures. */
+    suspend fun storeAudioTranscript(jobId: String, text: String): AudioTranscriptionJob
+
+    /** Confirms an editable preview exactly once, including its note and job state. */
+    suspend fun confirmAudioTranscript(jobId: String, text: String): Note
+
+    suspend fun updateAudioTranscriptPreview(jobId: String, text: String)
 
     suspend fun updateAudioTranscriptionJobStatus(
         id: String,

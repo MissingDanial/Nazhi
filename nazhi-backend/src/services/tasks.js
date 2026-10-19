@@ -1,11 +1,26 @@
 import { randomUUID } from "node:crypto";
+import { httpError } from "../http.js";
 
 const TASK_TTL_MS = 30 * 60 * 1000;
 const MAX_TASKS = 100;
 const tasks = new Map();
 
-export function createTask({ requestId, type, stage, progress, message, auth }) {
+export function createTask(options) {
+  return createOrGetTask(options).task;
+}
+
+export function createOrGetTask({ requestId, type, stage, progress, message, auth, payloadFingerprint }) {
   cleanupTasks();
+
+  const existing = findTaskByRequestId(requestId, type, auth);
+  if (existing) {
+    if (existing.payloadFingerprint !== payloadFingerprint) {
+      throw httpError(409, "IDEMPOTENCY_CONFLICT", "This request ID was already used with different input.");
+    }
+    return { task: publicTask(existing), created: false };
+  }
+
+  ensureTaskCapacity();
 
   const now = Date.now();
   const task = {
@@ -20,11 +35,11 @@ export function createTask({ requestId, type, stage, progress, message, auth }) 
     updatedAt: now,
     result: null,
     error: null,
+    payloadFingerprint,
     owner: normalizeTaskOwner(auth)
   };
   tasks.set(task.taskId, task);
-  trimTasks();
-  return publicTask(task);
+  return { task: publicTask(task), created: true };
 }
 
 export function getTask(taskId, auth) {
@@ -34,6 +49,18 @@ export function getTask(taskId, auth) {
     return null;
   }
   return task ? publicTask(task) : null;
+}
+
+export function getTaskByRequestId(requestId, type, auth) {
+  cleanupTasks();
+  const task = findTaskByRequestId(requestId, type, auth);
+  return task ? publicTask(task) : null;
+}
+
+function findTaskByRequestId(requestId, type, auth) {
+  return [...tasks.values()].find((task) =>
+    task.requestId === requestId && task.type === type && canAccessTask(task, auth)
+  );
 }
 
 export function updateTask(taskId, patch) {
@@ -104,44 +131,38 @@ function publicTask(task) {
 }
 
 function normalizeTaskOwner(auth) {
-  if (!auth) {
-    return null;
-  }
   return {
-    authMode: auth.mode || "unknown",
-    userId: auth.userId || null
+    authMode: auth?.mode || "unknown",
+    userId: auth?.userId || null
   };
 }
 
 function canAccessTask(task, auth) {
-  if (!task.owner) {
-    return true;
-  }
-  const ownerUserId = task.owner.userId || null;
-  const authUserId = auth?.userId || null;
-  if (ownerUserId || authUserId) {
-    return Boolean(ownerUserId && authUserId && ownerUserId === authUserId);
-  }
-  return true;
+  const requester = normalizeTaskOwner(auth);
+  return task.owner.authMode === requester.authMode && task.owner.userId === requester.userId;
 }
 
 function cleanupTasks() {
   const cutoff = Date.now() - TASK_TTL_MS;
   for (const [taskId, task] of tasks) {
-    if (task.updatedAt < cutoff) {
+    if (task.status !== "RUNNING" && task.updatedAt < cutoff) {
       tasks.delete(taskId);
     }
   }
 }
 
-function trimTasks() {
-  if (tasks.size <= MAX_TASKS) {
+function ensureTaskCapacity() {
+  if (tasks.size < MAX_TASKS) {
     return;
   }
   const removable = [...tasks.entries()]
+    .filter(([, task]) => task.status !== "RUNNING")
     .sort((left, right) => left[1].updatedAt - right[1].updatedAt)
-    .slice(0, tasks.size - MAX_TASKS);
+    .slice(0, tasks.size - MAX_TASKS + 1);
   for (const [taskId] of removable) {
     tasks.delete(taskId);
+  }
+  if (tasks.size >= MAX_TASKS) {
+    throw httpError(429, "TASK_CAPACITY_REACHED", "Task capacity is reached. Please wait for running tasks to finish.");
   }
 }

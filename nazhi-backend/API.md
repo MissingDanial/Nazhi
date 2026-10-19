@@ -65,6 +65,10 @@ Authorization: Bearer <NAZHI_DEV_TOKEN>
 - `INVALID_INPUT` / `INVALID_NOTES` / `INVALID_CONTEXTS`：请求字段不符合接口要求。
 - `TASK_NOT_FOUND`：异步任务不存在或已过期。
 - `MINIMAX_CHAT_TIMEOUT`：Chat 模型调用超时。
+- `MINIMAX_CHAT_INVALID_RESPONSE`：模型没有返回合法的问答 JSON 或字段结构。
+- `MINIMAX_CHAT_UNGROUNDED`：实质回答没有有效的模型来源引用；不会自动补引用。
+- `MINIMAX_EMBEDDING_TIMEOUT`：向量请求或响应体读取超时。
+- `ASR_REQUEST_TIMEOUT` / `ASR_TIMEOUT`：长音频的单次请求或整体任务超时。
 - `NOT_FOUND`：路由不存在。
 
 ## GET /health
@@ -182,6 +186,9 @@ MiniMax provider 约定：
 
 - 建库文本使用 `model=embo-01` 和 `type=db`。
 - 查询文本使用 `model=embo-01` 和 `type=query`。
+- `type` 放在请求顶层；兼容旧客户端的 `input[].metadata.type`。省略用途的旧建库请求默认 `db`，混合或冲突用途返回 400。
+- 返回向量必须数量匹配、维度一致且为有限数值；无效厂商响应返回 `MINIMAX_EMBEDDING_SHAPE_UNSUPPORTED`。
+- mock 响应固定返回 `provider=mock`、`model=mock-bow-v1`，真实响应返回 `provider=minimax`，避免将模拟向量作为真实模型索引。
 - 当前向量维度为 1536。
 - 如果 Chat 和 Embedding 使用不同套餐或 Key，应使用 `MINIMAX_EMBEDDING_API` 独立配置 Embedding。
 
@@ -549,6 +556,19 @@ V1.1 支持同一会话内的轻量记忆。记忆只作为追问消解和上下
 - Android 使用 `retrievalQuery` 做 embedding 和本地向量检索。
 - `confidence < 0.55` 时，Android 可回退到本地规则。
 - `isFollowUp=false` 时，Android 不传 `sessionMemory` 和 `previousCitationIds` 给最终问答。
+
+## V2.1 任务恢复与去重
+
+整理与音频异步创建接口可携带 `requestId`（音频为 multipart 表单字段）。提供时必须为非空字符串，最多 200 字符。Android 在上传前保存稳定请求 ID；同一鉴权模式、用户、任务类型和 ID 的相同输入重复提交返回原任务和原结果，不再调用模型；输入不同返回 `409 IDEMPOTENCY_CONFLICT`。失败后的新一次模型调用需使用新 ID。
+
+```http
+GET /v1/tasks/by-request/{URL编码的requestId}?type=ORGANIZE_NOTES
+GET /v1/tasks/by-request/{URL编码的requestId}?type=AUDIO_TRANSCRIPTION
+```
+
+成功返回 `200`，JSON 与对应任务查询接口一致；不存在或归属不匹配返回 `404 TASK_NOT_FOUND`；缺失或不支持的类型返回 `400 INVALID_TASK_TYPE`。查询只读取原任务，不会创建或恢复模型调用。
+
+运行中任务不受容量与 TTL 清理；100 个槽位全部运行时，新提交返回 `429 TASK_CAPACITY_REACHED`，不会启动模型。完成任务保留 30 分钟，容量压力下可能提前删除。任务存储仍在内存中，后端重启会丢失；客户端保留原始输入，提示用户手动重试。
 
 ## 环境变量
 

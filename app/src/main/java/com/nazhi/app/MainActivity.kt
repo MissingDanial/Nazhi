@@ -42,6 +42,8 @@ class MainActivity : ComponentActivity() {
                     backendClient = appContainer.backendClient,
                     knowledgeIngestionCoordinator = appContainer.knowledgeIngestionCoordinator,
                     knowledgeChatCoordinator = appContainer.knowledgeChatCoordinator,
+                    pendingTaskStore = appContainer.pendingTaskStore,
+                    backupHistoryStore = appContainer.backupHistoryStore,
                     initialShareText = sharedText,
                     initialShareSource = sharedSource,
                     onShareConsumed = {
@@ -66,6 +68,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        (application as NazhiApp).appContainer.taskRecoveryCoordinator.requestRecovery()
         syncOverlayPermissionState()
     }
 

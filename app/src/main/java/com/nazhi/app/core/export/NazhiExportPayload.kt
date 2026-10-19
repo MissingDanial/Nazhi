@@ -26,15 +26,22 @@ data class NazhiExportPayload(
     val knowledgeDrafts: List<ExportKnowledgeDraft>,
     val chatSessions: List<ExportChatSession>,
     val chatMessages: List<ExportChatMessage>,
-    val chatCitations: List<ExportChatCitation>
+    val chatCitations: List<ExportChatCitation>,
+    val integrity: ExportIntegrity? = null
 )
+
+@Serializable
+data class ExportIntegrity(val algorithm: String = "SHA-256", val digest: String)
 
 @Serializable
 data class ExportSafety(
     val excludesApiKeys: Boolean = true,
     val excludesTokens: Boolean = true,
     val excludesBackendSettings: Boolean = true,
-    val excludesEmbeddingVectors: Boolean = true
+    val excludesEmbeddingVectors: Boolean = true,
+    val excludesAudio: Boolean = true,
+    val excludesPendingAiTasks: Boolean = true,
+    val excludesReviewSessions: Boolean = true
 )
 
 data class LocalDataImportPreview(
@@ -46,8 +53,15 @@ data class LocalDataImportPreview(
     val chatSessionCount: Int,
     val chatMessageCount: Int,
     val chatCitationCount: Int,
-    val warnings: List<String>
+    val warnings: List<String>,
+    val newCount: Int = 0,
+    val unchangedCount: Int = 0,
+    val conflictCount: Int = 0,
+    val conflicts: List<String> = emptyList(),
+    val errors: List<String> = emptyList(),
+    val integrityVerified: Boolean = false
 ) {
+    val canImport: Boolean get() = errors.isEmpty()
     val totalCount: Int
         get() = noteCount +
             knowledgeEntryCount +
@@ -63,7 +77,10 @@ data class LocalDataImportResult(
     val knowledgeDrafts: ImportEntityResult,
     val chatSessions: ImportEntityResult,
     val chatMessages: ImportEntityResult,
-    val chatCitations: ImportEntityResult
+    val chatCitations: ImportEntityResult,
+    val verifiedCount: Int = 0,
+    val conflictCount: Int = 0,
+    val verificationMessage: String = ""
 ) {
     val insertedCount: Int
         get() = notes.insertedCount +
@@ -291,28 +308,26 @@ fun ExportNote.toImportedNote(): Note {
         id = id,
         content = content,
         title = title,
-        sourceType = enumValueOrDefault(sourceType, SourceType.MANUAL),
+        sourceType = enumValueOf<SourceType>(sourceType),
         sourceApp = sourceApp,
         sourceUrl = sourceUrl,
         audioDurationMs = audioDurationMs,
         createdAt = createdAt,
         createdDate = createdDate,
         updatedAt = updatedAt,
-        status = enumValueOrDefault(status, NoteStatus.INBOX),
+        status = enumValueOf<NoteStatus>(status),
         userRemark = userRemark
     )
 }
 
 fun ExportKnowledgeEntry.toImportedKnowledgeEntry(): KnowledgeEntry {
-    val resolvedNoteId = noteId.ifBlank { sourceNoteIds.firstOrNull().orEmpty() }
-    val resolvedSourceNoteIds = (listOf(resolvedNoteId) + sourceNoteIds)
-        .filter { it.isNotBlank() }
-        .distinct()
+    val resolvedNoteId = noteId
+    val resolvedSourceNoteIds = sourceNoteIds.ifEmpty { listOf(resolvedNoteId) }
     return KnowledgeEntry(
         id = id,
         noteId = resolvedNoteId,
         content = content,
-        intentType = enumValueOrDefault(intentType, IntentType.INSPIRATION),
+        intentType = enumValueOf<IntentType>(intentType),
         userTitle = userTitle,
         userRemark = userRemark,
         createdAt = createdAt,
@@ -320,7 +335,7 @@ fun ExportKnowledgeEntry.toImportedKnowledgeEntry(): KnowledgeEntry {
         confirmedAt = confirmedAt,
         confirmedDate = confirmedDate,
         summary = summary,
-        tags = tags.filter { it.isNotBlank() },
+        tags = tags,
         sourceNoteIds = resolvedSourceNoteIds,
         indexStatus = KnowledgeIndexStatus.PENDING
     )
@@ -333,14 +348,14 @@ fun ExportKnowledgeDraft.toImportedKnowledgeDraft(): KnowledgeEntryDraft {
         title = title,
         summary = summary,
         content = content,
-        intentType = enumValueOrDefault(intentType, IntentType.INSPIRATION),
-        tags = tags.filter { it.isNotBlank() },
-        sourceNoteIds = sourceNoteIds.filter { it.isNotBlank() },
-        evidenceQuotes = evidenceQuotes.filter { it.isNotBlank() },
+        intentType = enumValueOf<IntentType>(intentType),
+        tags = tags,
+        sourceNoteIds = sourceNoteIds,
+        evidenceQuotes = evidenceQuotes,
         insight = insight,
-        confidence = confidence.coerceIn(0f, 1f),
+        confidence = confidence,
         needsReview = needsReview,
-        status = enumValueOrDefault(status, KnowledgeDraftStatus.PENDING),
+        status = enumValueOf<KnowledgeDraftStatus>(status),
         createdAt = createdAt,
         updatedAt = updatedAt
     )
@@ -363,11 +378,11 @@ fun ExportChatMessage.toImportedChatMessage(): ChatMessage {
         id = id,
         sessionId = sessionId,
         parentMessageId = parentMessageId,
-        role = enumValueOrDefault(role, ChatRole.USER),
+        role = enumValueOf<ChatRole>(role),
         content = content,
-        status = enumValueOrDefault(status, ChatMessageStatus.DONE),
+        status = enumValueOf<ChatMessageStatus>(status),
         errorMessage = errorMessage,
-        attempt = attempt.coerceAtLeast(1),
+        attempt = attempt,
         progressStage = progressStage,
         errorCode = errorCode,
         createdAt = createdAt,
@@ -380,14 +395,10 @@ fun ExportChatCitation.toImportedChatCitation(): ChatCitation {
         id = id,
         messageId = messageId,
         knowledgeEntryId = knowledgeEntryId,
-        sourceNoteIds = sourceNoteIds.filter { it.isNotBlank() },
+        sourceNoteIds = sourceNoteIds,
         quote = quote,
         reason = reason,
         score = score,
         createdAt = createdAt
     )
-}
-
-private inline fun <reified T : Enum<T>> enumValueOrDefault(rawValue: String, defaultValue: T): T {
-    return runCatching { enumValueOf<T>(rawValue) }.getOrDefault(defaultValue)
 }

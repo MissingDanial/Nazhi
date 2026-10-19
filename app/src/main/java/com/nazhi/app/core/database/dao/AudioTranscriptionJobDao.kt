@@ -8,6 +8,9 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface AudioTranscriptionJobDao {
+    @Query("SELECT * FROM audio_transcription_jobs ORDER BY createdAt ASC")
+    suspend fun getJobs(): List<AudioTranscriptionJobEntity>
+
     @Query("SELECT * FROM audio_transcription_jobs WHERE createdDate = :date ORDER BY createdAt DESC")
     fun observeJobsForDate(date: String): Flow<List<AudioTranscriptionJobEntity>>
 

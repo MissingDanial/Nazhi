@@ -16,7 +16,8 @@ data class AudioTranscriptionJob(
     val createdAt: Long,
     val createdDate: String,
     val updatedAt: Long,
-    val audioDeletedAt: Long? = null
+    val audioDeletedAt: Long? = null,
+    val requiresConfirmation: Boolean = false
 ) {
     val canRetry: Boolean
         get() = status == AudioTranscriptionJobStatus.PENDING ||
@@ -31,6 +32,7 @@ enum class AudioTranscriptionJobStatus {
     UPLOADING,
     TRANSCRIBING,
     FAILED,
+    READY_TO_SAVE,
     SAVED,
     AUDIO_CLEANED
 }

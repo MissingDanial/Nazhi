@@ -8,6 +8,9 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface ChatMessageDao {
+    @Query("SELECT * FROM chat_messages ORDER BY createdAt ASC, id ASC")
+    fun observeAll(): Flow<List<ChatMessageEntity>>
+
     @Query("SELECT * FROM chat_messages WHERE sessionId = :sessionId ORDER BY createdAt ASC")
     fun observeMessagesForSession(sessionId: String): Flow<List<ChatMessageEntity>>
 

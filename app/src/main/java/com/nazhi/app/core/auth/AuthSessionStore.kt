@@ -19,8 +19,6 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 
 private val Context.authSessionDataStore: DataStore<Preferences> by preferencesDataStore(
     name = "auth_session"
@@ -29,7 +27,13 @@ private val Context.authSessionDataStore: DataStore<Preferences> by preferencesD
 class AuthSessionStore(context: Context) {
     private val dataStore = context.authSessionDataStore
     private val encryptedSettingsStore = EncryptedSettingsStore(context)
-    private val refreshMutex = Mutex()
+    private val sessionRefresher by lazy {
+        AuthSessionRefresher(
+            currentSession = { session.first() },
+            saveSession = { save(it) },
+            expireSession = { clearExpiredSession() }
+        )
+    }
     private val _events = MutableSharedFlow<AuthSessionEvent>(extraBufferCapacity = 1)
 
     val events: SharedFlow<AuthSessionEvent> = _events.asSharedFlow()
@@ -77,7 +81,7 @@ class AuthSessionStore(context: Context) {
         refresh: suspend (String) -> AuthSessionResponse,
         refreshSkewSeconds: Long = 60
     ): String? {
-        return refreshAccessTokenIfNeeded(
+        return sessionRefresher.accessToken(
             refresh = refresh,
             force = false,
             refreshSkewSeconds = refreshSkewSeconds
@@ -85,12 +89,14 @@ class AuthSessionStore(context: Context) {
     }
 
     suspend fun refreshAccessToken(
+        failedAccessToken: String? = null,
         refresh: suspend (String) -> AuthSessionResponse
     ): String? {
-        return refreshAccessTokenIfNeeded(
+        return sessionRefresher.accessToken(
             refresh = refresh,
             force = true,
-            refreshSkewSeconds = 0
+            refreshSkewSeconds = 0,
+            failedAccessToken = failedAccessToken
         )
     }
 
@@ -119,33 +125,6 @@ class AuthSessionStore(context: Context) {
         clear()
         if (hadSession) {
             _events.emit(AuthSessionEvent.SessionExpired)
-        }
-    }
-
-    private suspend fun refreshAccessTokenIfNeeded(
-        refresh: suspend (String) -> AuthSessionResponse,
-        force: Boolean,
-        refreshSkewSeconds: Long
-    ): String? {
-        return refreshMutex.withLock {
-            val current = session.first() ?: return@withLock null
-            val accessToken = current.accessToken.takeIf { it.isNotBlank() } ?: return@withLock null
-            val nowEpochSeconds = System.currentTimeMillis() / 1000L
-            if (!force && current.expiresAtEpochSeconds > nowEpochSeconds + refreshSkewSeconds) {
-                return@withLock accessToken
-            }
-            val refreshToken = current.refreshToken.takeIf { it.isNotBlank() } ?: run {
-                clearExpiredSession()
-                return@withLock null
-            }
-            val response = runCatching {
-                refresh(refreshToken)
-            }.getOrElse {
-                clearExpiredSession()
-                return@withLock null
-            }
-            save(response)
-            response.accessToken.takeIf { it.isNotBlank() }
         }
     }
 

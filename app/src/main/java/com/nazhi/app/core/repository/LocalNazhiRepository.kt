@@ -1,5 +1,8 @@
 package com.nazhi.app.core.repository
 
+import androidx.room.withTransaction
+import com.nazhi.app.core.database.NazhiDatabase
+import com.nazhi.app.core.database.dao.PersistedAiTaskDao
 import com.nazhi.app.core.database.dao.AudioTranscriptionJobDao
 import com.nazhi.app.core.database.dao.EmbeddingDao
 import com.nazhi.app.core.database.dao.ChatCitationDao
@@ -12,17 +15,14 @@ import com.nazhi.app.core.database.dao.ReviewSessionDao
 import com.nazhi.app.core.database.entity.toEntity
 import com.nazhi.app.core.database.entity.toModel
 import com.nazhi.app.core.embedding.LocalEmbeddingEngine
-import com.nazhi.app.core.export.ExportChatCitation
-import com.nazhi.app.core.export.ExportChatMessage
-import com.nazhi.app.core.export.ExportChatSession
-import com.nazhi.app.core.export.ExportKnowledgeDraft
-import com.nazhi.app.core.export.ExportKnowledgeEntry
-import com.nazhi.app.core.export.ExportNote
 import com.nazhi.app.core.export.ExportSafety
 import com.nazhi.app.core.export.ImportEntityResult
 import com.nazhi.app.core.export.LocalDataImportPreview
 import com.nazhi.app.core.export.LocalDataImportResult
 import com.nazhi.app.core.export.NazhiExportPayload
+import com.nazhi.app.core.export.NazhiBackupCodec
+import com.nazhi.app.core.export.BackupMergePlan
+import com.nazhi.app.core.export.BackupValidationException
 import com.nazhi.app.core.export.toExportChatCitation
 import com.nazhi.app.core.export.toExportChatMessage
 import com.nazhi.app.core.export.toExportChatSession
@@ -59,8 +59,10 @@ import com.nazhi.app.core.model.KnowledgeEntryDraft
 import com.nazhi.app.core.model.KnowledgeIndexStatus
 import com.nazhi.app.core.model.Note
 import com.nazhi.app.core.model.NoteStatus
+import com.nazhi.app.core.model.PersistedAiTask
 import com.nazhi.app.core.model.ReviewSession
 import com.nazhi.app.core.model.SemanticSearchResult
+import com.nazhi.app.core.model.SourceType
 import com.nazhi.app.core.model.findDuplicateEntry
 import com.nazhi.app.core.network.EmbeddingInput
 import com.nazhi.app.core.network.BackendTaskResponse
@@ -70,16 +72,24 @@ import com.nazhi.app.core.network.NazhiBackendClient
 import com.nazhi.app.core.network.QuestionRewriteResponse
 import java.io.File
 import java.io.IOException
+import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
-import kotlinx.serialization.decodeFromString
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 class LocalNazhiRepository(
+    private val database: NazhiDatabase,
+    private val persistedAiTaskDao: PersistedAiTaskDao,
     private val noteDao: NoteDao,
     private val knowledgeEntryDao: KnowledgeEntryDao,
     private val knowledgeEntryDraftDao: KnowledgeEntryDraftDao,
@@ -91,11 +101,11 @@ class LocalNazhiRepository(
     private val audioTranscriptionJobDao: AudioTranscriptionJobDao,
     private val backendClient: NazhiBackendClient
 ) : NazhiRepository {
-    private val exportJson = Json {
-        prettyPrint = true
-        encodeDefaults = true
-        ignoreUnknownKeys = true
-    }
+    private val organizeLocks = ConcurrentHashMap<String, Mutex>()
+    private val indexLocks = ConcurrentHashMap<String, Mutex>()
+    private val coldStartAt = System.currentTimeMillis()
+    private val normalizationLock = Mutex()
+    private var normalized = false
 
     private companion object {
         const val DEFAULT_CHAT_SESSION_TITLE = "新对话"
@@ -269,13 +279,13 @@ class LocalNazhiRepository(
     }
 
     override suspend fun updateKnowledgeEntry(entry: KnowledgeEntry, reindex: Boolean): Boolean {
-        knowledgeEntryDao.upsert(
-            entry.copy(indexStatus = KnowledgeIndexStatus.PENDING).toEntity()
-        )
-        embeddingDao.deleteRecordsForOwner(
-            ownerType = EmbeddingRecord.OWNER_KNOWLEDGE_ENTRY,
-            ownerId = entry.id
-        )
+        database.withTransaction {
+            knowledgeEntryDao.upsert(entry.copy(indexStatus = KnowledgeIndexStatus.PENDING).toEntity())
+            embeddingDao.deleteRecordsForOwner(
+                ownerType = EmbeddingRecord.OWNER_KNOWLEDGE_ENTRY,
+                ownerId = entry.id
+            )
+        }
         return if (reindex) {
             indexKnowledgeEntry(entry.id)
         } else {
@@ -283,131 +293,278 @@ class LocalNazhiRepository(
         }
     }
 
+    override fun observePersistedAiTasksForDate(date: String): Flow<List<PersistedAiTask>> =
+        persistedAiTaskDao.observeForDate(date).map { tasks -> tasks.map { it.toModel() } }
+
+    override suspend fun getPersistedAiTask(id: String): PersistedAiTask? =
+        persistedAiTaskDao.getById(id)?.toModel()
+
+    override suspend fun savePersistedAiTask(task: PersistedAiTask) {
+        persistedAiTaskDao.upsert(task.toEntity())
+    }
+
+    override suspend fun getRecoverableAiTasks(): List<PersistedAiTask> =
+        persistedAiTaskDao.getRecoverable().map { it.toModel() }
+
     override suspend fun organizeNotesForDate(
         date: String,
         onProgress: (AiTaskProgress) -> Unit
-    ): Int {
-        onProgress(
-            AiTaskProgress(
-                status = AiTaskStatus.RUNNING,
-                stage = AiTaskStage.PREPARING_NOTES,
-                progress = 10,
-                message = "正在读取待整理笔记"
-            )
-        )
-        val notes = noteDao.getNotesForDate(date)
-            .map { it.toModel() }
+    ): Int = organizeLocks.getOrPut(date) { Mutex() }.withLock {
+        normalizeInterruptedOperations()
+        val previous = persistedAiTaskDao.getLatestForDate(date, "ORGANIZE_NOTES")?.toModel()
+        // A second tap or restart must first query the accepted request, never upload it again.
+        if (previous != null && previous.status in setOf("CREATED", "RUNNING", "WAITING")) {
+            return@withLock recoverOrganizeTaskLocked(previous, onProgress)
+        }
+        onProgress(AiTaskProgress(
+            status = AiTaskStatus.RUNNING, stage = AiTaskStage.PREPARING_NOTES,
+            progress = 10, message = "正在读取待整理笔记"
+        ))
+        val notes = noteDao.getNotesForDate(date).map { it.toModel() }
             .filter { it.status == NoteStatus.INBOX }
         if (notes.isEmpty()) {
-            onProgress(
-                AiTaskProgress(
-                    status = AiTaskStatus.SUCCEEDED,
-                    stage = AiTaskStage.DONE,
-                    progress = 100,
-                    message = "没有可整理的内容"
-                )
-            )
-            return 0
+            onProgress(AiTaskProgress(
+                status = AiTaskStatus.SUCCEEDED, stage = AiTaskStage.DONE,
+                progress = 100, message = "没有可整理的内容"
+            ))
+            return@withLock 0
         }
-
-        val requestId = "organize-$date-${UUID.randomUUID()}"
-        val response = runCatching {
-            val createdTask = backendClient.createOrganizeNotesJob(
-                requestId = requestId,
-                date = date,
-                notes = notes
-            )
-            onProgress(createdTask.toAiTaskProgress())
-            waitForOrganizeTask(createdTask, onProgress)
-        }.getOrElse { error ->
-            if (
-                error is NazhiBackendException &&
-                (error.statusCode == 404 || error.code == "NOT_FOUND" || error.code == "DIRECT_API_MODE")
-            ) {
-                onProgress(
-                    AiTaskProgress(
-                        status = AiTaskStatus.RUNNING,
-                        stage = AiTaskStage.CALLING_MODEL,
-                        progress = 45,
-                        message = if (error.code == "DIRECT_API_MODE") "正在直接调用用户 API" else "后端使用旧版同步整理接口"
-                    )
-                )
-                backendClient.organizeNotes(
-                    requestId = requestId,
-                    date = date,
-                    notes = notes
-                )
-            } else {
-                onProgress(
-                    AiTaskProgress(
-                        status = AiTaskStatus.FAILED,
-                        stage = AiTaskStage.FAILED,
-                        progress = 100,
-                        message = error.toUserFacingMessage()
-                    )
-                )
-                throw error
-            }
-        }
-
-        onProgress(
-            AiTaskProgress(
-                status = AiTaskStatus.RUNNING,
-                stage = AiTaskStage.SAVING_RESULT,
-                progress = 95,
-                message = "正在写入本地草稿"
-            )
+        val now = maxOf(System.currentTimeMillis(), (previous?.createdAt ?: 0L) + 1L)
+        val localTask = PersistedAiTask(
+            id = "organize-local-${UUID.randomUUID()}", type = "ORGANIZE_NOTES",
+            requestId = "organize-$date-${UUID.randomUUID()}",
+            bindingKey = backendClient.currentTaskBinding(), date = date,
+            sourceNoteIds = notes.map { it.id }, inputFingerprint = organizeNotesFingerprint(notes),
+            status = "CREATED", createdAt = now, updatedAt = now
         )
-        val count = runCatching {
-            replaceDraftsFromResponse(date, notes, response)
-        }.getOrElse { error ->
-            onProgress(
-                AiTaskProgress(
-                    status = AiTaskStatus.FAILED,
-                    stage = AiTaskStage.FAILED,
-                    progress = 100,
-                    message = error.toUserFacingMessage()
+        savePersistedAiTask(localTask)
+        try {
+            val response = try {
+                val remote = backendClient.createOrganizeNotesJob(
+                    requestId = localTask.requestId, date = date, notes = notes,
+                    expectedBinding = localTask.bindingKey
                 )
-            )
+                validateOrganizeIdentity(localTask, remote)
+                savePersistedAiTask(localTask.copy(
+                    backendTaskId = remote.taskId, status = "RUNNING", updatedAt = System.currentTimeMillis()
+                ))
+                onProgress(remote.toAiTaskProgress())
+                waitForOrganizeTask(localTask.id, remote, onProgress)
+            } catch (error: NazhiBackendException) {
+                if (error.code != "DIRECT_API_MODE") throw error
+                // Direct providers have no resumable identity. Only an explicit user action calls them.
+                savePersistedAiTask(localTask.copy(status = "RUNNING", updatedAt = System.currentTimeMillis()))
+                onProgress(AiTaskProgress(
+                    status = AiTaskStatus.RUNNING, stage = AiTaskStage.CALLING_MODEL,
+                    progress = 45, message = "正在直接调用用户 API"
+                ))
+                backendClient.organizeNotes(
+                    requestId = localTask.requestId, date = date, notes = notes,
+                    expectedBinding = localTask.bindingKey
+                )
+            }
+            applyOrganizeResult(localTask, notes, response, onProgress)
+        } catch (error: Throwable) {
+            handleOrganizeError(localTask.id, error, onProgress)
             throw error
         }
-        onProgress(
-            AiTaskProgress(
-                status = AiTaskStatus.SUCCEEDED,
-                stage = AiTaskStage.DONE,
-                progress = 100,
-                message = if (count == 0) "没有生成有效草稿" else "已生成 $count 条 AI 草稿"
-            )
-        )
-        return count
+    }
+
+    override suspend fun recoverOrganizeTask(
+        task: PersistedAiTask,
+        onProgress: (AiTaskProgress) -> Unit
+    ): Int = organizeLocks.getOrPut(task.date) { Mutex() }.withLock {
+        normalizeInterruptedOperations()
+        recoverOrganizeTaskLocked(task, onProgress)
+    }
+
+    private suspend fun recoverOrganizeTaskLocked(
+        suppliedTask: PersistedAiTask,
+        onProgress: (AiTaskProgress) -> Unit
+    ): Int {
+        val task = getPersistedAiTask(suppliedTask.id) ?: return 0
+        if (task.status == "APPLIED") return 0
+        if (task.status !in setOf("CREATED", "RUNNING", "WAITING")) return 0
+        try {
+            if (task.bindingKey.startsWith("direct:")) {
+                interruptOrganizeTask(task, "直连模型任务已中断，笔记已保留，请点击重新整理。")
+            }
+            if (task.bindingKey != backendClient.currentTaskBinding()) {
+                savePersistedAiTask(task.copy(
+                    status = "WAITING", errorMessage = "请切回提交任务时的账号和后端后继续查询。",
+                    updatedAt = System.currentTimeMillis()
+                ))
+                throw IOException("请切回提交任务时的账号和后端后继续查询。")
+            }
+            val notes = noteDao.getNotesByIds(task.sourceNoteIds).map { it.toModel() }
+            if (notes.size != task.sourceNoteIds.size || organizeNotesFingerprint(notes) != task.inputFingerprint) {
+                interruptOrganizeTask(task, "整理期间原笔记已修改，已保留现有草稿，请点击重新整理。")
+            }
+            val remote = if (task.backendTaskId == null) {
+                backendClient.getOrganizeTaskByRequestId(task.requestId, expectedBinding = task.bindingKey)
+            } else {
+                backendClient.getTask(task.backendTaskId, expectedBinding = task.bindingKey)
+            }
+            validateOrganizeIdentity(task, remote)
+            savePersistedAiTask(task.copy(
+                backendTaskId = remote.taskId, status = "RUNNING", errorMessage = null,
+                updatedAt = System.currentTimeMillis()
+            ))
+            onProgress(remote.toAiTaskProgress())
+            val response = waitForOrganizeTask(task.id, remote, onProgress)
+            return applyOrganizeResult(task, notes, response, onProgress)
+        } catch (error: Throwable) {
+            handleOrganizeError(task.id, error, onProgress, isLookup = true)
+            throw error
+        }
+    }
+
+    private suspend fun interruptOrganizeTask(task: PersistedAiTask, message: String): Nothing {
+        savePersistedAiTask(task.copy(
+            status = "INTERRUPTED", errorMessage = message, updatedAt = System.currentTimeMillis()
+        ))
+        throw IOException(message)
     }
 
     private suspend fun waitForOrganizeTask(
+        localTaskId: String,
         createdTask: BackendTaskResponse,
         onProgress: (AiTaskProgress) -> Unit
-    ): com.nazhi.app.core.network.OrganizeNotesResponse {
+    ): com.nazhi.app.core.network.OrganizeNotesResponse = withTimeout(300_000) {
         var task = createdTask
         while (task.status == "RUNNING") {
             delay(1_200)
-            task = backendClient.getTask(task.taskId)
+            val local = getPersistedAiTask(localTaskId)
+                ?: throw IOException("本地整理任务不存在。")
+            task = backendClient.getTask(task.taskId, expectedBinding = local.bindingKey)
+            validateOrganizeIdentity(local, task)
             onProgress(task.toAiTaskProgress())
         }
-
         if (task.status == "SUCCEEDED") {
-            return task.result ?: throw IOException("AI 整理任务完成但没有返回结果。")
+            return@withTimeout task.result ?: throw OrganizeResultInvalidException("AI 整理任务完成但没有返回结果，请点击重新整理。")
         }
-
+        getPersistedAiTask(localTaskId)?.let { local ->
+            savePersistedAiTask(local.copy(
+                status = "FAILED", errorMessage = task.error?.message ?: task.message,
+                updatedAt = System.currentTimeMillis()
+            ))
+        }
         throw NazhiBackendException(
-            statusCode = 500,
-            code = task.error?.code ?: "TASK_FAILED",
+            statusCode = 500, code = task.error?.code ?: "TASK_FAILED",
             publicMessage = task.error?.message ?: task.message.ifBlank { "AI 整理任务失败。" }
         )
+    }
+
+    private suspend fun handleOrganizeError(
+        id: String,
+        error: Throwable,
+        onProgress: (AiTaskProgress) -> Unit,
+        isLookup: Boolean = false
+    ) {
+        withContext(NonCancellable) {
+            val existing = getPersistedAiTask(id) ?: return@withContext
+            if (existing.status in setOf("APPLIED", "FAILED", "INTERRUPTED")) return@withContext
+            val lost = error is NazhiBackendException && error.statusCode == 404 &&
+                (isLookup || existing.backendTaskId != null)
+            val direct = existing.bindingKey.startsWith("direct:")
+            val inputsChanged = error is OrganizeInputsChangedException || error is OrganizeDraftsChangedException
+            val invalidResult = error is OrganizeResultInvalidException
+            val submissionRejected = error is NazhiBackendException && existing.backendTaskId == null &&
+                error.statusCode in 400..499 && error.code != "TASK_BINDING_CHANGED" && error.statusCode != 401
+            val message = when {
+                inputsChanged -> error.message.orEmpty()
+                lost -> "服务器任务已失效，原笔记已保留，请点击重新整理。"
+                direct -> "直连模型任务已中断，原笔记已保留，请点击重新整理。"
+                error is CancellationException -> "整理已暂停，重开应用后会继续查询已有任务。"
+                else -> error.toUserFacingMessage()
+            }
+            savePersistedAiTask(existing.copy(
+                status = when {
+                    lost || direct || inputsChanged -> "INTERRUPTED"
+                    submissionRejected -> "FAILED"
+                    invalidResult -> "FAILED"
+                    else -> "WAITING"
+                },
+                errorMessage = message, updatedAt = System.currentTimeMillis()
+            ))
+            if (error !is CancellationException) onProgress(AiTaskProgress(
+                status = AiTaskStatus.FAILED, stage = AiTaskStage.FAILED,
+                progress = 100, message = message
+            ))
+        }
+    }
+
+    private suspend fun applyOrganizeResult(
+        task: PersistedAiTask,
+        notes: List<Note>,
+        response: com.nazhi.app.core.network.OrganizeNotesResponse,
+        onProgress: (AiTaskProgress) -> Unit
+    ): Int {
+        if (response.requestId != task.requestId || response.date != task.date) {
+            throw OrganizeResultInvalidException("整理结果与本地请求不匹配，已保留原笔记和草稿，请重新整理。")
+        }
+        onProgress(AiTaskProgress(
+            status = AiTaskStatus.RUNNING, stage = AiTaskStage.SAVING_RESULT,
+            progress = 95, message = "正在写入本地草稿"
+        ))
+        val count = database.withTransaction {
+            val current = getPersistedAiTask(task.id) ?: throw IOException("本地整理任务不存在。")
+            if (current.status == "APPLIED") return@withTransaction 0
+            val currentNotes = noteDao.getNotesByIds(task.sourceNoteIds).map { it.toModel() }
+            if (currentNotes.size != task.sourceNoteIds.size || organizeNotesFingerprint(currentNotes) != task.inputFingerprint) {
+                // Throwing rolls back the transaction; persist the interruption outside it.
+                throw OrganizeInputsChangedException()
+            }
+            val editedDrafts = knowledgeEntryDraftDao.getDraftsForDate(task.date).any { draft ->
+                draft.status != KnowledgeDraftStatus.CONFIRMED && draft.updatedAt > task.createdAt &&
+                    !draft.id.startsWith("draft-${task.id}-")
+            }
+            if (editedDrafts) throw OrganizeDraftsChangedException()
+            val saved = replaceDraftsFromResponse(task.date, notes, response, task.id)
+            savePersistedAiTask(current.copy(
+                status = "APPLIED", errorMessage = null, updatedAt = System.currentTimeMillis()
+            ))
+            saved
+        }
+        onProgress(AiTaskProgress(
+            status = AiTaskStatus.SUCCEEDED, stage = AiTaskStage.DONE,
+            progress = 100, message = "已生成 $count 条 AI 草稿"
+        ))
+        return count
+    }
+
+    private class OrganizeInputsChangedException : IOException("整理期间原笔记已修改，已保留现有草稿，请点击重新整理。")
+
+    private class OrganizeDraftsChangedException : IOException("整理期间草稿已修改，已保留你的修改，请确认现有草稿后再重新整理。")
+
+    private class OrganizeResultInvalidException(message: String) : IOException(message)
+
+    private fun validateOrganizeIdentity(local: PersistedAiTask, remote: BackendTaskResponse) {
+        if (remote.requestId != local.requestId || remote.type != "ORGANIZE_NOTES" ||
+            (local.backendTaskId != null && remote.taskId != local.backendTaskId)) {
+            throw OrganizeResultInvalidException("后端任务与本地请求不匹配，已保留原笔记和草稿。")
+        }
+    }
+
+    private fun organizeNotesFingerprint(notes: List<Note>): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        notes.sortedBy { it.id }.forEach { note ->
+            listOf(note.id, note.content, note.title.orEmpty(), note.status.name,
+                note.updatedAt.toString(), note.createdAt.toString(), note.sourceType.name).forEach { value ->
+                val bytes = value.toByteArray(Charsets.UTF_8)
+                digest.update(bytes.size.toString().toByteArray(Charsets.UTF_8))
+                digest.update(0.toByte())
+                digest.update(bytes)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     private suspend fun replaceDraftsFromResponse(
         date: String,
         notes: List<Note>,
-        response: com.nazhi.app.core.network.OrganizeNotesResponse
+        response: com.nazhi.app.core.network.OrganizeNotesResponse,
+        localTaskId: String
     ): Int {
         val now = System.currentTimeMillis()
         val drafts = response.drafts
@@ -419,7 +576,7 @@ class LocalNazhiRepository(
                     null
                 } else {
                     KnowledgeEntryDraft(
-                        id = draft.id?.takeIf { it.isNotBlank() } ?: "draft-$date-${UUID.randomUUID()}",
+                        id = "draft-$localTaskId-$index",
                         date = date,
                         title = draft.title?.takeIf { it.isNotBlank() } ?: draft.content.firstLineOrTitle(),
                         summary = draft.summary.orEmpty().ifBlank { draft.content.firstLineOrTitle(80) },
@@ -439,7 +596,7 @@ class LocalNazhiRepository(
             }
 
         if (drafts.isEmpty()) {
-            throw IOException("模型没有返回有效整理结果，请稍后重试或检查后端模型输出。")
+            throw OrganizeResultInvalidException("模型没有返回有效整理结果，请点击重新整理或检查后端模型输出。")
         }
         knowledgeEntryDraftDao.deleteReplaceableDraftsForDate(date)
         knowledgeEntryDraftDao.upsertAll(drafts.map { it.toEntity() })
@@ -461,51 +618,62 @@ class LocalNazhiRepository(
     }
 
     override suspend fun submitKnowledgeDraft(draftId: String): KnowledgeEntry? {
-        val draft = knowledgeEntryDraftDao.getDraft(draftId)?.toModel() ?: return null
-        if (draft.status != KnowledgeDraftStatus.PENDING) {
-            return null
-        }
-
+        normalizeInterruptedOperations()
         val now = System.currentTimeMillis()
-        val sourceNotes = draft.sourceNoteIds.mapNotNull { noteDao.getNote(it)?.toModel() }
-        val firstNote = sourceNotes.firstOrNull()
-        val duplicateEntry = draft.findDuplicateEntry(
-            knowledgeEntryDao.getEntries().map { it.toModel() }
-        )
-        if (duplicateEntry != null) {
-            draft.sourceNoteIds.forEach { noteId ->
-                noteDao.updateStatus(noteId, NoteStatus.REVIEWED, now)
-                cleanupAudioForNote(noteId, now)
+        val result = database.withTransaction {
+            val draft = knowledgeEntryDraftDao.getDraft(draftId)?.toModel()
+                ?: return@withTransaction DraftSubmission(null, emptyList())
+            val stableId = "knowledge-draft-$draftId"
+            val alreadySaved = knowledgeEntryDao.getEntry(stableId)?.toModel()
+            if (alreadySaved != null) return@withTransaction DraftSubmission(alreadySaved, emptyList())
+            if (draft.status != KnowledgeDraftStatus.PENDING) {
+                // Older confirmed drafts predate stable IDs; return their existing entry when possible.
+                val legacyEntry = if (draft.status == KnowledgeDraftStatus.CONFIRMED) {
+                    knowledgeEntryDao.getEntries().map { it.toModel() }.firstOrNull {
+                        it.content == draft.content && it.sourceNoteIds.toSet() == draft.sourceNoteIds.toSet()
+                    }
+                } else null
+                return@withTransaction DraftSubmission(legacyEntry, emptyList())
             }
-            knowledgeEntryDraftDao.updateStatus(draft.id, KnowledgeDraftStatus.SKIPPED, now)
-            throw DuplicateKnowledgeEntryException(duplicateEntry.userTitle)
+            val sourceNotes = draft.sourceNoteIds.mapNotNull { noteDao.getNote(it)?.toModel() }
+            require(sourceNotes.isNotEmpty() && sourceNotes.size == draft.sourceNoteIds.distinct().size &&
+                sourceNotes.none { it.status == NoteStatus.DELETED }) {
+                "草稿来源笔记已删除，请保留草稿并重新选择来源后再确认。"
+            }
+            val duplicate = draft.findDuplicateEntry(knowledgeEntryDao.getEntries().map { it.toModel() })
+            if (duplicate != null) {
+                draft.sourceNoteIds.forEach { noteDao.updateStatus(it, NoteStatus.REVIEWED, now) }
+                knowledgeEntryDraftDao.updateStatus(draft.id, KnowledgeDraftStatus.SKIPPED, now)
+                return@withTransaction DraftSubmission(null, draft.sourceNoteIds, duplicate.userTitle.orEmpty())
+            }
+            val firstNote = sourceNotes.first()
+            val entry = KnowledgeEntry(
+                id = stableId, noteId = firstNote.id, content = draft.content,
+                intentType = draft.intentType, userTitle = draft.title, userRemark = draft.insight,
+                createdAt = firstNote.createdAt, createdDate = draft.date,
+                confirmedAt = now, confirmedDate = draft.date, summary = draft.summary,
+                tags = draft.tags, sourceNoteIds = draft.sourceNoteIds,
+                indexStatus = KnowledgeIndexStatus.PENDING
+            )
+            knowledgeEntryDao.upsert(entry.toEntity())
+            draft.sourceNoteIds.forEach { noteDao.updateStatus(it, NoteStatus.REVIEWED, now) }
+            knowledgeEntryDraftDao.updateStatus(draft.id, KnowledgeDraftStatus.CONFIRMED, now)
+            DraftSubmission(entry, draft.sourceNoteIds, newlySaved = true)
         }
-        val entry = KnowledgeEntry(
-            id = "knowledge-${UUID.randomUUID()}",
-            noteId = firstNote?.id.orEmpty(),
-            content = draft.content,
-            intentType = draft.intentType,
-            userTitle = draft.title,
-            userRemark = draft.insight,
-            createdAt = firstNote?.createdAt ?: now,
-            createdDate = draft.date,
-            confirmedAt = now,
-            confirmedDate = draft.date,
-            summary = draft.summary,
-            tags = draft.tags,
-            sourceNoteIds = draft.sourceNoteIds,
-            indexStatus = KnowledgeIndexStatus.PENDING
-        )
-
-        knowledgeEntryDao.upsert(entry.toEntity())
-        draft.sourceNoteIds.forEach { noteId ->
-            noteDao.updateStatus(noteId, NoteStatus.REVIEWED, now)
-            cleanupAudioForNote(noteId, now)
-        }
-        knowledgeEntryDraftDao.updateStatus(draft.id, KnowledgeDraftStatus.CONFIRMED, now)
-        indexKnowledgeEntry(entry.id)
+        // Files and network work follow the committed transaction, so they cannot leave half a confirmation.
+        result.sourceNoteIds.forEach { cleanupAudioForNote(it, now) }
+        if (result.duplicateTitle != null) throw DuplicateKnowledgeEntryException(result.duplicateTitle)
+        val entry = result.entry ?: return null
+        if (result.newlySaved) indexKnowledgeEntry(entry.id)
         return knowledgeEntryDao.getEntry(entry.id)?.toModel()
     }
+
+    private data class DraftSubmission(
+        val entry: KnowledgeEntry?,
+        val sourceNoteIds: List<String>,
+        val duplicateTitle: String? = null,
+        val newlySaved: Boolean = false
+    )
 
     override suspend fun submitAllKnowledgeDraftsForDate(date: String): Int {
         var submittedCount = 0
@@ -528,20 +696,28 @@ class LocalNazhiRepository(
         return submittedCount
     }
 
-    override suspend fun indexKnowledgeEntry(entryId: String): Boolean {
-        val entry = knowledgeEntryDao.getEntry(entryId)?.toModel() ?: return false
-        return runCatching {
+    override suspend fun indexKnowledgeEntry(entryId: String): Boolean = indexLocks.getOrPut(entryId) { Mutex() }.withLock {
+        normalizeInterruptedOperations()
+        val entry = knowledgeEntryDao.getEntry(entryId)?.toModel() ?: return@withLock false
+        runCatching {
             knowledgeEntryDao.updateIndexStatus(entry.id, KnowledgeIndexStatus.INDEXING)
             upsertRemoteEmbeddingForEntry(entry)
-            knowledgeEntryDao.updateIndexStatus(entry.id, KnowledgeIndexStatus.INDEXED)
-            true
-        }.getOrElse {
-            knowledgeEntryDao.updateIndexStatus(entry.id, KnowledgeIndexStatus.FAILED)
+        }.getOrElse { error ->
+            withContext(NonCancellable) {
+                database.withTransaction {
+                    val current = knowledgeEntryDao.getEntry(entry.id)?.toModel()
+                    if (current?.toEmbeddingText() == entry.toEmbeddingText()) {
+                        knowledgeEntryDao.updateIndexStatus(entry.id, KnowledgeIndexStatus.FAILED)
+                    }
+                }
+            }
+            if (error is CancellationException) throw error
             false
         }
     }
 
     override suspend fun indexPendingKnowledgeEntries(): Int {
+        normalizeInterruptedOperations()
         var indexedCount = 0
         val entries = knowledgeEntryDao.getEntriesByIndexStatus(KnowledgeIndexStatus.PENDING) +
             knowledgeEntryDao.getEntriesByIndexStatus(KnowledgeIndexStatus.FAILED)
@@ -621,18 +797,22 @@ class LocalNazhiRepository(
             model = LocalEmbeddingEngine.MOCK_MODEL
         )
             .mapNotNull { record ->
+                val vector = LocalEmbeddingEngine.decodeCompatibleVector(
+                    blob = record.vectorBlob,
+                    dimensions = record.dimensions,
+                    queryDimensions = queryVector.size
+                ) ?: return@mapNotNull null
                 val entry = knowledgeEntryDao.getEntry(record.ownerId)?.toModel()
                 if (entry == null || entry.indexStatus != KnowledgeIndexStatus.INDEXED) {
                     null
                 } else {
-                    val vector = LocalEmbeddingEngine.fromBlob(record.vectorBlob)
                     SemanticSearchResult(
                         entry = entry,
                         score = LocalEmbeddingEngine.dot(queryVector, vector)
                     )
                 }
             }
-            .filter { it.score > 0f }
+            .filter { it.score.isFinite() && it.score > 0f }
             .sortedByDescending { it.score }
             .take(topK)
     }
@@ -653,198 +833,136 @@ class LocalNazhiRepository(
         }
     }
 
-    override suspend fun buildLocalDataExportJson(): String {
-        val payload = NazhiExportPayload(
-            schemaVersion = 2,
-            appName = "Nazhi",
-            exportedAt = System.currentTimeMillis(),
-            safety = ExportSafety(),
-            notes = noteDao.getNotes().map { it.toModel().toExportNote() },
-            knowledgeEntries = knowledgeEntryDao.getEntries().map { it.toModel().toExportKnowledgeEntry() },
-            knowledgeDrafts = knowledgeEntryDraftDao.getDrafts().map { it.toModel().toExportKnowledgeDraft() },
-            chatSessions = chatSessionDao.getSessions().map { it.toModel().toExportChatSession() },
-            chatMessages = chatMessageDao.getMessages().map { it.toModel().toExportChatMessage() },
-            chatCitations = chatCitationDao.getCitations().map { it.toModel().toExportChatCitation() }
-        )
-        return exportJson.encodeToString(payload)
+    override suspend fun buildLocalDataExportJson(): String = withContext(Dispatchers.Default) {
+        val payload = database.withTransaction { readBackupSnapshot() }
+        val encoded = NazhiBackupCodec.encode(payload)
+        val inspection = NazhiBackupCodec.inspect(encoded)
+        if (inspection.errors.isNotEmpty()) throw BackupValidationException(inspection.errors)
+        encoded
     }
 
-    override suspend fun previewLocalDataImportJson(json: String): LocalDataImportPreview {
-        val payload = parseLocalDataImportPayload(json)
-        return LocalDataImportPreview(
-            schemaVersion = payload.schemaVersion,
-            exportedAt = payload.exportedAt,
-            noteCount = payload.notes.size,
-            knowledgeEntryCount = payload.knowledgeEntries.size,
-            knowledgeDraftCount = payload.knowledgeDrafts.size,
-            chatSessionCount = payload.chatSessions.size,
-            chatMessageCount = payload.chatMessages.size,
-            chatCitationCount = payload.chatCitations.size,
-            warnings = buildImportWarnings(payload)
+    /** Includes soft-deleted sources still needed to restore knowledge, drafts or citations. */
+    private suspend fun readBackupSnapshot(additionalNoteIds: List<String> = emptyList()): NazhiExportPayload {
+        val entries = knowledgeEntryDao.getEntries().map { it.toModel().toExportKnowledgeEntry() }
+        val drafts = knowledgeEntryDraftDao.getDrafts().map { it.toModel().toExportKnowledgeDraft() }
+        val citations = chatCitationDao.getCitations().map { it.toModel().toExportChatCitation() }
+        val needed = (entries.flatMap { listOf(it.noteId) + it.sourceNoteIds } +
+            drafts.flatMap { it.sourceNoteIds } + citations.flatMap { it.sourceNoteIds } + additionalNoteIds).distinct()
+        val notes = noteDao.getNotes().map { it.toModel().toExportNote() }.associateBy { it.id }.toMutableMap()
+        needed.filterNot { it in notes }.chunked(900).forEach { ids ->
+            noteDao.getNotesByIds(ids).forEach { notes[it.id] = it.toModel().toExportNote() }
+        }
+        return NazhiExportPayload(
+            schemaVersion = 3, appName = "Nazhi", exportedAt = System.currentTimeMillis(), safety = ExportSafety(),
+            notes = notes.values.sortedBy { it.id }, knowledgeEntries = entries,
+            knowledgeDrafts = drafts, chatSessions = chatSessionDao.getSessions().map { it.toModel().toExportChatSession() },
+            chatMessages = chatMessageDao.getMessages().map { it.toModel().toExportChatMessage() }, chatCitations = citations
         )
     }
 
-    override suspend fun importLocalDataJson(json: String): LocalDataImportResult {
-        val payload = parseLocalDataImportPayload(json)
-        return LocalDataImportResult(
-            notes = importNotes(payload.notes),
-            knowledgeEntries = importKnowledgeEntries(payload.knowledgeEntries),
-            knowledgeDrafts = importKnowledgeDrafts(payload.knowledgeDrafts),
-            chatSessions = importChatSessions(payload.chatSessions),
-            chatMessages = importChatMessages(payload.chatMessages),
-            chatCitations = importChatCitations(payload.chatCitations)
+    override suspend fun previewLocalDataImportJson(json: String): LocalDataImportPreview = withContext(Dispatchers.Default) {
+        val inspection = NazhiBackupCodec.inspect(json)
+        val payload = inspection.payload
+        if (payload == null || inspection.errors.isNotEmpty()) return@withContext importPreview(
+            payload, inspection.warnings, inspection.errors, inspection.integrityVerified
         )
-    }
-
-    private fun parseLocalDataImportPayload(json: String): NazhiExportPayload {
-        val payload = runCatching {
-            exportJson.decodeFromString<NazhiExportPayload>(json)
-        }.getOrElse {
-            throw IllegalArgumentException("导入文件不是有效的纳知 JSON。")
-        }
-        require(payload.appName.equals("Nazhi", ignoreCase = true)) {
-            "导入文件不是纳知导出文件。"
-        }
-        require(payload.schemaVersion in 1..2) {
-            "暂不支持 schemaVersion=${payload.schemaVersion} 的导出文件。"
-        }
-        return payload
-    }
-
-    private fun buildImportWarnings(payload: NazhiExportPayload): List<String> {
-        return buildList {
-            if (
-                !payload.safety.excludesApiKeys ||
-                !payload.safety.excludesTokens ||
-                !payload.safety.excludesBackendSettings
-            ) {
-                add("导入流程不会恢复 API Key、服务 Token 或后端配置。")
+        try {
+            database.withTransaction {
+                val plan = NazhiBackupCodec.plan(payload, readBackupSnapshot(payload.notes.map { it.id }))
+                importPreview(plan.normalized, inspection.warnings, emptyList(), inspection.integrityVerified, plan)
             }
-            if (!payload.safety.excludesEmbeddingVectors || payload.knowledgeEntries.isNotEmpty()) {
-                add("导入后需要重新生成问答能力。")
-            }
-            add("同 ID 数据会跳过，不覆盖当前手机已有内容。")
+        } catch (error: IllegalArgumentException) {
+            importPreview(payload, inspection.warnings, listOf(error.message ?: "恢复数据校验失败。"), inspection.integrityVerified)
         }
     }
 
-    private suspend fun importNotes(notes: List<ExportNote>): ImportEntityResult {
-        var insertedCount = 0
-        var skippedCount = 0
-        var failedCount = 0
-        notes.forEach { item ->
-            val note = item.toImportedNote()
-            when {
-                note.id.isBlank() || note.content.isBlank() || note.createdDate.isBlank() -> failedCount += 1
-                noteDao.getNote(note.id) != null -> skippedCount += 1
-                else -> {
-                    noteDao.upsert(note.toEntity())
-                    insertedCount += 1
-                }
+    private fun importPreview(
+        payload: NazhiExportPayload?, warnings: List<String>, errors: List<String>, integrityVerified: Boolean,
+        plan: BackupMergePlan? = null
+    ) = LocalDataImportPreview(
+        schemaVersion = payload?.schemaVersion ?: 0, exportedAt = payload?.exportedAt ?: 0,
+        noteCount = payload?.notes?.size ?: 0, knowledgeEntryCount = payload?.knowledgeEntries?.size ?: 0,
+        knowledgeDraftCount = payload?.knowledgeDrafts?.size ?: 0, chatSessionCount = payload?.chatSessions?.size ?: 0,
+        chatMessageCount = payload?.chatMessages?.size ?: 0, chatCitationCount = payload?.chatCitations?.size ?: 0,
+        warnings = warnings, newCount = plan?.newCount ?: 0, unchangedCount = plan?.unchangedCount ?: 0,
+        conflictCount = plan?.conflictCount ?: 0, conflicts = plan?.conflicts.orEmpty(), errors = errors,
+        integrityVerified = integrityVerified
+    )
+
+    override suspend fun importLocalDataJson(json: String): LocalDataImportResult = withContext(Dispatchers.Default) {
+        val inspection = NazhiBackupCodec.inspect(json)
+        if (inspection.errors.isNotEmpty()) throw BackupValidationException(inspection.errors)
+        val payload = inspection.payload ?: throw BackupValidationException(listOf("备份文件无效。"))
+        database.withTransaction {
+            // The user may edit data after preview. Recompute against the transaction's current snapshot.
+            val plan = NazhiBackupCodec.plan(payload, readBackupSnapshot(payload.notes.map { it.id }))
+            val insert = plan.insertions
+            insert.notes.forEach { noteDao.upsert(it.toImportedNote().toEntity()) }
+            insert.knowledgeEntries.forEach { knowledgeEntryDao.upsert(it.toImportedKnowledgeEntry().toEntity()) }
+            insert.knowledgeDrafts.forEach { knowledgeEntryDraftDao.upsert(it.toImportedKnowledgeDraft().toEntity()) }
+            insert.chatSessions.forEach { chatSessionDao.upsert(it.toImportedChatSession().toEntity()) }
+            // Parent IDs are logical relations; user messages are written first for clarity.
+            insert.chatMessages.sortedBy { if (it.role == "USER") 0 else 1 }.forEach { chatMessageDao.upsert(it.toImportedChatMessage().toEntity()) }
+            insert.chatCitations.forEach { chatCitationDao.upsert(it.toImportedChatCitation().toEntity()) }
+            verifyImportedRecords(insert)
+            insert.chatMessages.map { it.sessionId }.distinct().forEach { id ->
+                val session = requireNotNull(chatSessionDao.getSession(id))
+                val messages = chatMessageDao.getMessagesForSession(id)
+                    .sortedWith(compareBy({ it.createdAt }, { it.id }))
+                val refreshed = session.copy(messageCount = messages.size, lastMessagePreview = messages.lastOrNull()?.content?.take(80).orEmpty())
+                chatSessionDao.upsert(refreshed)
+                check(chatSessionDao.getSession(id) == refreshed) { "恢复后会话校验失败，已回滚本次导入。" }
             }
+            fun result(total: Int, count: Int) = ImportEntityResult(count, total - count, 0)
+            LocalDataImportResult(
+                notes = result(plan.normalized.notes.size, insert.notes.size),
+                knowledgeEntries = result(plan.normalized.knowledgeEntries.size, insert.knowledgeEntries.size),
+                knowledgeDrafts = result(plan.normalized.knowledgeDrafts.size, insert.knowledgeDrafts.size),
+                chatSessions = result(plan.normalized.chatSessions.size, insert.chatSessions.size),
+                chatMessages = result(plan.normalized.chatMessages.size, insert.chatMessages.size),
+                chatCitations = result(plan.normalized.chatCitations.size, insert.chatCitations.size),
+                verifiedCount = plan.newCount, conflictCount = plan.conflictCount,
+                verificationMessage = "已回读校验 ${plan.newCount} 条新增记录及其关联；${plan.conflictCount} 条冲突记录已跳过，保留本机内容。"
+            )
         }
-        return ImportEntityResult(insertedCount, skippedCount, failedCount)
     }
 
-    private suspend fun importKnowledgeEntries(entries: List<ExportKnowledgeEntry>): ImportEntityResult {
-        var insertedCount = 0
-        var skippedCount = 0
-        var failedCount = 0
-        entries.forEach { item ->
-            val entry = item.toImportedKnowledgeEntry()
-            when {
-                entry.id.isBlank() || entry.content.isBlank() || entry.noteId.isBlank() -> failedCount += 1
-                knowledgeEntryDao.getEntry(entry.id) != null -> skippedCount += 1
-                noteDao.getNote(entry.noteId) == null -> failedCount += 1
-                else -> {
-                    knowledgeEntryDao.upsert(entry.toEntity())
-                    insertedCount += 1
-                }
-            }
+    /** Any failed insert, trigger mutation or missing relation throws inside the transaction and rolls back everything. */
+    private suspend fun verifyImportedRecords(p: NazhiExportPayload) {
+        fun verify(ok: Boolean, label: String) { check(ok) { "恢复后校验失败：$label，已回滚本次导入。" } }
+        p.notes.forEach { verify(noteDao.getNote(it.id)?.toModel() == it.toImportedNote(), "笔记 ${it.id}") }
+        p.knowledgeEntries.forEach { item ->
+            val expected = item.toImportedKnowledgeEntry()
+            verify(knowledgeEntryDao.getEntry(item.id)?.toModel() == expected, "知识 ${item.id}")
+            expected.sourceNoteIds.forEach { verify(noteDao.getNote(it) != null, "知识来源 $it") }
         }
-        return ImportEntityResult(insertedCount, skippedCount, failedCount)
-    }
-
-    private suspend fun importKnowledgeDrafts(drafts: List<ExportKnowledgeDraft>): ImportEntityResult {
-        var insertedCount = 0
-        var skippedCount = 0
-        var failedCount = 0
-        drafts.forEach { item ->
-            val draft = item.toImportedKnowledgeDraft()
-            when {
-                draft.id.isBlank() || draft.date.isBlank() || draft.content.isBlank() -> failedCount += 1
-                knowledgeEntryDraftDao.getDraft(draft.id) != null -> skippedCount += 1
-                else -> {
-                    knowledgeEntryDraftDao.upsert(draft.toEntity())
-                    insertedCount += 1
-                }
+        p.knowledgeDrafts.forEach { item ->
+            verify(knowledgeEntryDraftDao.getDraft(item.id)?.toModel() == item.toImportedKnowledgeDraft(), "草稿 ${item.id}")
+            item.sourceNoteIds.forEach { verify(noteDao.getNote(it) != null, "草稿来源 $it") }
+        }
+        p.chatSessions.forEach { verify(chatSessionDao.getSession(it.id)?.toModel() == it.toImportedChatSession(), "会话 ${it.id}") }
+        p.chatMessages.forEach { item ->
+            verify(chatMessageDao.getMessage(item.id)?.toModel() == item.toImportedChatMessage(), "消息 ${item.id}")
+            verify(chatSessionDao.getSession(item.sessionId) != null, "消息会话 ${item.sessionId}")
+            item.parentMessageId?.let { id ->
+                val parent = chatMessageDao.getMessage(id)
+                verify(parent?.role == ChatRole.USER && parent.sessionId == item.sessionId, "回答父问题 $id")
             }
         }
-        return ImportEntityResult(insertedCount, skippedCount, failedCount)
-    }
-
-    private suspend fun importChatSessions(sessions: List<ExportChatSession>): ImportEntityResult {
-        var insertedCount = 0
-        var skippedCount = 0
-        var failedCount = 0
-        sessions.forEach { item ->
-            val session = item.toImportedChatSession()
-            when {
-                session.id.isBlank() -> failedCount += 1
-                chatSessionDao.getSession(session.id) != null -> skippedCount += 1
-                else -> {
-                    chatSessionDao.upsert(session.toEntity())
-                    insertedCount += 1
-                }
-            }
+        p.chatCitations.forEach { item ->
+            verify(chatCitationDao.getCitation(item.id)?.toModel() == item.toImportedChatCitation(), "引用 ${item.id}")
+            verify(chatMessageDao.getMessage(item.messageId)?.role == ChatRole.ASSISTANT &&
+                knowledgeEntryDao.getEntry(item.knowledgeEntryId) != null, "引用关联 ${item.id}")
+            item.sourceNoteIds.forEach { verify(noteDao.getNote(it) != null, "引用来源 $it") }
         }
-        return ImportEntityResult(insertedCount, skippedCount, failedCount)
     }
-
-    private suspend fun importChatMessages(messages: List<ExportChatMessage>): ImportEntityResult {
-        var insertedCount = 0
-        var skippedCount = 0
-        var failedCount = 0
-        messages.forEach { item ->
-            val message = item.toImportedChatMessage()
-            when {
-                message.id.isBlank() || message.sessionId.isBlank() || message.content.isBlank() -> failedCount += 1
-                chatMessageDao.getMessage(message.id) != null -> skippedCount += 1
-                chatSessionDao.getSession(message.sessionId) == null -> failedCount += 1
-                else -> {
-                    chatMessageDao.upsert(message.toEntity())
-                    insertedCount += 1
-                }
-            }
-        }
-        return ImportEntityResult(insertedCount, skippedCount, failedCount)
-    }
-
-    private suspend fun importChatCitations(citations: List<ExportChatCitation>): ImportEntityResult {
-        var insertedCount = 0
-        var skippedCount = 0
-        var failedCount = 0
-        citations.forEach { item ->
-            val citation = item.toImportedChatCitation()
-            when {
-                citation.id.isBlank() || citation.messageId.isBlank() || citation.knowledgeEntryId.isBlank() -> failedCount += 1
-                chatCitationDao.getCitation(citation.id) != null -> skippedCount += 1
-                chatMessageDao.getMessage(citation.messageId) == null -> failedCount += 1
-                knowledgeEntryDao.getEntry(citation.knowledgeEntryId) == null -> failedCount += 1
-                else -> {
-                    chatCitationDao.upsert(citation.toEntity())
-                    insertedCount += 1
-                }
-            }
-        }
-        return ImportEntityResult(insertedCount, skippedCount, failedCount)
-    }
-
     override suspend fun askKnowledgeQuestion(
         question: String,
         topK: Int,
         sessionId: String?,
         onProgress: (AiTaskProgress) -> Unit
     ): ChatMessage {
+        normalizeInterruptedOperations()
         val trimmedQuestion = question.trim()
         if (trimmedQuestion.isEmpty()) {
             throw IllegalArgumentException("问题不能为空")
@@ -878,6 +996,7 @@ class LocalNazhiRepository(
         topK: Int,
         onProgress: (AiTaskProgress) -> Unit
     ): ChatMessage {
+        normalizeInterruptedOperations()
         ensureKnowledgeChatReady()
         val questionMessage = resolveQuestionMessageForRetry(messageId)
         val attempt = nextAssistantAttempt(questionMessage.id)
@@ -894,6 +1013,7 @@ class LocalNazhiRepository(
         topK: Int,
         onProgress: (AiTaskProgress) -> Unit
     ): ChatMessage {
+        normalizeInterruptedOperations()
         ensureKnowledgeChatReady()
         val questionMessage = resolveQuestionMessageForRetry(messageId)
         val attempt = nextAssistantAttempt(questionMessage.id)
@@ -939,6 +1059,35 @@ class LocalNazhiRepository(
         attempt: Int,
         onProgress: (AiTaskProgress) -> Unit
     ): ChatMessage {
+        saveAssistantMessage(
+            sessionId = questionMessage.sessionId, parentMessageId = questionMessage.id,
+            content = "正在处理问题…", status = ChatMessageStatus.PENDING,
+            errorMessage = null, attempt = attempt, progressStage = AiTaskStage.LOCAL_RETRIEVAL.name,
+            errorCode = null, citations = emptyList(), matchedResults = emptyList()
+        )
+        try {
+            return performKnowledgeAnswer(questionMessage, topK, attempt, onProgress)
+        } catch (error: Throwable) {
+            withContext(NonCancellable) {
+                saveAssistantMessage(
+                    sessionId = questionMessage.sessionId, parentMessageId = questionMessage.id,
+                    content = "问答处理已中断。", status = ChatMessageStatus.FAILED,
+                    errorMessage = if (error is CancellationException) "问题已保留，请点击重试。" else error.toUserFacingMessage(),
+                    attempt = attempt, progressStage = AiTaskStage.FAILED.name,
+                    errorCode = if (error is CancellationException) "CHAT_INTERRUPTED" else error.toErrorCode(),
+                    citations = emptyList(), matchedResults = emptyList()
+                )
+            }
+            throw error
+        }
+    }
+
+    private suspend fun performKnowledgeAnswer(
+        questionMessage: ChatMessage,
+        topK: Int,
+        attempt: Int,
+        onProgress: (AiTaskProgress) -> Unit
+    ): ChatMessage {
         val trimmedQuestion = questionMessage.content.trim()
         onProgress(
             AiTaskProgress(
@@ -959,6 +1108,7 @@ class LocalNazhiRepository(
                 onProgress = onProgress
             )
         }.getOrElse { error ->
+            if (error is CancellationException) throw error
             val message = error.toUserFacingMessage()
             onProgress(
                 AiTaskProgress(
@@ -1082,6 +1232,7 @@ class LocalNazhiRepository(
                 )
             }
         }.getOrElse { error ->
+            if (error is CancellationException) throw error
             val message = error.toUserFacingMessage()
             onProgress(
                 AiTaskProgress(
@@ -1398,7 +1549,144 @@ class LocalNazhiRepository(
     }
 
     override suspend fun saveAudioTranscriptionJob(job: AudioTranscriptionJob) {
+        normalizeInterruptedOperations()
         audioTranscriptionJobDao.upsert(job.toEntity())
+    }
+
+    override suspend fun storeAudioTranscript(jobId: String, text: String): AudioTranscriptionJob =
+        database.withTransaction {
+            val job = getAudioTranscriptionJob(jobId) ?: throw IOException("找不到本地录音任务。")
+            // Repeated recovery must preserve the saved note or the user's edited preview.
+            if (job.noteId != null || job.status == AudioTranscriptionJobStatus.READY_TO_SAVE) {
+                markAudioTaskApplied(jobId)
+                return@withTransaction job
+            }
+            val transcript = text.trim()
+            require(transcript.isNotEmpty()) { "录音没有识别出有效文字，音频已保留。" }
+            val now = System.currentTimeMillis()
+            if (job.requiresConfirmation) {
+                val ready = job.copy(
+                    status = AudioTranscriptionJobStatus.READY_TO_SAVE, transcriptText = transcript,
+                    errorMessage = null, updatedAt = now
+                )
+                audioTranscriptionJobDao.upsert(ready.toEntity())
+                markAudioTaskApplied(jobId)
+                ready
+            } else {
+                commitAudioNote(job, transcript, now)
+                getAudioTranscriptionJob(jobId) ?: throw IOException("录音任务保存失败。")
+            }
+        }
+
+    override suspend fun updateAudioTranscriptPreview(jobId: String, text: String) {
+        database.withTransaction {
+            val job = getAudioTranscriptionJob(jobId) ?: return@withTransaction
+            if (job.status != AudioTranscriptionJobStatus.READY_TO_SAVE) return@withTransaction
+            audioTranscriptionJobDao.upsert(job.copy(
+                transcriptText = text, updatedAt = System.currentTimeMillis()
+            ).toEntity())
+        }
+    }
+
+    override suspend fun confirmAudioTranscript(jobId: String, text: String): Note = database.withTransaction {
+        val job = getAudioTranscriptionJob(jobId) ?: throw IOException("找不到本地录音任务。")
+        val existingNote = job.noteId?.let { noteDao.getNote(it)?.toModel() }
+            ?: noteDao.getNote("audio-note-$jobId")?.toModel()
+        if (existingNote != null) return@withTransaction existingNote
+        require(job.status == AudioTranscriptionJobStatus.READY_TO_SAVE) { "转写尚未完成，请等待结果后再保存。" }
+        val transcript = text.trim()
+        require(transcript.isNotEmpty()) { "内容不能为空。" }
+        commitAudioNote(job, transcript, System.currentTimeMillis())
+    }
+
+    private suspend fun commitAudioNote(job: AudioTranscriptionJob, transcript: String, now: Long): Note {
+        val id = job.noteId ?: "audio-note-${job.id}"
+        val note = noteDao.getNote(id)?.toModel() ?: Note(
+            id = id, content = transcript, title = transcript.firstLineOrTitle(80),
+            sourceType = SourceType.AUDIO_TRANSCRIPTION, sourceApp = job.sourceApp,
+            sourceUrl = null, audioDurationMs = job.durationMs,
+            createdAt = job.createdAt, createdDate = job.createdDate, updatedAt = now,
+            status = NoteStatus.INBOX, userRemark = null
+        ).also { noteDao.upsert(it.toEntity()) }
+        audioTranscriptionJobDao.upsert(job.copy(
+            status = AudioTranscriptionJobStatus.SAVED, noteId = note.id,
+            transcriptText = note.content, errorMessage = null, updatedAt = now
+        ).toEntity())
+        markAudioTaskApplied(job.id)
+        return note
+    }
+
+    private suspend fun markAudioTaskApplied(jobId: String) {
+        val task = getPersistedAiTask(jobId) ?: return
+        require(task.type == "AUDIO_TRANSCRIPTION") { "录音任务身份不匹配。" }
+        savePersistedAiTask(task.copy(
+            status = "APPLIED", errorMessage = null, updatedAt = System.currentTimeMillis()
+        ))
+    }
+
+    override suspend fun normalizeInterruptedOperations() = normalizationLock.withLock {
+        if (normalized) return@withLock
+        database.withTransaction {
+            knowledgeEntryDao.getEntriesByIndexStatus(KnowledgeIndexStatus.INDEXING)
+                .filter { it.confirmedAt <= coldStartAt }.forEach {
+                    knowledgeEntryDao.updateIndexStatus(it.id, KnowledgeIndexStatus.FAILED)
+                }
+            val messages = chatMessageDao.getMessages().map { it.toModel() }
+            messages.filter { it.status == ChatMessageStatus.PENDING && it.updatedAt <= coldStartAt }.forEach {
+                chatMessageDao.upsert(it.copy(
+                    status = ChatMessageStatus.FAILED,
+                    errorMessage = "上次问答已中断，问题已保留，请点击重试。",
+                    errorCode = "CHAT_INTERRUPTED", progressStage = AiTaskStage.FAILED.name,
+                    updatedAt = System.currentTimeMillis()
+                ).toEntity())
+            }
+            // Older versions could die after writing the question but before writing any assistant state.
+            val messagesBySession = chatMessageDao.getMessages().map { it.toModel() }.groupBy { it.sessionId }
+            messages.filter { it.role == ChatRole.USER && it.updatedAt <= coldStartAt }.forEach { question ->
+                val sessionMessages = messagesBySession[question.sessionId].orEmpty()
+                val nextQuestionAt = sessionMessages.asSequence()
+                    .filter { it.role == ChatRole.USER && it.createdAt > question.createdAt }
+                    .minOfOrNull { it.createdAt }
+                val hasAnswerState = sessionMessages.any { answer ->
+                    answer.role == ChatRole.ASSISTANT && (
+                        answer.parentMessageId == question.id ||
+                            (answer.parentMessageId == null &&
+                                answer.status in setOf(ChatMessageStatus.DONE, ChatMessageStatus.FAILED) &&
+                                answer.createdAt >= question.createdAt &&
+                                (nextQuestionAt == null || answer.createdAt < nextQuestionAt))
+                        )
+                }
+                if (!hasAnswerState) {
+                    saveAssistantMessage(
+                        sessionId = question.sessionId, parentMessageId = question.id,
+                        content = "上次问答已中断。", status = ChatMessageStatus.FAILED,
+                        errorMessage = "问题已保留，请点击重试。", attempt = 1,
+                        progressStage = AiTaskStage.FAILED.name, errorCode = "CHAT_INTERRUPTED",
+                        citations = emptyList(), matchedResults = emptyList()
+                    )
+                }
+            }
+            audioTranscriptionJobDao.getJobs()
+                .filter { it.updatedAt <= coldStartAt && it.status in setOf(
+                    AudioTranscriptionJobStatus.UPLOADING, AudioTranscriptionJobStatus.TRANSCRIBING
+                ) }.forEach { job ->
+                    if (persistedAiTaskDao.getById(job.id) == null) {
+                        audioTranscriptionJobDao.upsert(job.copy(
+                            status = AudioTranscriptionJobStatus.FAILED,
+                            errorMessage = "上次转写已中断，音频已保留，请点击重试。",
+                            updatedAt = System.currentTimeMillis()
+                        ))
+                    }
+                }
+        }
+        // A crash after confirmation but before deleting the file leaves a retryable cleanup record.
+        audioTranscriptionJobDao.getJobs().mapNotNull { it.noteId }.distinct().forEach { noteId ->
+            val note = noteDao.getNote(noteId)
+            if (note?.status == NoteStatus.REVIEWED || note?.status == NoteStatus.DELETED) {
+                cleanupAudioForNote(noteId, System.currentTimeMillis())
+            }
+        }
+        normalized = true
     }
 
     override suspend fun updateAudioTranscriptionJobStatus(
@@ -1408,8 +1696,12 @@ class LocalNazhiRepository(
         retryIncrement: Int,
         lastTriedAt: Long?,
         updatedAt: Long
-    ) {
-        val existing = audioTranscriptionJobDao.getJob(id)?.toModel() ?: return
+    ) = database.withTransaction {
+        val existing = audioTranscriptionJobDao.getJob(id)?.toModel() ?: return@withTransaction
+        if (existing.status in setOf(
+            AudioTranscriptionJobStatus.SAVED, AudioTranscriptionJobStatus.AUDIO_CLEANED,
+            AudioTranscriptionJobStatus.READY_TO_SAVE
+        )) return@withTransaction
         audioTranscriptionJobDao.upsert(
             existing.copy(
                 status = status,
@@ -1426,8 +1718,10 @@ class LocalNazhiRepository(
         noteId: String,
         transcriptText: String,
         updatedAt: Long
-    ) {
-        val existing = audioTranscriptionJobDao.getJob(id)?.toModel() ?: return
+    ) = database.withTransaction {
+        val existing = audioTranscriptionJobDao.getJob(id)?.toModel() ?: return@withTransaction
+        if (existing.noteId != null) return@withTransaction
+        require(noteDao.getNote(noteId) != null) { "录音笔记尚未保存。" }
         audioTranscriptionJobDao.upsert(
             existing.copy(
                 status = AudioTranscriptionJobStatus.SAVED,
@@ -1437,20 +1731,25 @@ class LocalNazhiRepository(
                 updatedAt = updatedAt
             ).toEntity()
         )
+        markAudioTaskApplied(id)
     }
 
     private suspend fun cleanupAudioForNote(noteId: String, now: Long) {
         audioTranscriptionJobDao.getJobsForNote(noteId)
             .filter { job -> job.audioDeletedAt == null && job.filePath.isNotBlank() }
             .forEach { entity ->
-                runCatching { File(entity.filePath).delete() }
-                audioTranscriptionJobDao.upsert(
-                    entity.copy(
-                        status = AudioTranscriptionJobStatus.AUDIO_CLEANED,
-                        audioDeletedAt = now,
-                        updatedAt = now
-                    )
-                )
+                val file = File(entity.filePath)
+                val removed = runCatching { !file.exists() || file.delete() }.getOrDefault(false)
+                database.withTransaction {
+                    val latest = audioTranscriptionJobDao.getJob(entity.id) ?: return@withTransaction
+                    if (latest.audioDeletedAt != null || latest.filePath != entity.filePath) return@withTransaction
+                    audioTranscriptionJobDao.upsert(if (removed) latest.copy(
+                        status = AudioTranscriptionJobStatus.AUDIO_CLEANED, audioDeletedAt = now,
+                        errorMessage = null, updatedAt = now
+                    ) else latest.copy(
+                        errorMessage = "笔记已保存，音频文件清理失败，下次启动会再次尝试。", updatedAt = now
+                    ))
+                }
             }
     }
 
@@ -1480,7 +1779,7 @@ class LocalNazhiRepository(
         embeddingDao.upsert(record.toEntity())
     }
 
-    private suspend fun upsertRemoteEmbeddingForEntry(entry: KnowledgeEntry) {
+    private suspend fun upsertRemoteEmbeddingForEntry(entry: KnowledgeEntry): Boolean {
         val text = entry.toEmbeddingText()
         val response = backendClient.createEmbeddings(
             requestId = "entry-${entry.id}-${UUID.randomUUID()}",
@@ -1517,7 +1816,13 @@ class LocalNazhiRepository(
             createdAt = existing?.createdAt ?: now,
             updatedAt = now
         )
-        embeddingDao.upsert(record.toEntity())
+        return database.withTransaction {
+            val current = knowledgeEntryDao.getEntry(entry.id)?.toModel() ?: return@withTransaction false
+            if (current.toEmbeddingText() != text) return@withTransaction false
+            embeddingDao.upsert(record.toEntity())
+            knowledgeEntryDao.updateIndexStatus(entry.id, KnowledgeIndexStatus.INDEXED)
+            true
+        }
     }
 
     private suspend fun searchSimilarKnowledgeEntriesByVector(
@@ -1526,23 +1831,30 @@ class LocalNazhiRepository(
         topK: Int,
         requirePositiveScore: Boolean = true
     ): List<SemanticSearchResult> {
+        if (queryVector.isEmpty() || queryVector.any { !it.isFinite() } || queryVector.all { it == 0f }) {
+            return emptyList()
+        }
         return embeddingDao.getRecordsByOwnerType(
             ownerType = EmbeddingRecord.OWNER_KNOWLEDGE_ENTRY,
             model = model
         )
             .mapNotNull { record ->
+                val vector = LocalEmbeddingEngine.decodeCompatibleVector(
+                    blob = record.vectorBlob,
+                    dimensions = record.dimensions,
+                    queryDimensions = queryVector.size
+                ) ?: return@mapNotNull null
                 val entry = knowledgeEntryDao.getEntry(record.ownerId)?.toModel()
                 if (entry == null || entry.indexStatus != KnowledgeIndexStatus.INDEXED) {
                     null
                 } else {
-                    val vector = LocalEmbeddingEngine.fromBlob(record.vectorBlob)
                     SemanticSearchResult(
                         entry = entry,
                         score = LocalEmbeddingEngine.dot(queryVector, vector)
                     )
                 }
             }
-            .filter { !requirePositiveScore || it.score > 0f }
+            .filter { it.score.isFinite() && (!requirePositiveScore || it.score > 0f) }
             .sortedByDescending { it.score }
             .take(topK)
     }
@@ -1629,10 +1941,15 @@ class LocalNazhiRepository(
         errorCode: String?,
         citations: List<com.nazhi.app.core.network.KnowledgeChatCitation>,
         matchedResults: List<SemanticSearchResult>
-    ): ChatMessage {
+    ): ChatMessage = database.withTransaction {
+        val stableId = "chat-assistant-$parentMessageId-$attempt"
+        val existing = chatMessageDao.getMessage(stableId)?.toModel()
+        if (existing?.status == ChatMessageStatus.DONE && status != ChatMessageStatus.DONE) {
+            return@withTransaction existing
+        }
         val now = System.currentTimeMillis()
         val message = ChatMessage(
-            id = "chat-assistant-${UUID.randomUUID()}",
+            id = stableId,
             sessionId = sessionId,
             parentMessageId = parentMessageId,
             role = ChatRole.ASSISTANT,
@@ -1642,30 +1959,31 @@ class LocalNazhiRepository(
             attempt = attempt,
             progressStage = progressStage,
             errorCode = errorCode,
-            createdAt = now,
+            createdAt = existing?.createdAt ?: now,
             updatedAt = now
         )
         chatMessageDao.upsert(message.toEntity())
         updateChatSessionOverview(sessionId, updatedAt = now)
 
         val resultById = matchedResults.associateBy { it.entry.id }
-        val citationEntities = citations.mapNotNull { citation ->
-            val result = resultById[citation.contextId] ?: return@mapNotNull null
+        val citationEntities = citations.mapIndexedNotNull { index, citation ->
+            val result = resultById[citation.contextId] ?: return@mapIndexedNotNull null
             ChatCitation(
-                id = "chat-citation-${UUID.randomUUID()}",
+                id = "chat-citation-$stableId-$index",
                 messageId = message.id,
                 knowledgeEntryId = result.entry.id,
                 sourceNoteIds = result.entry.sourceNoteIds,
-                quote = citation.quote.ifBlank { result.entry.summary.ifBlank { result.entry.content.take(80) } },
+                quote = citation.quote,
                 reason = citation.reason,
                 score = result.score,
                 createdAt = now
             ).toEntity()
         }
+        chatCitationDao.deleteForMessage(message.id)
         if (citationEntities.isNotEmpty()) {
             chatCitationDao.upsertAll(citationEntities)
         }
-        return message
+        message
     }
 
     private suspend fun updateChatSessionMemoryIfUseful(

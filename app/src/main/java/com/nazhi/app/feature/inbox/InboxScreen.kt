@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.nazhi.app.AudioTranscriptionService
+import com.nazhi.app.AudioTranscriptionActivity
 import com.nazhi.app.core.farm.DailyFarmRuleEngine
 import com.nazhi.app.core.knowledge.KnowledgeIngestionCoordinator
 import com.nazhi.app.core.knowledge.KnowledgeIngestionState
@@ -157,6 +158,10 @@ fun DateNotesRoute(
     val audioJobs by remember(repository, dateId) {
         repository.observeAudioTranscriptionJobsForDate(dateId)
     }.collectAsState(initial = emptyList())
+    val persistedTasks by remember(repository, dateId) {
+        repository.observePersistedAiTasksForDate(dateId)
+    }.collectAsState(initial = emptyList())
+    val organizeTask = persistedTasks.firstOrNull { it.type == "ORGANIZE_NOTES" }
     val dayKnowledgeStatus by remember(repository, dateId) {
         repository.observeDayKnowledgeStatus(dateId)
     }.collectAsState(initial = DayKnowledgeStatus(dateId, 0, 0, 0, 0, 0, 0, 0, 0))
@@ -219,6 +224,13 @@ fun DateNotesRoute(
         knowledgeIngestionState.isRunning &&
             isCurrentDateTask &&
             knowledgeIngestionState.progress == null -> knowledgeIngestionState.message
+        organizeTask?.status in setOf("CREATED", "RUNNING") -> "正在查询此前提交的整理任务，原始笔记已保留。"
+        organizeTask?.status in setOf("WAITING", "FAILED", "INTERRUPTED") -> organizeTask?.errorMessage
+        else -> null
+    }
+    val organizeRecoveryActionLabel = when {
+        organizeTask?.status in setOf("CREATED", "RUNNING", "WAITING") -> "继续查询整理结果"
+        pendingReviewNotes.isNotEmpty() && organizeTask?.status in setOf("FAILED", "INTERRUPTED") -> "重试 AI 整理"
         else -> null
     }
     LaunchedEffect(knowledgeIngestionState.eventId) {
@@ -299,6 +311,7 @@ fun DateNotesRoute(
         isKnowledgeTaskRunning = isKnowledgeTaskRunning,
         aiOrganizeProgress = aiOrganizeProgress,
         aiOrganizeMessage = aiOrganizeMessage,
+        organizeRecoveryActionLabel = organizeRecoveryActionLabel,
         snackbarHostState = snackbarHostState,
         onInputChange = {
             input = it
@@ -529,7 +542,8 @@ fun InboxScreen(
     onRetryIndex: () -> Unit,
     onOpenHistoricalPending: () -> Unit,
     onOpenKnowledge: () -> Unit,
-    onNavigateBack: (() -> Unit)?
+    onNavigateBack: (() -> Unit)?,
+    organizeRecoveryActionLabel: String? = null
 ) {
     var selectedPanel by remember { mutableStateOf<TodayPanel?>(null) }
     var panelScrollRequest by remember { mutableStateOf(0) }
@@ -651,6 +665,7 @@ fun InboxScreen(
                     isKnowledgeTaskRunning = isKnowledgeTaskRunning,
                     progress = aiOrganizeProgress,
                     statusMessage = aiOrganizeMessage,
+                    recoveryActionLabel = organizeRecoveryActionLabel,
                     hasDuplicateDrafts = hasDuplicateDrafts,
                     hasReviewRequiredDrafts = hasReviewRequiredDrafts,
                     onAddContent = { openPanel(TodayPanel.CAPTURED) },
@@ -669,6 +684,13 @@ fun InboxScreen(
                         pendingCount = historyPendingCount,
                         onOpen = onOpenHistoricalPending
                     )
+                }
+            }
+
+            val previewAudioJobs = audioJobs.filter { it.status == AudioTranscriptionJobStatus.READY_TO_SAVE }
+            if (previewAudioJobs.isNotEmpty()) {
+                item {
+                    AudioTranscriptionJobsCard(jobs = previewAudioJobs, onRetry = onRetryAudioJobs)
                 }
             }
 
@@ -1286,7 +1308,8 @@ private fun TodayPrimaryActionCard(
     onOpenDrafts: () -> Unit,
     onSubmitDrafts: () -> Unit,
     onOpenIssues: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    recoveryActionLabel: String? = null
 ) {
     val periodLabel = if (isToday) "今日" else "这一天"
     val completeLabel = "$periodLabel 已完成"
@@ -1294,6 +1317,7 @@ private fun TodayPrimaryActionCard(
     val label = when {
         isAiOrganizing -> "AI 整理中"
         isKnowledgeTaskRunning -> "知识处理中"
+        recoveryActionLabel != null -> recoveryActionLabel
         hasIssue -> "处理异常"
         pendingDraftCount > 0 && (hasDuplicateDrafts || hasReviewRequiredDrafts) -> "查看待确认"
         pendingDraftCount > 0 -> "确认沉淀"
@@ -1333,6 +1357,7 @@ private fun TodayPrimaryActionCard(
         primaryActionEnabled = enabled,
         onPrimaryAction = {
             when {
+                recoveryActionLabel != null -> onOrganize()
                 hasIssue -> onOpenIssues()
                 pendingDraftCount > 0 && (hasDuplicateDrafts || hasReviewRequiredDrafts) -> onOpenDrafts()
                 pendingDraftCount > 0 -> onSubmitDrafts()
@@ -1631,7 +1656,9 @@ private fun AudioTranscriptionJobsCard(
     jobs: List<AudioTranscriptionJob>,
     onRetry: () -> Unit
 ) {
+    val context = LocalContext.current
     val retryableCount = jobs.count { it.canRetry }
+    val previewCount = jobs.count { it.status == AudioTranscriptionJobStatus.READY_TO_SAVE }
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -1643,16 +1670,16 @@ private fun AudioTranscriptionJobsCard(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text(
-                text = "待转写音频",
+                text = if (previewCount > 0) "待确认转写" else "待转写音频",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "$retryableCount 条可重试 · 处理失败音频已暂存",
+                text = if (previewCount > 0) "$previewCount 条转写完成，预览确认后保存" else "$retryableCount 条可重试 · 处理失败音频已暂存",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onErrorContainer
             )
-            jobs.take(3).forEach { job ->
+            (if (previewCount > 0) jobs else jobs.take(3)).forEach { job ->
                 Text(
                     text = job.audioJobLine(),
                     style = MaterialTheme.typography.bodySmall,
@@ -1660,8 +1687,14 @@ private fun AudioTranscriptionJobsCard(
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
+                if (job.status == AudioTranscriptionJobStatus.READY_TO_SAVE) {
+                    OutlinedButton(onClick = {
+                        context.startActivity(Intent(context, AudioTranscriptionActivity::class.java)
+                            .putExtra(AudioTranscriptionActivity.EXTRA_JOB_ID, job.id))
+                    }, modifier = Modifier.fillMaxWidth()) { Text("预览并确认") }
+                }
             }
-            Button(
+            if (retryableCount > 0) Button(
                 onClick = onRetry,
                 enabled = retryableCount > 0,
                 modifier = Modifier.fillMaxWidth()
@@ -2120,7 +2153,8 @@ private fun AudioTranscriptionJob.shouldShowInInbox(): Boolean {
     return status == AudioTranscriptionJobStatus.PENDING ||
         status == AudioTranscriptionJobStatus.UPLOADING ||
         status == AudioTranscriptionJobStatus.TRANSCRIBING ||
-        status == AudioTranscriptionJobStatus.FAILED
+        status == AudioTranscriptionJobStatus.FAILED ||
+        status == AudioTranscriptionJobStatus.READY_TO_SAVE
 }
 
 private fun AudioTranscriptionJob.audioJobLine(): String {
@@ -2139,6 +2173,7 @@ private fun AudioTranscriptionJobStatus.label(): String {
         AudioTranscriptionJobStatus.UPLOADING -> "上传中"
         AudioTranscriptionJobStatus.TRANSCRIBING -> "转写中"
         AudioTranscriptionJobStatus.FAILED -> "处理失败"
+        AudioTranscriptionJobStatus.READY_TO_SAVE -> "待确认"
         AudioTranscriptionJobStatus.SAVED -> "已沉淀"
         AudioTranscriptionJobStatus.AUDIO_CLEANED -> "原音频已清理"
     }
